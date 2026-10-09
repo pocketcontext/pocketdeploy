@@ -26,3 +26,17 @@ def test_dag_never_surfaces_arbitrary_exception_contents():
     with pytest.raises(DeployError) as e:
         asyncio.run(cli.converge({},None,None,Host(),'operation'))
     assert 'sentinel' not in str(e.value)
+
+
+def test_vault_preflight_prevents_cloud_mutation_on_backup_failure(monkeypatch):
+    calls=[]
+    class Host:
+        def prepare_keys(self): calls.append('keys');return 'public'
+        def cloud_init(self): return 'private host key'
+    class Cloud:
+        def converge(self,*args):calls.append('cloud')
+    def fail(*args):raise DeployError('Vault unavailable')
+    monkeypatch.setattr(cli.vault,'save',fail)
+    with pytest.raises(DeployError,match='Vault unavailable'):
+        asyncio.run(cli.converge({'vault-save-after-run':True,'_root':'/synthetic'},None,Cloud(),Host(),'op'))
+    assert calls == ['keys']

@@ -126,7 +126,7 @@ def matching(app, current, previous):
     if not previous or previous['desired'] != target or not current or not current['running'] or current.get('restart') != 'always':
         return False
     actual = current['settings']
-    return (actual.get('env', {}) == target['env'] and actual.get('disableTLS', False) == target['disable_tls']
+    return ((actual.get('env') or {}) == target['env'] and actual.get('disableTLS', False) == target['disable_tls']
             and actual.get('autoUpdate') is False and actual.get('backup', {}).get('autoBackup', False) is False
             and actual.get('resources', {}).get('cpus', 0) == target['cpus']
             and actual.get('resources', {}).get('memoryMB', 0) == target['memory']
@@ -192,7 +192,9 @@ def reconcile(request):
             probe = by_host.get(host, {'host': host, **record.get('desired', {})})
             pending = BASE / (hashlib.sha256(host.encode()).hexdigest() + '.pending')
             summary = {'host': host, 'running': bool(actual and actual['running']),
-                       'managed': host in manifest['apps'], 'pending': pending.exists()}
+                       'managed': host in manifest['apps'], 'pending': pending.exists(),
+                       'container_id': actual['id'] if actual else None,
+                       'image_id': actual['image_id'] if actual else None}
             summary.update(health(probe) if actual and actual['running'] else {'healthy': False, 'http_status': None})
             summaries.append(summary)
         return {'applications': summaries, 'pending_operations': len(list(BASE.glob('*.pending')))}

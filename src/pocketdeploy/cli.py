@@ -42,6 +42,8 @@ async def converge(config, state, cloud, host, operation):
         public = host.prepare_keys()
         config['_cloud_init'] = host.cloud_init()
         results['public_key'] = public
+        if config.get('vault-save-after-run'):
+            vault.save(config, state, config['_root'])
         return dict(opts)
 
     def compute(opts):
@@ -83,6 +85,10 @@ async def converge(config, state, cloud, host, operation):
 
 def execute(args):
     os.umask(0o077)
+    if args.dry_run and args.command not in ('create', 'converge', 'delete', 'plan'):
+        raise DeployError('--dry-run is supported only for plan/create/converge/delete.')
+    if args.overwrite and args.command != 'vault-restore':
+        raise DeployError('--overwrite is supported only for vault-restore.')
     read_only = args.command in ('plan', 'status', 'describe') or args.dry_run
     config = load(args.file, resolve=args.command not in ('ssh', 'delete', 'vault-save', 'vault-restore', 'status', 'describe'))
     # Reject unsupported application behavior before any cloud mutation.
@@ -113,7 +119,7 @@ def execute(args):
                     return result
                 actions = cloud.plan()
                 if args.command == 'delete':
-                    actions = [{'resource': r['name'], 'action': 'delete' if r['owned'] else 'retain'} for r in state.resources()] if state else []
+                    actions = [{'resource': r['name'], 'action': 'retain' if not r['owned'] or r['attributes'].get('lifecycle') == 'retained-for-recovery' or (r['name'] == 'boot-volume' and config.get('compute-retain-boot-volume', True)) else 'delete'} for r in state.resources()] if state else []
                     return {'profile': config['profile'], 'protected': config['compute-prevent-destroy'], 'actions': actions,
                             'retain_boot_volume': config.get('compute-retain-boot-volume', True)}
                 app_actions = host.plan(cloud.connection()) if state and state.get_resource('compute') else [{'host': a['host'], 'action': 'create'} for a in config.get('once', {}).get('applications', [])]

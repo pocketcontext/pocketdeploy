@@ -224,3 +224,55 @@ def test_json_null_list_still_rejected(adapter, monkeypatch):
     monkeypatch.setattr('pocketdeploy.oci.run', lambda *a, **kw: '{"data":null}')
     with pytest.raises(DeployError, match='invalid resource list'):
         adapter._list('network', 'nsg', 'rules', 'list', '--all')
+
+
+def test_retained_boot_volume_survives_delete_and_recreate(adapter, monkeypatch):
+    adapter.config['compute-prevent-destroy'] = False
+    adapter.config['compute-retain-boot-volume'] = True
+    adapter._remember('compute', resource(adapter))
+    cloud = {'instances': [resource(adapter)], 'volume': {'id': 'original-boot', 'size-in-gbs': 50, 'vpus-per-gb': 10}}
+    def call(*args, **kwargs):
+        if args[:3] == ('compute', 'instance', 'list'):
+            return cloud['instances']
+        if args[:3] == ('network', 'nsg', 'list'):
+            return []
+        if args[:3] == ('compute', 'instance', 'terminate'):
+            assert args[args.index('--preserve-boot-volume') + 1] == 'true'
+            cloud['instances'] = []
+            return None
+        pytest.fail('Unexpected OCI command')
+    monkeypatch.setattr(adapter, '_call', call)
+    monkeypatch.setattr(adapter, '_read_boot_volume', lambda item: cloud['volume'])
+    operation = adapter.state.begin_operation('delete', 'hash')
+    adapter.delete(operation)
+    retained = adapter.state.get_resource('retained-boot-volume:original-boot')
+    assert retained['attributes']['lifecycle'] == 'retained-for-recovery'
+    assert adapter.state.get_resource('boot-volume') is None
+    # Simulate the next create binding a new instance and its new boot volume.
+    cloud['instances'] = [resource(adapter, id='new-instance')]
+    cloud['volume'] = {'id': 'new-boot', 'size-in-gbs': 50, 'vpus-per-gb': 10}
+    adapter._remember('compute', cloud['instances'][0])
+    adapter._boot_volume(cloud['instances'][0])
+    assert adapter.state.get_resource('boot-volume')['provider_id'] == 'new-boot'
+    assert adapter.state.get_resource('retained-boot-volume:original-boot')['provider_id'] == 'original-boot'
+
+
+def test_legacy_retained_binding_archived_before_replacement(adapter, monkeypatch):
+    adapter.state.put_resource('boot-volume', 'oci-boot-volume', 'old-boot', {'instance_id': 'old-instance'})
+    monkeypatch.setattr(adapter, '_read_boot_volume', lambda item: {'id': 'new-boot', 'size-in-gbs': 50, 'vpus-per-gb': 10})
+    adapter._boot_volume(resource(adapter))
+    assert adapter.state.get_resource('retained-boot-volume:old-boot')['attributes']['lifecycle'] == 'retained-for-recovery'
+    assert adapter.state.get_resource('boot-volume')['provider_id'] == 'new-boot'
+
+
+def test_interrupted_retaining_delete_archives_disk(adapter, monkeypatch):
+    adapter.config['compute-prevent-destroy'] = False
+    adapter._remember('compute', resource(adapter))
+    adapter.state.put_resource('boot-volume', 'oci-boot-volume', 'retained-boot', {'instance_id': 'compute-id'})
+    operation = adapter.state.begin_operation('delete', 'hash')
+    step = adapter.state.intent(operation, 'delete-compute', {})
+    adapter.state.set_meta('oci-delete-compute', {'step': step, 'id': 'compute-id', 'retain_boot': True})
+    monkeypatch.setattr(adapter, '_call', lambda *a, **kw: [])
+    adapter.delete(operation)
+    assert adapter.state.get_resource('boot-volume') is None
+    assert adapter.state.get_resource('retained-boot-volume:retained-boot')['provider_id'] == 'retained-boot'

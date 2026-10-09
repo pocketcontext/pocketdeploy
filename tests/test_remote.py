@@ -165,6 +165,13 @@ def test_status_needs_no_resolved_secrets_and_reports_pending(tmp_path, monkeypa
     assert 'actions' not in result
     assert result['pending_operations'] == 1
     assert result['applications'][0] == {'host': app()['host'], 'running': True, 'managed': True,
-                                        'pending': True, 'healthy': True, 'http_status': 200}
+                                        'pending': True, 'healthy': True, 'http_status': 200,
+                                        'container_id': 'old', 'image_id': 'image-id'}
     image.assert_not_called()
     run.assert_not_called()
+
+
+def test_once_nil_env_serialization_matches_empty_desired_env():
+    desired = app(); desired['resolved-env'] = {}
+    actual = current(); actual['settings']['env'] = None
+    assert remote.matching(desired, actual, {'desired': remote.normalized(desired), 'image_id': 'image-id'})

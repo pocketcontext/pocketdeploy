@@ -39,6 +39,11 @@ class Host:
                 public.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                 public.write_text(generated.read_text())
                 os.chmod(public, 0o600)
+        # Include a safe empty trust file in the pre-provision recovery set.
+        self.known.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if not self.known.exists():
+            fd = os.open(self.known, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.close(fd)
         return self.pub.read_text().strip()
 
     def cloud_init(self):

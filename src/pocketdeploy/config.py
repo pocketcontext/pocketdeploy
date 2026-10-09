@@ -25,7 +25,7 @@ ROOT_KEYS = set(DEFAULTS) | {
     'oci-subnet-id', 'oci-availability-domain', 'oci-image-id', 'ssh-user',
     'ssh-private-key-file', 'ssh-public-key-file', 'ssh-known-hosts-file',
     'vault-id', 'vault-state-document-id', 'vault-command',
-    'compute-retain-boot-volume', 'once', 'ssh-connect-timeout',
+    'compute-retain-boot-volume', 'once',
     'ssh-host-private-key-file', 'ssh-host-public-key-file',
 }
 
@@ -46,13 +46,16 @@ def load(path, *, env=None, resolve=True):
         raise DeployError('Configuration must be a mapping.')
     if set(raw) - ROOT_KEYS:
         raise DeployError('Unsupported configuration field; see the configuration reference.')
-    config = read_pars({**DEFAULTS, **raw}, os.environ if env is None else env)
+    overlaid = read_pars({**DEFAULTS, **raw}, os.environ if env is None else env)
+    # Do not copy unrelated operator credentials into this deployment's state.
+    config = {key: value for key, value in overlaid.items() if key in ROOT_KEYS}
     config['_root'] = str(path.parent)
     config['_file'] = str(path)
     validate(config)
-    config['_desired_hash'] = hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest()
     if resolve:
         resolve_env(config, os.environ if env is None else env)
+    config['_desired_hash'] = hashlib.sha256(json.dumps(
+        {k: v for k, v in config.items() if not k.startswith('_')}, sort_keys=True).encode()).hexdigest()
     return config
 
 

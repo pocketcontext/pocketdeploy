@@ -199,8 +199,23 @@ class OCI:
             raise DeployError('OCI returned invalid boot volume details.')
         return volume
 
+    def _retain_boot_volume(self):
+        previous = self.state.get_resource('boot-volume')
+        if previous is None:
+            return
+        attributes = {**previous['attributes'], 'lifecycle': 'retained-for-recovery'}
+        # Copy before removing the active binding. A crash may leave duplicate
+        # bindings, but can never discard the retained provider identity.
+        self.state.put_resource('retained-boot-volume:' + previous['provider_id'],
+                                previous['kind'], previous['provider_id'],
+                                attributes, owned=previous['owned'])
+        self.state.remove_resource('boot-volume')
+
     def _boot_volume(self, instance):
         volume = self._read_boot_volume(instance)
+        previous = self.state.get_resource('boot-volume')
+        if previous and previous['provider_id'] != volume['id']:
+            self._retain_boot_volume()
         self.state.put_resource('boot-volume', 'oci-boot-volume', volume['id'],
             {'instance_id': instance['id'], 'size_gib': volume.get('size-in-gbs'),
              'vpus_per_gb': volume.get('vpus-per-gb')}, owned=True)
@@ -285,11 +300,14 @@ class OCI:
             item = self._find(role, allow_missing=bool(pending))
             if not item:
                 if pending:
+                    if role == 'compute':
+                        if pending.get('retain_boot', True):
+                            self._retain_boot_volume()
+                        else:
+                            self.state.remove_resource('boot-volume')
                     self.state.remove_resource(role)
                     self.state.complete(pending['step'], {'deleted': True, 'recovered': True})
                     self.state.set_meta('oci-delete-' + role, None)
-                    if role == 'compute' and not pending.get('retain_boot', True):
-                        self.state.remove_resource('boot-volume')
                 continue
             recorded = self.state.get_resource(role)
             if not recorded or not recorded.get('owned') or recorded['provider_id'] != item['id']:
@@ -298,16 +316,19 @@ class OCI:
             retain_boot = pending.get('retain_boot', True) if pending else self.config.get('compute-retain-boot-volume', True)
             self.state.set_meta('oci-delete-' + role, {'step': step, 'id': item['id'], 'retain_boot': retain_boot})
             if role == 'compute':
-                if item.get('lifecycle-state') == 'RUNNING':
+                if item.get('lifecycle-state') != 'TERMINATING':
                     self._boot_volume(item)
                 self._call('compute', 'instance', 'terminate', '--instance-id', item['id'], '--force', '--preserve-boot-volume', str(retain_boot).lower(), '--wait-for-state', 'SUCCEEDED', timeout=1500)
             else:
                 self._call('network', 'nsg', 'delete', '--nsg-id', item['id'], '--force')
+            if role == 'compute':
+                if retain_boot:
+                    self._retain_boot_volume()
+                else:
+                    self.state.remove_resource('boot-volume')
             self.state.remove_resource(role)
             self.state.complete(step, {'deleted': True})
             self.state.set_meta('oci-delete-' + role, None)
-            if role == 'compute' and not retain_boot:
-                self.state.remove_resource('boot-volume')
         return {'deleted': True}
 
     def adopt(self, instance_id, operation_id):

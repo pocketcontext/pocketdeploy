@@ -45,3 +45,11 @@ def test_symlink_private_path_rejected(tmp_path):
     p=tmp_path/'colors.yml';p.write_text(BASE+'\nssh-private-key-file: .ssh/key\n')
     with pytest.raises(DeployError,match='Symlink'):
         load(p,env={})
+
+
+def test_only_declared_bindings_are_captured_and_env_changes_have_new_identity(tmp_path):
+    p = tmp_path / 'colors.yml'; p.write_text(BASE)
+    a = load(p, env={'COLORS_PAR_APP_TEST_TOKEN': 'first', 'COLORS_PAR_UNRELATED_TOKEN': 'unrelated'})
+    b = load(p, env={'COLORS_PAR_APP_TEST_TOKEN': 'second'})
+    assert 'unrelated-token' not in a
+    assert a['_desired_hash'] != b['_desired_hash']

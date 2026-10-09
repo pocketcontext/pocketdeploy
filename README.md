@@ -20,15 +20,15 @@ pocketdeploy --help
 ```
 
 `devenv.nix` provides Python 3.12, uv, OCI CLI, OpenSSH, Git, GitHub CLI, curl,
-jq and SQLite. `devenv.lock` and `uv.lock` pin the development environment and
+jq, SQLite and a pinned VaultContext CLI wrapper. `devenv.lock` and `uv.lock` pin the development environment and
 Python dependencies. Blue is pinned to a tested Git commit. `direnv allow` is
 optional; `.envrc` loads devenv and an optional ignored `.envrc.private`.
 Nothing automatically sources private files during deployment or restoration.
 
 The checkout launcher `./pocketdeploy` also runs through uv. Installed packages
-provide the `pocketdeploy` command from any working directory. Vault workflows
-require the separately installed `vaultcontext` CLI (or `vault-command` path),
-an authenticated account and an interactive user-unlocked session.
+provide the `pocketdeploy` command from any working directory. Vault workflows require
+an authenticated account and an interactive user-unlocked session. Outside
+devenv, install `vaultcontext` separately or set its `vault-command` path.
 
 Create a private deployment directory and copy `colors.yml` into it. Replace the
 placeholder OCI identifiers with your existing compartment, public subnet and
@@ -193,8 +193,9 @@ bindings file if the deployment needs none. File versions upload first; the
 consistent SQLite snapshot uploads last and references the exact versions.
 The snapshot does not need to contain its own newly assigned Vault version ID.
 Vault's file limit is 8 MiB. A backup failure is reported distinctly even when
-deployment succeeded. Failed workflows attempt a backup when configured; early
-failures may precede creation of the complete recovery files.
+deployment succeeded. Configured convergence saves the prepared keys and state before cloud mutation,
+then saves again at completion. Failed workflows also attempt a recovery snapshot;
+failures before key preparation may precede a complete recovery set.
 
 Restore stages and validates all files before publishing them, with the database
 last. Existing destinations require `--overwrite`. A filesystem interruption
