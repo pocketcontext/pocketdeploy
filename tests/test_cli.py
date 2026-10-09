@@ -352,3 +352,36 @@ def test_dag_preserves_failure_code_stage_and_progress(monkeypatch, capsys):
     assert output.out == ''
     assert 'keys' in output.err and 'compute' in output.err
     assert 'synthetic-private' not in output.err
+
+
+@pytest.mark.parametrize('argv', [[], ['--help'], ['--help', '--json']])
+def test_help_is_stdout_success_without_deployment_access(tmp_path, monkeypatch, capsys, argv):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, 'load', lambda *a, **kw: pytest.fail('Help read configuration'))
+    monkeypatch.setattr(cli, 'execute', lambda *a, **kw: pytest.fail('Help executed a workflow'))
+    monkeypatch.setattr(cli.sys, 'argv', ['pocketdeploy', *argv])
+    if argv:
+        with pytest.raises(SystemExit) as exit:
+            cli.main()
+        assert exit.value.code == 0
+    else:
+        assert cli.main() == 0
+    output = capsys.readouterr()
+    assert not output.err
+    assert 'usage:' in output.out
+    assert 'vault-restore' in output.out and 'converge' in output.out
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize('argv', [['unknown'], ['--json']])
+def test_missing_or_invalid_command_still_fails(monkeypatch, capsys, argv):
+    import json
+    assert run_main(monkeypatch, argv, lambda *a: pytest.fail('execute called')) == 2
+    output = capsys.readouterr()
+    if '--json' in argv:
+        assert not output.err
+        result = json.loads(output.out)
+        assert result['ok'] is False and result['command'] is None
+        assert result['error']['code'] == 'invalid_usage'
+    else:
+        assert not output.out and 'Invalid command arguments' in output.err

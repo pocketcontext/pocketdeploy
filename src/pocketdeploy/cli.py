@@ -31,12 +31,39 @@ class ArgumentParser(argparse.ArgumentParser):
 
 
 def parser():
-    p = ArgumentParser(prog='pocketdeploy', description=__doc__, allow_abbrev=False)
-    p.add_argument('command', choices=['init', 'plan', 'create', 'converge', 'status', 'describe', 'ssh', 'delete', 'adopt', 'vault-save', 'vault-restore'])
+    p = ArgumentParser(
+        prog='pocketdeploy', description='Deploy and operate an OCI VPS from colors.yml.',
+        allow_abbrev=False, formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''Deployment commands:
+  init           Prepare local state and SSH keys; no cloud or Vault calls
+  plan           Read live resources and report proposed changes
+  create         Provision and converge the deployment
+  converge       Reconcile the deployment with desired configuration
+  status         Show observed resources, application health and backup receipt
+  describe       Alias for status
+  ssh            Open SSH or run --ssh-command; preserve remote output and exit
+  delete         Delete owned resources, subject to destruction protection
+  adopt          Recover an existing instance with matching deployment UUID tags
+
+Vault commands (explicit checkpoints):
+  vault-save     Save configuration, private bindings, keys and SQLite to Vault
+  vault-restore  Restore a selected document/version; never deploys
+
+Examples:
+  pocketdeploy plan
+  pocketdeploy converge
+  pocketdeploy status --json --quiet
+  pocketdeploy delete --dry-run
+  pocketdeploy init
+  pocketdeploy vault-save
+
+Configuration defaults to the nearest colors.yml in this directory or a parent.
+Use -f to select a deployment. Run without arguments to show this help.''')
+    p.add_argument('command', metavar='COMMAND', choices=['init', 'plan', 'create', 'converge', 'status', 'describe', 'ssh', 'delete', 'adopt', 'vault-save', 'vault-restore'], help='Deployment or Vault command listed below')
     p.add_argument('-f', '--file', help='Configuration file (default: nearest colors.yml in the current directory or its parents)')
     p.add_argument('--json', action='store_true', help='Emit one versioned JSON result on stdout')
     p.add_argument('--quiet', action='store_true', help='Suppress progress on stderr')
-    p.add_argument('--dry-run', action='store_true')
+    p.add_argument('--dry-run', action='store_true', help='Plan create/converge/delete without applying changes')
     p.add_argument('--instance-id', help='Exact tagged OCI instance identity for explicit recovery/adoption')
     p.add_argument('--document', help='Vault state document to restore')
     p.add_argument('--version', help='Exact Vault state version to restore')
@@ -213,6 +240,9 @@ def execute(args, reporter=None):
 
 def main():
     argv = sys.argv[1:]
+    if not argv:
+        parser().print_help()
+        return 0
     reporter = Reporter(json_mode='--json' in argv, quiet='--quiet' in argv, command=None)
     started = time.monotonic()
     try:
