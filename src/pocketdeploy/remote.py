@@ -26,8 +26,8 @@ CHECKSUMS = {
 }
 
 
-def run(*args):
-    result = subprocess.run(args, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+def run(*args, timeout=None):
+    result = subprocess.run(args, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout,
                             env={'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
                                  'HOME': '/root', 'DEBIAN_FRONTEND': 'noninteractive', 'ONCE_NO_SELF_UPDATE': '1'})
     if result.returncode:
@@ -203,6 +203,8 @@ def reconcile(request):
     manifest = json.loads(MANIFEST.read_text()) if MANIFEST.exists() else {'deployment_id': deployment, 'apps': {}}
     if manifest['deployment_id'] != deployment:
         raise RuntimeError('host belongs to another deployment')
+    if request['action'] != 'status' and (BASE / 'retirement.json').exists():
+        raise RuntimeError('host is retired; convergence is disabled')
     apps = request['applications']
     desired_hosts = {app['host'] for app in apps}
     current = containers()
@@ -300,7 +302,118 @@ def reconcile(request):
     return {'actions': actions, 'applications': [{'host': h, 'running': c['running'], **probes.get(h, {})} for h, c in current.items()]}
 
 
+def retire(request, mutate=False):
+    """Retirement is permanent on this host; retries only finish clean stops."""
+    deployment = request['deployment_id']
+    manifest = json.loads(MANIFEST.read_text()) if MANIFEST.exists() else {'deployment_id': deployment, 'apps': {}}
+    if manifest.get('deployment_id') != deployment:
+        raise RuntimeError('host belongs to another deployment')
+    retirement = BASE / 'retirement.json'
+    record = json.loads(retirement.read_text()) if retirement.exists() else None
+    if record and record.get('deployment_id') != deployment:
+        raise RuntimeError('host belongs to another deployment')
+    apps = manifest['apps']
+    if apps and not shutil.which('docker'):
+        raise RuntimeError('host retirement ownership verification failed')
+    current = containers()
+    if set(current) - set(apps):
+        raise RuntimeError('unmanaged application requires explicit adoption')
+    # Existing pending convergence is not safe to reinterpret as retirement.
+    for pending in BASE.glob('*.pending'):
+        entry = json.loads(pending.read_text())
+        if not record or entry.get('action') != 'retire' or entry.get('deployment_id') != deployment:
+            raise RuntimeError('unfinished deployment; operator recovery required')
+    actions = []
+    for host, app in sorted(apps.items()):
+        actual = current.get(host)
+        if record and ((actual and actual['id'] != record['containers'].get(host))
+                       or (not actual and host in record['containers'])):
+            raise RuntimeError('host retirement ownership verification failed')
+        timeout = app.get('desired', {}).get('timeout', 300)
+        if type(timeout) is not int or not 1 <= timeout <= 3600:
+            raise RuntimeError('host retirement ownership verification failed')
+        if actual and (actual['binds'] or actual['image_id'] != app['image_id']
+                       or actual['settings'].get('autoUpdate') is not False):
+            raise RuntimeError('host retirement ownership verification failed')
+        if actual and not actual['running'] and (actual['exit_code'] != 0 or actual['oom']):
+            raise RuntimeError('application did not stop cleanly')
+        actions.append({'host': host, 'action': 'stop-retain-data', 'timeout': timeout})
+    account = pwd.getpwnam(request.get('user', 'ubuntu'))
+    authorized = Path(account.pw_dir) / '.ssh' / 'authorized_keys'
+    if authorized.is_symlink() or (authorized.exists() and authorized.stat().st_nlink != 1):
+        raise RuntimeError('host retirement ownership verification failed')
+    lines = authorized.read_text().splitlines() if authorized.exists() else []
+    directory = BASE / 'github'
+    retired_directory = BASE / 'retired-github'
+    if directory.exists() and retired_directory.exists():
+        raise RuntimeError('host retirement ownership verification failed')
+    authority_directory = retired_directory if retired_directory.exists() else directory
+    # Establish key ownership from private host-side configuration, including
+    # repositories no longer present in the desired configuration.
+    tokens = set()
+    for config in authority_directory.glob('*.json'):
+        data = json.loads(config.read_text())
+        if data.get('deployment_id') != deployment or not re.fullmatch('[0-9a-f]{20}', config.stem):
+            raise RuntimeError('host retirement ownership verification failed')
+        tokens.add(config.stem)
+    markers = {'pocketdeploy-github-' + token for token in tokens}
+    for line in lines:
+        marker = line.rsplit(' ', 1)[-1]
+        if marker.startswith('pocketdeploy-github-') and marker not in markers:
+            raise RuntimeError('host retirement ownership verification failed')
+    remaining = [line for line in lines if line.rsplit(' ', 1)[-1] not in markers]
+    if not mutate:
+        return {'actions': actions, 'retired': bool(record), 'github_keys_to_revoke': len(lines) - len(remaining)}
+    # Persist before any mutation; old dispatcher versions also check per-app
+    # pending markers, so already-loaded jobs cannot restart apps after the lock.
+    if not record:
+        record = {'deployment_id': deployment, 'phase': 'stopping', 'containers': {h: c['id'] for h, c in current.items()}}
+        save(retirement, record)
+    # Legacy dispatchers import before locking, then read config after locking.
+    # Moving the whole directory fences even a queued old module version.
+    if directory.exists():
+        os.rename(directory, retired_directory)
+        fd = os.open(BASE, os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    for host in apps:
+        pending = BASE / (hashlib.sha256(host.encode()).hexdigest() + '.pending')
+        save(pending, {'deployment_id': deployment, 'host': host, 'action': 'retire'})
+    if authorized.exists():
+        temporary = authorized.with_name('authorized_keys.pocketdeploy.tmp')
+        with open(temporary, 'w') as output:
+            os.chmod(temporary, 0o600)
+            os.chown(temporary, account.pw_uid, account.pw_gid)
+            output.write('\n'.join(remaining) + ('\n' if remaining else ''))
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, authorized)
+    for action in actions:
+        host = action['host']
+        actual = current.get(host)
+        if not actual:
+            if host in record['containers']:
+                raise RuntimeError('host retirement ownership verification failed')
+            continue
+        if actual['id'] != record['containers'].get(host):
+            raise RuntimeError('host retirement ownership verification failed')
+        run('docker', 'update', '--restart=no', actual['id'], timeout=30)
+        if actual['running']:
+            run('docker', 'stop', '--time', str(action['timeout']), actual['id'], timeout=action['timeout'] + 30)
+        stopped = containers().get(host)
+        if not stopped or stopped['id'] != actual['id'] or stopped['running'] or stopped['exit_code'] != 0 or stopped['oom'] or stopped.get('restart') != 'no':
+            raise RuntimeError('application did not stop cleanly')
+    record['phase'] = 'quiesced'
+    save(retirement, record)
+    return {'quiesced': True, 'applications': [item['host'] for item in actions],
+            'revoked_github_keys': len(lines) - len(remaining)}
+
+
 def install_github(request):
+    if (BASE / 'retirement.json').exists():
+        raise RuntimeError('host is retired; convergence is disabled')
     account = pwd.getpwnam(request['user'])
     manifest = json.loads(MANIFEST.read_text())
     if manifest['deployment_id'] != request['deployment_id']:
@@ -370,12 +483,18 @@ def main():
     request = json.load(sys.stdin)
     if os.geteuid() != 0:
         raise RuntimeError('root required')
+    if request['action'] == 'delete-plan':
+        return retire(request, mutate=False)
     if request['action'] in ('plan', 'status'):
         return reconcile(request)
     BASE.mkdir(parents=True, exist_ok=True, mode=0o700)
     with open(BASE / 'lock', 'a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        if request['action'] == 'quiesce':
+            return retire(request, mutate=True)
         if request['action'] == 'bootstrap':
+            if (BASE / 'retirement.json').exists():
+                raise RuntimeError('host is retired; convergence is disabled')
             return bootstrap(request)
         if request['action'] == 'converge':
             return reconcile(request)
@@ -390,6 +509,8 @@ if __name__ == '__main__':
     except Exception as exc:
         safe = {'unfinished deployment; operator recovery required', 'application removal requires explicit operator action',
                 'host belongs to another deployment', 'unmanaged application requires explicit adoption',
-                'cannot clear final environment binding with pinned ONCE CLI'}
+                'cannot clear final environment binding with pinned ONCE CLI',
+                'host is retired; convergence is disabled', 'application did not stop cleanly',
+                'host retirement ownership verification failed'}
         print(json.dumps({'error': str(exc) if str(exc) in safe else 'operation failed; output suppressed', 'stage': STAGE}))
         sys.exit(1)

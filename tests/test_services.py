@@ -301,3 +301,26 @@ def test_smtp_test_reports_fixed_remote_error(monkeypatch):
         smtp_test(SimpleNamespace(_argv=lambda connection: ['ssh']), {}, {}, 'test@example.com')
     assert result.value.code == 'smtp_credentials_missing'
     assert 'SECRET' not in str(result.value)
+
+
+def test_delete_absent_dns_completes_historical_intent(service, monkeypatch):
+    name = 'dns:A:www.example.com'
+    service.state.put_resource(name, 'cloudflare-dns', 'dns', {'name': 'www.example.com', 'type': 'A', 'zone': 'zone'})
+    op = service.state.begin_operation('delete', 'test')
+    service.state.intent(op, name, {'action': 'delete'})
+    monkeypatch.setattr(service, '_records', lambda n: [])
+    monkeypatch.setattr(service, '_cf', lambda a: pytest.fail('absent record mutation'))
+    assert service.plan_delete()[0]['action'] == 'absent'
+    assert service.state.safe_status()['pending_steps'] == 1
+    service.delete(op)
+    assert service.state.safe_status()['pending_steps'] == 0
+    assert service.state.get_resource(name) is None
+
+
+def test_delete_validates_all_dns_before_first_mutation(service, monkeypatch):
+    for host in ['first.example.com', 'second.example.com']:
+        service.state.put_resource('dns:A:' + host, 'cloudflare-dns', host, {'name': host, 'type': 'A', 'zone': 'zone'})
+    monkeypatch.setattr(service, '_records', lambda n: [{'id': n, 'name': n, 'type': 'A', 'comment': service.marker if n.startswith('first') else 'foreign'}])
+    monkeypatch.setattr(service, '_cf', lambda a: pytest.fail('must preflight all records'))
+    with pytest.raises(DeployError, match='ownership changed'):
+        service.delete('unused')

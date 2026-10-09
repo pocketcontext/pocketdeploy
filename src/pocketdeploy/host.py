@@ -71,13 +71,15 @@ class Host:
 
     def _remote(self, connection, action):
         labels = {'bootstrap': 'SSH: host setup', 'plan': 'SSH: application plan',
-                  'converge': 'SSH: application convergence', 'status': 'SSH: application status'}
+                  'converge': 'SSH: application convergence', 'status': 'SSH: application status',
+                  'delete-plan': 'SSH: retirement readiness'}
         with operation(labels.get(action, 'SSH: host operation')):
             return self._remote_request(connection, action)
 
-    def _remote_request(self, connection, action, extra=None):
+    def _remote_request(self, connection, action, extra=None, timeout=1200):
         source = Path(__file__).with_name('remote.py').read_text()
         request = {'action': action, 'deployment_id': self.state.deployment_id,
+                   'user': connection.get('user', 'ubuntu'),
                    'applications': [self.resolved_app(app) if action in ('plan', 'converge') else app for app in self.config.get('once', {}).get('applications', [])]}
         if extra:
             request.update(extra)
@@ -85,7 +87,7 @@ class Host:
         command = 'sudo python3 -c ' + shlex.quote(source)
         try:
             result = subprocess.run(self._argv(connection) + [command], input=json.dumps(request),
-                                    capture_output=True, text=True, timeout=1200)
+                                    capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
             raise DeployError('SSH host operation timed out; remote work may still be running.',
                               code='command_timeout') from None
@@ -151,6 +153,24 @@ class Host:
         self.state.complete(step, result)
         return result
 
+    def plan_delete(self, connection):
+        return self._remote(connection, 'delete-plan')
+
+    def quiesce(self, connection, operation_id):
+        readiness = self.plan_delete(connection)
+        timeout = 120 + sum(item['timeout'] + 60 for item in readiness['actions'])
+        compute = self.state.get_resource('compute')
+        payload = {'instance_id': compute['provider_id'] if compute else None}
+        step = self.state.intent(operation_id, 'host-quiesce', payload)
+        with operation('SSH: retire delivery and stop applications'):
+            result = self._remote_request(connection, 'quiesce', timeout=timeout)
+        self.state.complete(step, result)
+        # A confirmed clean retry resolves earlier uncertainty for this instance.
+        for row in self.state.db.execute("SELECT id,payload FROM steps WHERE step='host-quiesce' AND status='pending'").fetchall():
+            if json.loads(row['payload']) == payload:
+                self.state.complete(row['id'], result)
+        return result
+
     def status(self, connection):
         return self._remote(connection, 'status')
 
@@ -163,7 +183,10 @@ SAFE_ERRORS = {'unfinished deployment; operator recovery required',
                'application removal requires explicit operator action',
                'host belongs to another deployment',
                'unmanaged application requires explicit adoption',
-               'cannot clear final environment binding with pinned ONCE CLI'}
+               'cannot clear final environment binding with pinned ONCE CLI',
+               'host is retired; convergence is disabled',
+               'application did not stop cleanly',
+               'host retirement ownership verification failed'}
 
 
 def validate_config(config):

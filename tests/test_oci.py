@@ -278,3 +278,100 @@ def test_interrupted_retaining_delete_archives_disk(adapter, monkeypatch):
     adapter.delete(operation)
     assert adapter.state.get_resource('boot-volume') is None
     assert adapter.state.get_resource('retained-boot-volume:retained-boot')['provider_id'] == 'retained-boot'
+
+
+def test_delete_plan_ignores_provisioning_drift(adapter, monkeypatch):
+    monkeypatch.setattr(adapter, '_read_boot_volume', lambda item: {'id': 'boot'})
+    adapter._remember('compute', resource(adapter))
+    monkeypatch.setattr(adapter, '_find', lambda role, **kw: resource(adapter) if role == 'compute' else None)
+    monkeypatch.setattr(adapter, '_subnet', lambda: pytest.fail('provisioning check'))
+    monkeypatch.setattr(adapter, '_drift', lambda *a: pytest.fail('provisioning drift'))
+    before = adapter.state.db.total_changes
+    actions = adapter.plan_delete()
+    assert actions[0]['id'] == 'compute-id'
+    assert actions[0]['state'] == 'RUNNING'
+    assert adapter.state.db.total_changes == before
+
+
+def test_delete_validates_firewall_before_terminating(adapter, monkeypatch):
+    monkeypatch.setattr(adapter, '_read_boot_volume', lambda item: {'id': 'boot'})
+    adapter.config['compute-prevent-destroy'] = False
+    adapter._remember('compute', resource(adapter))
+    monkeypatch.setattr(adapter, '_find', lambda role, **kw: resource(adapter, role))
+    monkeypatch.setattr(adapter, '_call', lambda *a, **kw: pytest.fail('mutation before firewall ownership'))
+    with pytest.raises(DeployError, match='recorded ownership'):
+        adapter.delete('unused')
+
+
+def test_delete_keeps_state_until_cloud_absence_verified(adapter, monkeypatch):
+    adapter.config['compute-prevent-destroy'] = False
+    adapter._remember('firewall', resource(adapter, 'firewall'))
+    monkeypatch.setattr(adapter, '_find', lambda role, **kw: resource(adapter, role) if role == 'firewall' else None)
+    monkeypatch.setattr(adapter, '_call', lambda *a, **kw: None)
+    op = adapter.state.begin_operation('delete', 'test')
+    with pytest.raises(DeployError, match='not complete'):
+        adapter.delete(op)
+    assert adapter.state.get_resource('firewall')
+    assert adapter.state.get_meta('oci-delete-firewall')
+
+
+def test_delete_plan_uses_interrupted_retention_policy(adapter, monkeypatch):
+    adapter.config['compute-retain-boot-volume'] = False
+    adapter._remember('compute', resource(adapter))
+    adapter.state.put_resource('boot-volume', 'oci-boot-volume', 'boot', {})
+    op = adapter.state.begin_operation('delete', 'test')
+    step = adapter.state.intent(op, 'delete-compute', {'id': 'compute-id'})
+    adapter.state.set_meta('oci-delete-compute', {'id': 'compute-id', 'step': step, 'retain_boot': True})
+    monkeypatch.setattr(adapter, '_find', lambda role, **kw: None)
+    assert next(a for a in adapter.plan_delete() if a['resource'] == 'boot-volume')['action'] == 'retain'
+
+
+@pytest.mark.parametrize('recorded_id,instance_id,owned', [('other', 'compute-id', True), ('boot', 'other', True), ('boot', 'compute-id', False)])
+def test_delete_plan_refuses_boot_ownership_drift_without_writes(adapter, monkeypatch, recorded_id, instance_id, owned):
+    adapter._remember('compute', resource(adapter))
+    adapter.state.put_resource('boot-volume', 'oci-boot-volume', recorded_id, {'instance_id': instance_id}, owned=owned)
+    monkeypatch.setattr(adapter, '_find', lambda role, **kw: resource(adapter) if role == 'compute' else None)
+    monkeypatch.setattr(adapter, '_read_boot_volume', lambda instance: {'id': 'boot'})
+    before = adapter.state.db.total_changes
+    with pytest.raises(DeployError, match='boot volume differs'):
+        adapter.plan_delete()
+    assert adapter.state.db.total_changes == before
+    assert adapter.state.get_resource('boot-volume')['provider_id'] == recorded_id
+
+
+def test_delete_preflight_boot_permission_failure_prevents_mutation(adapter, monkeypatch):
+    adapter.config['compute-prevent-destroy'] = False
+    adapter._remember('compute', resource(adapter))
+    monkeypatch.setattr(adapter, '_find', lambda role, **kw: resource(adapter) if role == 'compute' else None)
+    def denied(instance):
+        raise DeployError('Boot volume permission denied.')
+    monkeypatch.setattr(adapter, '_read_boot_volume', denied)
+    monkeypatch.setattr(adapter, '_call', lambda *a, **kw: pytest.fail('cloud mutation'))
+    before = adapter.state.db.total_changes
+    with pytest.raises(DeployError, match='permission denied'):
+        adapter.delete('unused')
+    assert adapter.state.db.total_changes == before
+
+
+def test_delete_cannot_destroy_unrecorded_boot_volume(adapter, monkeypatch):
+    adapter.config['compute-retain-boot-volume'] = False
+    adapter._remember('compute', resource(adapter))
+    monkeypatch.setattr(adapter, '_find', lambda role, **kw: resource(adapter) if role == 'compute' else None)
+    monkeypatch.setattr(adapter, '_read_boot_volume', lambda instance: {'id': 'boot'})
+    with pytest.raises(DeployError, match='requires recorded ownership'):
+        adapter.plan_delete()
+    assert adapter.state.get_resource('boot-volume') is None
+
+
+def test_delete_rechecks_boot_identity_immediately_before_termination(adapter, monkeypatch):
+    adapter.config['compute-prevent-destroy'] = False
+    adapter._remember('compute', resource(adapter))
+    adapter.state.put_resource('boot-volume', 'oci-boot-volume', 'boot', {'instance_id': 'compute-id'})
+    monkeypatch.setattr(adapter, '_find', lambda role, **kw: resource(adapter) if role == 'compute' else None)
+    volumes = iter([{'id': 'boot'}, {'id': 'different'}])
+    monkeypatch.setattr(adapter, '_read_boot_volume', lambda instance: next(volumes))
+    monkeypatch.setattr(adapter, '_call', lambda *a, **kw: pytest.fail('cloud mutation'))
+    op = adapter.state.begin_operation('delete', 'test')
+    with pytest.raises(DeployError, match='boot volume differs'):
+        adapter.delete(op)
+    assert adapter.state.get_resource('boot-volume')['provider_id'] == 'boot'

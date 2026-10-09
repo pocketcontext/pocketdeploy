@@ -45,7 +45,7 @@ def text_result(command, result):
     if command == 'init':
         return [f"Initialized{suffix}.", f"Deployment: {result['deployment_id']}."]
     if 'actions' in result and command in ('plan', 'converge', 'delete'):
-        lines = [f"Plan{suffix}."]
+        lines = [f"{'Deletion plan' if command == 'delete' else 'Plan'}{suffix}."]
         actions = result['actions'] + result.get('applications', []) + [dict(a, resource=a.get('name', 'service')) for a in result.get('services', [])]
         github = result.get('github') or {}
         if isinstance(github, dict):
@@ -83,7 +83,11 @@ def text_result(command, result):
     if command == 'smtp-test':
         return ['SMTP accepted the test message; inbox delivery is not confirmed.']
     if command == 'delete':
-        return ['Deletion completed. Retained resources and application data are not purged.']
+        lines = [f'Deletion completed{suffix}.']
+        lines.extend('  deleted: ' + name for name in result.get('deleted_resources', []))
+        lines.extend('  retained: ' + item['resource'] for item in result.get('retained_resources', []))
+        lines.append('Shared networking, local recovery files and Vault history retained.')
+        return lines
     if command == 'adopt':
         return [f"Adopted instance {result['instance_id']}.", f"SSH: {result.get('user', 'ubuntu')}@{result['ip']}"]
     if command in ('vault-save', 'vault-restore'):

@@ -110,7 +110,7 @@ def test_delete_verifies_absence(tmp_path):
     with state:
         state.put_resource('github:example/site', 'github-environment', '42', {'repository': 'example/site', 'environment': 'test-profile'})
         operation = state.begin_operation('delete', 'test')
-        with patch.object(github, '_pages', side_effect=[[{'name': 'test-profile', 'id': 42}], [{'name': 'POCKETDEPLOY_DEPLOYMENT_ID', 'value': state.deployment_id}], []]), patch.object(github, '_api') as api:
+        with patch.object(github, '_pages', side_effect=[[{'name': 'test-profile', 'id': 42}], [{'name': 'POCKETDEPLOY_DEPLOYMENT_ID', 'value': state.deployment_id}], [{'name': 'test-profile', 'id': 42}], [{'name': 'POCKETDEPLOY_DEPLOYMENT_ID', 'value': state.deployment_id}], []]), patch.object(github, '_api') as api:
             assert github.delete(operation)['deleted_environments'][0]['environment'] == 'test-profile'
             assert api.call_args.args[1] == 'DELETE'
         assert state.get_resource('github:example/site') is None
@@ -218,3 +218,46 @@ def test_mismatched_key_pair_fails_before_remote_changes(tmp_path):
             with pytest.raises(DeployError, match='does not match'):
                 github.converge({'ip': '192.0.2.1'}, operation)
         github.host.install_github.assert_not_called()
+
+
+def test_delete_recovery_preserves_cleanup_until_explicit_finish(tmp_path):
+    github, state = fixture(tmp_path)
+    with state:
+        repo = 'example/site'
+        state.put_resource('github:' + repo, 'github-environment', '42', {'repository': repo, 'environment': 'test-profile'})
+        op = state.begin_operation('delete', 'test')
+        state.intent(op, 'github-environment-delete', {'repository': repo, 'environment': 'test-profile'})
+        private, public = github.key_paths({'github': repo})
+        private.parent.mkdir()
+        private.write_text('synthetic-private')
+        public.write_text('synthetic-public')
+        with patch.object(github, '_pages', return_value=[]), patch.object(github, '_api', return_value={'permissions': {'admin': True}}):
+            github.delete(op)
+        assert state.safe_status()['pending_steps'] == 0
+        assert private.exists()
+        github.cleanup_keys()
+        assert not private.exists() and not public.exists()
+        assert state.get_meta('github-delete-keys') == []
+
+
+def test_delete_preflight_refuses_key_overlap(tmp_path):
+    github, state = fixture(tmp_path)
+    with state:
+        state.set_meta('github-delete-keys', ['example/site'])
+        private, _ = github.key_paths({'github': 'example/site'})
+        github.config['ssh-private-key-file'] = str(private)
+        with pytest.raises(DeployError, match='overlaps'):
+            github.plan_delete()
+
+
+def test_delete_cleanup_includes_init_only_keys(tmp_path):
+    github, state = fixture(tmp_path)
+    with state:
+        state.set_meta('github-key:example/site', {'path': 'ignored-untrusted-path'})
+        private, public = github.key_paths({'github': 'example/site'})
+        private.parent.mkdir()
+        private.write_text('synthetic')
+        public.write_text('synthetic')
+        assert github.plan_delete() == [{'resource': 'github-deployment-keys', 'action': 'delete'}]
+        github.cleanup_keys()
+        assert not private.exists() and not public.exists()

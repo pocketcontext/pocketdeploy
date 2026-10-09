@@ -44,7 +44,7 @@ def parser():
   adopt          Recover an existing instance with matching deployment UUID tags
 
 Vault commands (explicit checkpoints):
-  vault-save     Save configuration, private bindings, keys and SQLite to Vault
+  vault-save     Save private bindings, recovery keys and SQLite to Vault
   vault-restore  Restore a selected document/version; never deploys
 
 Examples:
@@ -255,11 +255,11 @@ def execute(args, reporter=None):
                     if observed.get('compute'):
                         result['applications'] = host.status(cloud.connection())
                     return result
-                actions = cloud.plan()
                 if args.command == 'delete':
-                    actions = [{'resource': r['name'], 'action': 'retain' if not r['owned'] or r['attributes'].get('lifecycle') == 'retained-for-recovery' or r['kind'].startswith('resend-') or (r['kind'] == 'cloudflare-dns' and r['attributes'].get('type') != 'A') or (r['name'] == 'boot-volume' and config.get('compute-retain-boot-volume', True)) else 'delete'} for r in state.resources()] if state else []
-                    return {'profile': config['profile'], 'protected': config['compute-prevent-destroy'], 'actions': actions,
-                            'retain_boot_volume': config.get('compute-retain-boot-volume', True)}
+                    from .deletion import Deletion
+                    with reporter.stage('delete-preflight'):
+                        return Deletion(config, state, cloud, host, reporter).plan()
+                actions = cloud.plan()
                 if config.get('provider-smtp') == 'resend' and state and state.get_resource('smtp-key'):
                     from .services import Services
                     host.smtp_settings = Services(config, state).smtp_settings()
@@ -292,17 +292,8 @@ def execute(args, reporter=None):
                     state.set_meta('desired-config', {k: v for k, v in config.items() if not k.startswith('_')})
                     result = asyncio.run(converge(config, state, cloud, host, operation, reporter, rotate_github_keys=getattr(args, 'rotate_github_keys', False)))
                 elif args.command == 'delete':
-                    if config['compute-prevent-destroy']:
-                        raise DeployError('Deletion protection is enabled.')
-                    if any(r['kind'] == 'cloudflare-dns' and r['attributes'].get('type') == 'A' for r in state.resources()):
-                        if config.get('provider-dns') != 'cloudflare':
-                            raise DeployError('Restore the managed DNS configuration before deleting its deployment.')
-                        from .services import Services
-                        Services(config, state).delete(operation)
-                    if any(r['kind'] == 'github-environment' for r in state.resources()):
-                        from .github import GitHub
-                        GitHub(config, state, root, host).delete(operation)
-                    result = cloud.delete(operation)
+                    from .deletion import Deletion
+                    result = asyncio.run(Deletion(config, state, cloud, host, reporter).run(operation))
                 elif args.command == 'smtp-test':
                     from .services import Services
                     if config.get('provider-smtp') != 'resend':

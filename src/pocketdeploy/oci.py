@@ -390,9 +390,52 @@ class OCI:
             raise DeployError('OCI instance subnet differs from desired configuration.')
         return {'instance_id': item['id'], 'ip': primary['public-ip'], 'user': self.config.get('ssh-user', 'ubuntu')}
 
+    def _delete_boot_volume(self, instance, retain):
+        volume = self._read_boot_volume(instance)
+        recorded = self.state.get_resource('boot-volume')
+        if recorded:
+            if (not recorded['owned'] or recorded['provider_id'] != volume['id']
+                    or recorded['attributes'].get('instance_id') != instance['id']):
+                raise DeployError('Attached boot volume differs from recorded deletion ownership.')
+        elif not retain:
+            raise DeployError('Deleting a boot volume requires recorded ownership; retain the unrecorded volume or reconcile explicitly.')
+        return volume
+
+    def plan_delete(self):
+        """Observe only deletion identities; desired provisioning drift is irrelevant."""
+        self._check_token()
+        actions = []
+        observed_volume = None
+        for role in ('compute', 'firewall'):
+            pending = self.state.get_meta('oci-delete-' + role)
+            recorded = self.state.get_resource(role)
+            item = self._find(role, allow_missing=bool(pending))
+            if item and (not recorded or not recorded['owned'] or recorded['provider_id'] != item['id']):
+                raise DeployError('Deletion requires recorded ownership and matching cloud tags.')
+            if pending and recorded and pending.get('id') != recorded['provider_id']:
+                raise DeployError('Pending OCI deletion identity does not match recorded ownership.')
+            if role == 'compute' and item and item.get('lifecycle-state') != 'TERMINATING':
+                retain = (pending or {}).get('retain_boot', self.config.get('compute-retain-boot-volume', True))
+                observed_volume = self._delete_boot_volume(item, retain)
+            actions.append({'resource': role, 'action': 'delete' if item else 'absent',
+                            'id': item['id'] if item else (recorded['provider_id'] if recorded else None),
+                            'state': item.get('lifecycle-state') if item else None})
+        pending = self.state.get_meta('oci-delete-compute') or {}
+        volume = self.state.get_resource('boot-volume')
+        if volume or observed_volume:
+            retain = pending.get('retain_boot', self.config.get('compute-retain-boot-volume', True))
+            actions.append({'resource': 'boot-volume', 'action': 'retain' if retain else 'delete',
+                            'id': volume['provider_id'] if volume else observed_volume['id']})
+        for record in self.state.resources():
+            if record['name'].startswith('retained-boot-volume:'):
+                actions.append({'resource': record['name'], 'action': 'retain', 'id': record['provider_id']})
+        actions.append({'resource': 'shared-network', 'action': 'retain'})
+        return actions
+
     def delete(self, operation_id):
         if self.config.get('compute-prevent-destroy', True):
             raise DeployError('Deployment destruction is protected.')
+        self.plan_delete()
         for role in ('compute', 'firewall'):
             pending = self.state.get_meta('oci-delete-' + role)
             item = self._find(role, allow_missing=bool(pending))
@@ -415,10 +458,16 @@ class OCI:
             self.state.set_meta('oci-delete-' + role, {'step': step, 'id': item['id'], 'retain_boot': retain_boot})
             if role == 'compute':
                 if item.get('lifecycle-state') != 'TERMINATING':
-                    self._boot_volume(item)
+                    volume = self._delete_boot_volume(item, retain_boot)
+                    if not self.state.get_resource('boot-volume'):
+                        self.state.put_resource('boot-volume', 'oci-boot-volume', volume['id'],
+                            {'instance_id': item['id'], 'size_gib': volume.get('size-in-gbs'),
+                             'vpus_per_gb': volume.get('vpus-per-gb')}, owned=True)
                 self._call('compute', 'instance', 'terminate', '--instance-id', item['id'], '--force', '--preserve-boot-volume', str(retain_boot).lower(), '--wait-for-state', 'SUCCEEDED', timeout=1500)
             else:
                 self._call('network', 'nsg', 'delete', '--nsg-id', item['id'], '--force')
+            if self._find(role, allow_missing=True) is not None:
+                raise DeployError('OCI deletion is not complete; retry delete to reconcile.', code='deletion_pending')
             if role == 'compute':
                 if retain_boot:
                     self._retain_boot_volume()

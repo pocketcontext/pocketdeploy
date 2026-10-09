@@ -288,3 +288,35 @@ configuration access.
 The portable launcher pins source commit
 `d2c143bea2d5384a0098c89fe8aecb998726dd49`; all 19 copied-launcher checks passed
 without cloud access.
+
+## Live deployment retirement
+
+The user authorized deletion of `pocketdeploy-oci-test` after refreshing OCI
+authentication. The root test configuration now retains its boot volume;
+destruction protection stayed enabled in Git and was disabled only for the
+authorized delete command through its parameter override.
+
+The dedicated deletion dry-run passed in 6.505 seconds. Full preflight checked
+OCI, GitHub, DNS and host readiness. GitHub environment retirement, CI fencing,
+clean shutdown of both managed applications and website DNS removal succeeded.
+OCI instance termination took 93.3 seconds. Firewall deletion was accepted but
+still visible immediately afterward, so the first run correctly returned
+`deletion_pending`, preserving its record and disposable keys. A retry completed
+in 5.151 seconds and removed both GitHub key files. A third run completed in
+5.053 seconds with no deleted resources and no key files removed.
+
+Independent provider reads verified compute/firewall absence, absence of the
+`www.bigconfig.online` A record, and absence of the `pocketdeploy-oci-test` GitHub
+environment. The website repository retains `once-v2`. The 50 GiB boot volume
+remains AVAILABLE and recorded for recovery. All four email DNS records remain,
+and Resend reports `notifications.bigconfig.online` and its records verified.
+Private bindings, SQLite and operator/server SSH authority remain locally. No
+pending deletion steps remain; unrelated historical operations were not cleared.
+The test website is retired. No Vault upload, SMTP email, or production deployment
+was performed during this deletion test.
+
+All 277 synthetic tests pass, including expired OCI token rejection before any
+provider command, ownership failures before mutations, boot-volume identity
+drift and interrupted retirement. Package builds and skill validation pass.
+The final boot-volume preflight hardening was tested synthetically after the
+retaining live termination; the live retries used the final implementation.

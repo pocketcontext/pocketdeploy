@@ -195,3 +195,19 @@ discovery. GitHub setup is not atomic; avoid releasing while configuring it.
 Use `smtp-test --to ADDRESS` only for an explicitly requested email test and a
 known recipient. Report SMTP acceptance separately from delivery. Never send a
 message as part of ordinary convergence. No SMTP inbox is provisioned.
+
+## Deployment retirement
+
+Review `./pocketdeploy delete --dry-run` before an authorized deletion. Set
+`compute-prevent-destroy: false` explicitly for deletion; preserve boot volume
+retention unless disk destruction is authorized. The deletion DAG preflights
+OCI, GitHub, DNS and host ownership/readiness before writes. It retires GitHub
+environments, fences queued CI, gracefully stops managed apps, removes website
+DNS, terminates compute and deletes its firewall, then removes disposable GitHub
+keys. SMTP/email DNS, shared networking, recovery keys/files and Vault history
+remain. Read-only preflight cannot prove all future writes will be authorized.
+
+Do not bypass unclean-stop or ownership failures. Inspect the failing stage and
+rerun `delete` to reconcile and resume. Retired hosts refuse convergence; retained
+disks are recovery material. No automatic backup or restoration is performed.
+Successful output lists removed and retained resources.

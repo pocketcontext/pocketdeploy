@@ -127,9 +127,9 @@ def test_delete_retires_recorded_github_even_after_app_removed(tmp_path, monkeyp
     with State(tmp_path / '.colors.sqlite', 'demo', scope) as state:
         state.put_resource('github:example/site', 'github-environment', '42', {'repository': 'example/site', 'environment': 'demo'})
     events = []
-    github = SimpleNamespace(delete=lambda operation: events.append('github-delete'))
-    cloud = SimpleNamespace(delete=lambda operation: events.append('compute-delete'))
-    with patch.object(cli, 'OCI', return_value=cloud), patch('pocketdeploy.github.GitHub', return_value=github):
+    github = SimpleNamespace(plan_delete=lambda: [], delete=lambda operation: events.append('github-delete'), cleanup_keys=lambda: {})
+    cloud = SimpleNamespace(plan_delete=lambda: [], delete=lambda operation: events.append('compute-delete'))
+    with patch.object(cli, 'OCI', return_value=cloud), patch('pocketdeploy.deletion.GitHub', return_value=github):
         cli.execute(cli.parser().parse_args(['delete']))
     assert events == ['github-delete', 'compute-delete']
 

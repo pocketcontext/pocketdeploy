@@ -12,7 +12,7 @@ oci-memory-in-gbs: 6
 oci-boot-volume-size-in-gbs: 50
 compute-prevent-destroy: true
 compute-require-existing-state: true
-compute-retain-boot-volume: false
+compute-retain-boot-volume: true
 compute-ssh-sources:
 - 35.204.34.235/32
 compute-http-sources:

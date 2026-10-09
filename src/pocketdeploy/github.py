@@ -141,29 +141,104 @@ class GitHub:
                                  'action': 'reconcile' if self.state is not None and self.state.get_resource('github:' + app['github']) else 'create'}
                                 for app in self.apps]}
 
+    def _delete_target(self, record):
+        attrs = record['attributes']
+        repo, environment = attrs['repository'], attrs['environment']
+        if not record['owned'] or environment != self.environment:
+            raise DeployError('GitHub environment ownership does not match.')
+        repository = self._api('repos/' + repo)
+        if not repository.get('permissions', {}).get('admin'):
+            raise DeployError('GitHub environment management requires repository administrator access.')
+        existing = next((e for e in self._pages(f'repos/{repo}/environments', 'environments')
+                         if e['name'].lower() == environment.lower()), None)
+        base = f'repos/{repo}/environments/{quote(environment, safe="")}'
+        if existing:
+            if str(existing['id']) != record['provider_id']:
+                raise DeployError('GitHub environment ownership does not match.')
+            variables = {v['name']: v['value'] for v in self._pages(base + '/variables', 'variables')}
+            if variables.get('POCKETDEPLOY_DEPLOYMENT_ID') != self.state.deployment_id and not (variables.get('POCKETDEPLOY_DEPLOYMENT_ID') is None and self.state.get_meta('github-pending:' + repo, False)):
+                raise DeployError('GitHub environment deployment ownership does not match.')
+        return repo, environment, existing, base
+
+    def _cleanup_repositories(self):
+        repositories = [app['github'] for app in self.apps] + self.state.get_meta('github-delete-keys', []) + [
+            r['attributes']['repository'] for r in self.state.resources() if r['kind'] == 'github-environment']
+        for row in self.state.db.execute("SELECT key,value FROM meta WHERE key LIKE 'github-key:%'"):
+            if json.loads(row['value']):
+                repositories.append(row['key'][len('github-key:'):])
+        return sorted(set(repositories))
+
+    def _cleanup_paths(self):
+        paths = []
+        operator = local_path(self.root, self.config.get('ssh-private-key-file', '.ssh/id_ed25519'))
+        server = local_path(self.root, self.config.get('ssh-host-private-key-file', '.ssh/host_ed25519'))
+        reserved = {operator, server,
+                    local_path(self.root, self.config.get('ssh-public-key-file', str(operator) + '.pub')),
+                    local_path(self.root, self.config.get('ssh-host-public-key-file', str(server) + '.pub')),
+                    local_path(self.root, self.config.get('ssh-known-hosts-file', '.ssh/known_hosts'))}
+        state_path = local_path(self.root, self.config.get('state-file', '.colors.sqlite'))
+        reserved.update({state_path, Path(str(state_path) + '.lock'),
+                         Path(str(state_path) + '-journal'), Path(str(state_path) + '-wal'), Path(str(state_path) + '-shm'),
+                         local_path(self.root, self.config.get('_file', 'colors.yml')),
+                         local_path(self.root, '.envrc'), local_path(self.root, '.envrc.private')})
+        for repo in self._cleanup_repositories():
+            pair = self.key_paths({'github': repo})
+            for path in pair:
+                if path in reserved:
+                    raise DeployError('GitHub key path overlaps SSH recovery authority.')
+                if path.exists():
+                    info = path.lstat()
+                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
+                        raise DeployError('GitHub keys must be owned regular files without hardlinks.')
+            paths.extend(pair)
+        return paths
+
+    def plan_delete(self):
+        paths = self._cleanup_paths()
+        actions = []
+        for record in self.state.resources():
+            if record['kind'] == 'github-environment':
+                repo, environment, existing, _ = self._delete_target(record)
+                actions.append({'resource': record['name'], 'repository': repo, 'environment': environment,
+                                'action': 'delete' if existing else 'absent'})
+        if any(path.exists() for path in paths):
+            actions.append({'resource': 'github-deployment-keys', 'action': 'delete'})
+        return actions
+
+    def cleanup_keys(self):
+        paths = self._cleanup_paths()
+        existing = sum(path.exists() for path in paths)
+        for path in paths:
+            path.unlink(missing_ok=True)
+        for repo in self._cleanup_repositories():
+            self.state.set_meta('github-key:' + repo, None)
+            self.state.set_meta('github-key-pending:' + repo, False)
+        self.state.set_meta('github-delete-keys', [])
+        return {'deleted_key_files': existing}
+
     def delete(self, operation_id):
+        self.plan_delete()
+        self.state.set_meta('github-delete-keys', self._cleanup_repositories())
         removed = []
         for record in self.state.resources():
             if record['kind'] != 'github-environment':
                 continue
-            attributes = record['attributes']
-            repo, environment = attributes['repository'], attributes['environment']
-            if not record['owned'] or environment != self.environment:
-                raise DeployError('GitHub environment ownership does not match.')
-            existing = next((e for e in self._pages(f'repos/{repo}/environments', 'environments')
-                             if e['name'].lower() == environment.lower()), None)
+            repo, environment, existing, base = self._delete_target(record)
+            pending_key = 'github-delete:' + repo
+            step = self.state.get_meta(pending_key)
             if existing:
-                if str(existing['id']) != record['provider_id']:
-                    raise DeployError('GitHub environment ownership does not match.')
-                base = f'repos/{repo}/environments/{quote(environment, safe="")}'
-                variables = {v['name']: v['value'] for v in self._pages(base + '/variables', 'variables')}
-                if variables.get('POCKETDEPLOY_DEPLOYMENT_ID') != self.state.deployment_id and not (variables.get('POCKETDEPLOY_DEPLOYMENT_ID') is None and self.state.get_meta('github-pending:' + repo, False)):
-                    raise DeployError('GitHub environment deployment ownership does not match.')
-                step = self.state.intent(operation_id, 'github-environment-delete', {'repository': repo, 'environment': environment})
+                step = step or self.state.intent(operation_id, 'github-environment-delete', {'repository': repo, 'environment': environment, 'id': record['provider_id']})
+                self.state.set_meta(pending_key, step)
                 self._api(base, 'DELETE')
                 if any(str(e['id']) == record['provider_id'] for e in self._pages(f'repos/{repo}/environments', 'environments')):
                     raise DeployError('GitHub environment deletion could not be verified.')
-                self.state.complete(step, {'deleted': True})
+            if step:
+                self.state.complete(step, {'deleted': True, 'recovered': not bool(existing)})
+                self.state.set_meta(pending_key, None)
+            for old in self.state.db.execute("SELECT id,payload FROM steps WHERE step='github-environment-delete' AND status='pending'").fetchall():
+                payload = json.loads(old['payload'])
+                if payload.get('repository') == repo and payload.get('environment') == environment and payload.get('id', record['provider_id']) == record['provider_id']:
+                    self.state.complete(old['id'], {'deleted': True, 'recovered': True})
             self.state.remove_resource(record['name'])
             removed.append({'repository': repo, 'environment': environment})
         return {'deleted_environments': removed}

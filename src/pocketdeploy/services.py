@@ -125,8 +125,25 @@ class Services:
             if app.get('manage-dns'):
                 self._dns({'type': 'A', 'name': app['host'], 'content': '0.0.0.0'})
 
+    def plan_delete(self):
+        actions = []
+        for saved in self.state.resources():
+            if saved['kind'] != 'cloudflare-dns' or saved['attributes'].get('type') != 'A':
+                continue
+            attrs = saved['attributes']
+            if not saved['owned'] or attrs.get('zone') != self.c.get('cloudflare-zone-id'):
+                raise DeployError('Website DNS ownership does not match configuration.')
+            current = next((r for r in self._records(attrs['name']) if r.get('id') == saved['provider_id']), None)
+            if current and (current.get('comment') != self.marker or current.get('type') != 'A' or current.get('name') != attrs['name']):
+                raise DeployError('Website DNS ownership changed; refusing deletion.')
+            actions.append({'resource': saved['name'], 'name': attrs['name'], 'type': 'A', 'action': 'delete' if current else 'absent'})
+        if any(r['kind'].startswith('resend-') or (r['kind'] == 'cloudflare-dns' and r['attributes'].get('type') != 'A') for r in self.state.resources()):
+            actions.append({'resource': 'smtp', 'action': 'retain'})
+        return actions
+
     def delete(self, operation_id):
         """Delete only owned website A records; retain sending infrastructure."""
+        self.plan_delete()
         actions = []
         for saved in self.state.resources():
             if saved['kind'] != 'cloudflare-dns' or saved['attributes'].get('type') != 'A':
@@ -137,13 +154,24 @@ class Services:
             rows = self._records(attrs['name'])
             current = next((r for r in rows if r.get('id') == saved['provider_id']), None)
             if current:
-                if current.get('comment') != self.marker or current.get('type') != 'A':
+                if current.get('comment') != self.marker or current.get('type') != 'A' or current.get('name') != attrs['name']:
                     raise DeployError('Website DNS ownership changed; refusing deletion.')
-                step = self.state.intent(operation_id, saved['name'], {'action': 'delete'})
+                pending_key = 'delete:' + saved['name']
+                step = self.state.get_meta(pending_key) or self.state.intent(operation_id, saved['name'], {'action': 'delete', 'id': saved['provider_id']})
+                self.state.set_meta(pending_key, step)
                 self._cf(['delete', saved['provider_id'], '--force'])
                 if any(r.get('id') == saved['provider_id'] for r in self._records(attrs['name'])):
                     raise DeployError('Website DNS deletion is not verified.')
                 self.state.complete(step, {'deleted': True})
+            pending_key = 'delete:' + saved['name']
+            step = self.state.get_meta(pending_key)
+            if step:
+                self.state.complete(step, {'deleted': True, 'recovered': not bool(current)})
+                self.state.set_meta(pending_key, None)
+            for old in self.state.db.execute("SELECT id,payload FROM steps WHERE step=? AND status='pending'", (saved['name'],)).fetchall():
+                payload = json.loads(old['payload'])
+                if payload.get('action') == 'delete' and payload.get('id', saved['provider_id']) == saved['provider_id']:
+                    self.state.complete(old['id'], {'deleted': True, 'recovered': True})
             self.state.remove_resource(saved['name'])
             actions.append({'name': attrs['name'], 'type': 'A', 'action': 'delete'})
         return {'actions': actions, 'smtp': 'retained'}
