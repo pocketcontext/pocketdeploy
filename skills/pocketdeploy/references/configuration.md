@@ -35,7 +35,6 @@ compute-http-sources: [0.0.0.0/0]
 provider-dns: no-infra
 provider-smtp: no-infra
 once-version: v0.3.3
-vault-save-after-run: false
 once:
   applications:
     - host: wiki.example.com
@@ -113,15 +112,21 @@ do not generate replacement keys to bypass that check.
 ```yaml
 vault-id: YOUR_DEDICATED_VAULT_ID
 vault-command: vaultcontext
-vault-save-after-run: true
 # Optional known state document, also remembered in SQLite:
 # vault-state-document-id: DOCUMENT_ID
 ```
 
-Saving requires all recovery files, including `.envrc.private`; create an empty
-private file when no bindings are needed. VaultContext must be authenticated and
-user-unlocked. Configured convergence saves prepared authority/state before cloud
-mutation and saves again after completion; failed runs also attempt a snapshot.
-The recovery set's state document and version identify the exact checkpoint.
+Run `init` to prepare local state, UUID, SSH keys, known hosts and an empty
+`.envrc.private` if absent, without cloud or Vault calls. Saving requires all of
+these recovery files. VaultContext must be authenticated and user-unlocked.
+For a new deployment use `init → vault-save → create → vault-save`; for updates
+use `plan → converge → vault-save`.
+
+Vault access happens only through explicit Vault commands. The retired
+`vault-save-after-run` option is rejected even when false. No successful or failed
+deployment automatically saves state. Save after mutations and after failures
+that changed local state; until then, the last remote checkpoint may be stale.
+Keep local state and reconcile cloud observations before recovery from an older
+snapshot. The state document and version identify the exact saved checkpoint.
 Vault's file limit is 8 MiB. Local plaintext state remains private even though
 its remote snapshot is encrypted.

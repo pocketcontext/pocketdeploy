@@ -30,10 +30,10 @@ once-version: v0.3.3
 ssh-private-key-file: .ssh/id_ed25519
 ssh-public-key-file: .ssh/id_ed25519.pub
 ssh-known-hosts-file: .ssh/known_hosts
-# After vaultcontext login and interactive unlock:
+# After init, vaultcontext login and interactive unlock, run vault-save.
+# Save again explicitly after create/converge/delete; no automatic backups:
 # vault-id: <dedicated-vault-id>
 # vault-command: vaultcontext
-vault-save-after-run: false
 once:
   applications:
     - host: example.com

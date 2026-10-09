@@ -67,15 +67,29 @@ See [the skill](skills/pocketdeploy/SKILL.md) for operator instructions.
 ## Commands
 
 ```sh
-pocketdeploy plan
+pocketdeploy init
+pocketdeploy vault-save
 pocketdeploy create
+pocketdeploy vault-save
+
+# Routine update
+pocketdeploy plan
 pocketdeploy converge
+pocketdeploy vault-save
 pocketdeploy status
 pocketdeploy describe
 pocketdeploy ssh
 pocketdeploy ssh --ssh-command 'uname -m'
 pocketdeploy delete --dry-run
 ```
+
+`init` prepares the local deployment UUID, SQLite state, SSH client and host
+keys, known hosts and an empty `.envrc.private` if absent. It makes no cloud or
+Vault calls, does not resolve application bindings and preserves existing files.
+Repeating a healthy initialization is safe; missing authority for an existing
+instance still requires recovery. Use `init → vault-save → create → vault-save` for a new deployment
+when encrypted recovery is configured. The first snapshot preserves authority
+before provisioning; the second records the resulting resource identities.
 
 `create` and `converge` share a DAG: keys → OCI → host → applications → verify.
 Each external mutation records intent first and the verified result afterward.
@@ -87,7 +101,11 @@ tags may need verification at converge time. Local lock files may be created.
 
 `status` and `describe` currently return the same safe inventory, operation and
 host application status. They never print resolved environments, credentials,
-raw Docker metadata, ONCE labels or cloud response bodies. `ssh` is explicitly
+raw Docker metadata, ONCE labels or cloud response bodies.
+`state.last_vault_backup` reports the locally acknowledged document/version and
+UTC `saved_at` (or null when no receipt is known). Older receipts may lack a
+timestamp. This makes no Vault call and does not prove checkpoint freshness.
+`ssh` is explicitly
 interactive; commands you choose can print private information in your terminal.
 
 `compute-prevent-destroy: true` is the default. To delete, deliberately set it to
@@ -200,7 +218,6 @@ Full adoption of `once-pocketcontext-v2` is not implemented or performed.
 ```yaml
 vault-id: YOUR_DEDICATED_VAULT_ID
 vault-command: vaultcontext
-vault-save-after-run: true
 # Optional known state document, also remembered locally:
 # vault-state-document-id: DOCUMENT_ID
 ```
@@ -221,10 +238,18 @@ consistent SQLite snapshot uploads last and references the exact versions.
 `colors.yml` is also included in Vault to pair the desired configuration with
 its recovery checkpoint. `.envrc` and package code are recovered from Git.
 The snapshot does not need to contain its own newly assigned Vault version ID.
-Vault's file limit is 8 MiB. A backup failure is reported distinctly even when
-deployment succeeded. Configured convergence saves the prepared keys and state before cloud mutation,
-then saves again at completion. Failed workflows also attempt a recovery snapshot;
-failures before key preparation may precede a complete recovery set.
+Vault's file limit is 8 MiB. Vault operations are explicit: `create`, `converge`,
+`delete` and failed workflows never save automatically or require Vault access.
+The retired `vault-save-after-run` field is rejected, including when false; remove
+it from existing configuration and remove `COLORS_PAR_VAULT_SAVE_AFTER_RUN`
+from the operator environment. Older Vault snapshots may restore this retired
+field; remove it from restored `colors.yml` before continuing.
+
+Run `vault-save` after successful mutations and after failures that changed local
+state. Until that succeeds, Vault contains an older checkpoint and may lack new
+resource identities or operation outcomes. Preserve local state and reconcile
+cloud reality when recovering from an older snapshot. If saving fails, fix Vault
+access and retry `vault-save`; do not rerun deployment just to retry its backup.
 
 Restore stages and validates all files before publishing them, with the database
 last. Existing destinations require `--overwrite`. A filesystem interruption

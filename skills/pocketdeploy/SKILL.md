@@ -35,20 +35,38 @@ resource names are descriptive, while recorded IDs and deployment UUID tags
 establish ownership. Existing subnet/VCN resources remain externally managed.
 
 ```sh
+# New deployment with Vault recovery configured
+./pocketdeploy init
+./pocketdeploy vault-save
+./pocketdeploy create
+./pocketdeploy vault-save
+
+# Routine update
 ./pocketdeploy plan
 ./pocketdeploy status
 ./pocketdeploy converge
+./pocketdeploy vault-save
 ./pocketdeploy ssh
 ./pocketdeploy ssh --ssh-command 'uname -m'
 ./pocketdeploy delete --dry-run
 ```
+
+`init` prepares a local deployment UUID, SQLite state, SSH client and host keys,
+known hosts and an empty `.envrc.private` if absent. It makes no cloud or Vault
+calls, does not resolve application bindings and preserves existing files. A
+healthy repeat is idempotent; missing authority for an existing instance still
+requires recovery. Save this initial authority before provisioning, then save again after
+creation to checkpoint the resource identities.
 
 `plan` and `create --dry-run` validate and read live OCI resources and, for an
 existing host, application state through SSH. They can create a local lock;
 they do not provision resources or generate keys. They require suitable tools,
 authentication and application bindings. `status` and `describe` return the same
 safe observed inventory without resolving application secrets. They are live
-reads, not offline validation. A plan is not proof of completed convergence.
+reads, not offline validation. `state.last_vault_backup` is the last locally
+acknowledged Vault document/version/save time, or null; older receipts may lack a
+time. It makes no Vault call and does not establish freshness. A restored
+snapshot may contain a prior receipt. A plan is not proof of completed convergence.
 
 `create` and `converge` run the same DAG: keys → OCI → host → applications →
 verification. Cloud/app mutations must stay within the user's authorized scope;
@@ -93,9 +111,14 @@ it in arguments. Reuse an existing unlocked session.
 The recovery set includes `colors.yml`, `.envrc.private`, client and host SSH
 key pairs, known hosts and a consistent SQLite snapshot. File versions upload
 first; state uploads last with exact references. `.envrc` and code come from Git.
-Vault encrypts remote copies, not local files. A backup failure can follow a
-successful deployment: preserve local state and retry `vault-save` after fixing
-Vault access; do not rerun infrastructure changes just to retry the backup.
+Vault encrypts remote copies, not local files. Only explicit `vault-save` uploads
+a checkpoint; provisioning, convergence, deletion and failed workflows never
+back up automatically. Remove the retired `vault-save-after-run` field, even if
+false. Save after mutations and failures that changed local state. Until saving
+succeeds, Vault may lack new resource identities and operation outcomes. Preserve
+local state and reconcile cloud reality when recovering an older checkpoint.
+Retry a failed save after fixing Vault access; do not rerun infrastructure changes
+just to retry the backup.
 
 Restore into an empty directory for verification. Existing destinations require
 explicit `--overwrite`. Restore neither executes private files nor deploys.
@@ -104,3 +127,6 @@ Stop the old operator before handover, review non-secret desired state, and run
 mutations, with the required bindings supplied by your trusted shell. An interrupted multi-file
 restore must be repeated; publication is not atomic. Keep independent encrypted
 recovery material if VaultContext depends on the infrastructure being recovered.
+
+Older recovery checkpoints may restore `vault-save-after-run`; remove that
+retired configuration field and its environment override before using them.

@@ -8,7 +8,7 @@ bindings and SQLite state remain ignored at the repository root. Earlier restore
 verification files are preserved outside the repository under the operator’s
 `~/.local/state/pocketdeploy/` directory.
 
-## Live checks
+## Historical initial live checks
 
 - Created a dedicated NSG and ARM A1.Flex VPS using an existing public subnet.
   Shape: 1 OCPU, 6 GiB RAM, 50 GiB boot disk; Canonical Ubuntu 24.04.
@@ -44,7 +44,7 @@ publishing AMD64/ARM64 manifests. Anonymous registry pull was independently chec
 
 ## Local and CI checks
 
-The final local synthetic suite passed 61 tests. It covers configuration/binding validation, private SQLite
+The initial implementation’s local synthetic suite passed 61 tests. It covers configuration/binding validation, private SQLite
 identity and file safety, backups/restores, OCI ownership/drift/interruption,
 SSH trust, environment updates, stop-first/rolling behavior and retained data.
 
@@ -80,3 +80,29 @@ The skill passed its frontmatter validator and independent operational review.
 A copy of the launcher outside the checkout also ran from its `docs/`
 subdirectory against the live test deployment: status was healthy and the plan
 reported no changes. No cloud mutation was required for this verification.
+
+## Explicit Vault workflow
+
+The current interface separates local initialization and encrypted snapshots
+from cloud workflows. `init` prepares local UUID/state/SSH authority without
+cloud calls. `vault-save` is explicit; `create`, `converge`, `delete` and failed
+workflows do not save automatically. The former `vault-save-after-run` setting
+is rejected, including false. The earlier live checks above used the initial
+implementation, which supported automatic snapshots; they are historical
+evidence, not a claim that the new explicit workflow was rerun live.
+
+The intended first-deployment sequence is `init → vault-save → create →
+vault-save`; routine updates use `plan → converge → vault-save`. A missing or
+failed explicit save leaves an older remote checkpoint. Local state must be
+preserved, and recovery must reconcile cloud reality before new mutations.
+
+Validation of the explicit workflow passed 83 synthetic tests and eight copied
+launcher checks, including offline `init`, repeated initialization without key
+replacement, and success/failure paths that never invoke Vault. The portable
+launcher now pins published package commit
+`14e72c350e6da55cc2e9c6f4347075dea454fd4d`. Skill validation and package builds passed.
+
+A live unchanged convergence was attempted after removing the automatic-save
+setting. It reached compute and failed in about one second; OCI local session
+validation reported an expired/invalid session, and CLI refresh failed. No
+successful live converge or new Vault checkpoint is claimed for this release.

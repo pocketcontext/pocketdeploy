@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise the published portable launcher outside this checkout; no cloud calls."""
 import os
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -40,13 +41,13 @@ def main():
         # A regression must fail locally before it can invoke deployment tools.
         marker = root / 'unexpected-external-command'
         guard = f'#!/bin/sh\nprintf blocked > "{marker}"\nexit 99\n'
-        for command in ('oci', 'ssh', 'scp', 'ssh-keygen', 'vaultcontext'):
+        for command in ('oci', 'ssh', 'scp', 'vaultcontext'):
             stub = launcher.parent / command
             stub.write_text(guard)
             stub.chmod(0o700)
         environment['PATH'] = str(launcher.parent) + os.pathsep + environment.get('PATH', '')
 
-        def invoke(directory, *arguments, expected=None):
+        def invoke(directory, *arguments, expected=None, successful=False):
             result = subprocess.run(
                 [str(launcher), *arguments], cwd=directory, env=environment,
                 capture_output=True, text=True, timeout=300,
@@ -54,12 +55,13 @@ def main():
             output = result.stdout + result.stderr
             if expected is None:
                 assert result.returncode == 0, output
-                assert 'vault-restore' in output and 'converge' in output, output
+                if not successful:
+                    assert 'vault-restore' in output and 'converge' in output and 'init' in output, output
             else:
                 assert result.returncode != 0, 'Launcher swallowed the command failure.'
                 assert expected in output, output
             assert not marker.exists(), 'Launcher test attempted an external deployment command.'
-            return output
+            return result.stdout if successful else output
 
         empty = root / 'empty'
         empty.mkdir()
@@ -84,7 +86,21 @@ def main():
         missing = invoke(nested, 'plan', '-f', 'missing.yml', expected='pocketdeploy:')
         assert STATE_REQUIRED not in missing, 'Missing explicit config fell back to discovery.'
         assert not list(root.rglob('.colors.sqlite*')), 'Checks unexpectedly wrote deployment state.'
-    print('Portable launcher: 6 checks passed (no cloud access).')
+        fresh = root / 'fresh'
+        fresh.mkdir()
+        (fresh / 'colors.yml').write_text(CONFIG.replace('compute-require-existing-state: true',
+                                                       'compute-require-existing-state: false'))
+        initialized = json.loads(invoke(fresh, 'init', successful=True))
+        assert (fresh / '.colors.sqlite').is_file()
+        assert (fresh / '.envrc.private').read_bytes() == b''
+        authority = [fresh / '.ssh' / name for name in (
+            'id_ed25519', 'id_ed25519.pub', 'host_ed25519', 'host_ed25519.pub', 'known_hosts')]
+        contents = [path.read_bytes() for path in authority]
+        repeated = json.loads(invoke(fresh, 'init', successful=True))
+        assert initialized['deployment_id'] == repeated['deployment_id']
+        assert contents == [path.read_bytes() for path in authority]
+
+    print('Portable launcher: 8 checks passed (no cloud access).')
 
 
 if __name__ == '__main__':
