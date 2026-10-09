@@ -383,3 +383,18 @@ Added bounded firewall disappearance polling to handle this OCI delay within one
 run. Synthetic regression coverage verifies delayed disappearance and preserves
 retry state on timeout. The full suite passes 310 tests; package builds and skill
 validation pass. No SMTP email or Vault backup was performed.
+
+Recreation provisioned a new VPS/firewall/boot volume and generated fresh SSH
+keys. Host setup completed successfully (201.2 seconds including readiness).
+The sending domain was recreated as 72952a40-0daf-4033-8f21-64835415ad2f and all
+five DNS records were recreated. Resend verification remained pending across
+three convergence retries, including the final 23.145-second attempt. Read-only
+comparison found all four email records matching Resend requirements at
+Cloudflare, both authoritative nameservers and resolver 1.1.1.1. This is an
+external verification blocker; application delivery, HTTPS checks and GitHub
+test-environment recreation have not yet run. Resume with converge after Resend
+reports verified. Do not describe the replacement website as live yet.
+
+Published source 363e79dd27e53293f4a12a6f53bab4c51c39134b and launcher pin
+9932c4ebd2b6d90565a1446759c2726aff78a09d both passed GitHub CI. The portable
+launcher passed 19 checks, including fast local expired-token rejection.
