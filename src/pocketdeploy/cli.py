@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 
 from blue.workflow import workflow, run as run_workflow
+from blue.cli import find_up
 from .common import DeployError, local_path
 from .config import load, scope
 from .state import State, deployment_lock
@@ -19,7 +20,7 @@ from . import vault
 def parser():
     p = argparse.ArgumentParser(prog='pocketdeploy', description=__doc__)
     p.add_argument('command', choices=['plan', 'create', 'converge', 'status', 'describe', 'ssh', 'delete', 'adopt', 'vault-save', 'vault-restore'])
-    p.add_argument('-f', '--file', default='colors.yml')
+    p.add_argument('-f', '--file', help='Configuration file (default: nearest colors.yml in the current directory or its parents)')
     p.add_argument('--dry-run', action='store_true')
     p.add_argument('--instance-id', help='Exact tagged OCI instance identity for explicit recovery/adoption')
     p.add_argument('--document', help='Vault state document to restore')
@@ -90,7 +91,10 @@ def execute(args):
     if args.overwrite and args.command != 'vault-restore':
         raise DeployError('--overwrite is supported only for vault-restore.')
     read_only = args.command in ('plan', 'status', 'describe') or args.dry_run
-    config = load(args.file, resolve=args.command not in ('ssh', 'delete', 'vault-save', 'vault-restore', 'status', 'describe'))
+    config_file = args.file if args.file is not None else find_up('colors.yml')
+    if config_file is None:
+        raise DeployError('No colors.yml found in the current directory or its parents; use -f to select a configuration.')
+    config = load(config_file, resolve=args.command not in ('ssh', 'delete', 'vault-save', 'vault-restore', 'status', 'describe'))
     # Reject unsupported application behavior before any cloud mutation.
     from .host import validate_config
     validate_config(config)
