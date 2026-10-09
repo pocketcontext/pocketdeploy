@@ -61,7 +61,7 @@ def main():
                 assert result.returncode != 0, 'Launcher swallowed the command failure.'
                 assert expected in output, output
             assert not marker.exists(), 'Launcher test attempted an external deployment command.'
-            return result.stdout if successful else output
+            return result
 
         empty = root / 'empty'
         empty.mkdir()
@@ -73,7 +73,7 @@ def main():
         )
         invoke(empty, '--help')
         missing = invoke(empty, 'plan', expected='pocketdeploy:')
-        assert STATE_REQUIRED not in missing, 'Missing config unexpectedly selected a deployment.'
+        assert STATE_REQUIRED not in missing.stdout + missing.stderr, 'Missing config unexpectedly selected a deployment.'
 
         deployment = root / 'deployment'
         nested = deployment / 'nested/deeper'
@@ -84,23 +84,53 @@ def main():
         (nested / 'colors.yml').write_text('unknown-field: true\n')
         invoke(nested, 'plan', '-f', '../../colors.yml', expected=STATE_REQUIRED)
         missing = invoke(nested, 'plan', '-f', 'missing.yml', expected='pocketdeploy:')
-        assert STATE_REQUIRED not in missing, 'Missing explicit config fell back to discovery.'
+        assert STATE_REQUIRED not in missing.stdout + missing.stderr, 'Missing explicit config fell back to discovery.'
         assert not list(root.rglob('.colors.sqlite*')), 'Checks unexpectedly wrote deployment state.'
         fresh = root / 'fresh'
         fresh.mkdir()
         (fresh / 'colors.yml').write_text(CONFIG.replace('compute-require-existing-state: true',
                                                        'compute-require-existing-state: false'))
-        initialized = json.loads(invoke(fresh, 'init', successful=True))
+        initialized_run = invoke(fresh, 'init', '--json', '--quiet', successful=True)
+        initialized_envelope = json.loads(initialized_run.stdout)
+        assert initialized_envelope['schema_version'] == 1
+        assert initialized_envelope['command'] == 'init' and initialized_envelope['ok'] is True
+        initialized = initialized_envelope['result']
+        assert initialized_run.stderr == '', initialized_run.stderr
         assert (fresh / '.colors.sqlite').is_file()
         assert (fresh / '.envrc.private').read_bytes() == b''
         authority = [fresh / '.ssh' / name for name in (
             'id_ed25519', 'id_ed25519.pub', 'host_ed25519', 'host_ed25519.pub', 'known_hosts')]
         contents = [path.read_bytes() for path in authority]
-        repeated = json.loads(invoke(fresh, 'init', successful=True))
+        repeated = json.loads(invoke(fresh, 'init', '--json', '--quiet', successful=True).stdout)['result']
         assert initialized['deployment_id'] == repeated['deployment_id']
         assert contents == [path.read_bytes() for path in authority]
+        text_run = invoke(fresh, 'init', '--quiet', successful=True)
+        assert text_run.stdout.strip(), 'Quiet mode suppressed the text result.'
+        assert text_run.stderr == '', text_run.stderr
+        try:
+            json.loads(text_run.stdout)
+        except json.JSONDecodeError:
+            pass
+        else:
+            raise AssertionError('Default output unexpectedly remains JSON.')
 
-    print('Portable launcher: 8 checks passed (no cloud access).')
+        missing_json = invoke(empty, 'plan', '--json', '--quiet', expected='')
+        missing_envelope = json.loads(missing_json.stdout)
+        assert missing_json.returncode == 1
+        assert missing_envelope['schema_version'] == 1
+        assert missing_envelope['command'] == 'plan' and missing_envelope['ok'] is False
+        assert missing_envelope['error']['code'] and missing_envelope['error']['message']
+        assert missing_json.stderr == '', missing_json.stderr
+
+        usage_json = invoke(empty, 'plan', '--json', '--quiet', '--unknown-option',
+                            expected='')
+        usage_envelope = json.loads(usage_json.stdout)
+        assert usage_json.returncode == 2
+        assert usage_envelope['schema_version'] == 1 and usage_envelope['ok'] is False
+        assert usage_envelope['error']['code'] and usage_envelope['error']['message']
+        assert usage_json.stderr == '', usage_json.stderr
+
+    print('Portable launcher: 11 checks passed (no cloud access).')
 
 
 if __name__ == '__main__':

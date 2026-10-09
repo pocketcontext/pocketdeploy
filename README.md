@@ -115,6 +115,30 @@ is the default; retained disks remain recorded. Application data and recovery
 files are not automatically purged. A disposable test may explicitly set false.
 Deletion does not remove externally managed networking, DNS, SMTP or Vault data.
 
+## Command output
+
+Commands print a readable summary to stdout by default. Use `--json` for
+scripts: stdout contains exactly one JSON envelope with `schema_version: 1`,
+`command`, `ok`, and `result` on success or `error` on failure. Error objects
+contain a safe `code` and `message`, plus the failing `stage` when known.
+Failures still exit nonzero. Output format does not change when redirected.
+Existing scripts that read JSON must add `--json` and read the `result` field.
+
+```sh
+pocketdeploy status --json | jq '.result'
+pocketdeploy plan --json --quiet > plan.json
+pocketdeploy converge --quiet
+```
+
+Progress and stage durations go to stderr. `--quiet` suppresses progress, while
+preserving the stdout result and text-mode error diagnostics. With `--json`,
+controller errors are part of the stdout envelope; launcher/runtime diagnostics
+may still reach stderr. Exit codes are 0 for success, 1 for operation failure,
+2 for invalid usage and 130 for interruption.
+
+`ssh` passes through remote stdout/stderr and exit status without a result
+footer. It rejects `--json`; capture remote command output directly if needed.
+
 ## Configuration
 
 The flat Colors format and `COLORS_PAR_*` parameter namespace are preserved.
@@ -284,3 +308,6 @@ launcher. Pin a full published commit, never a moving branch. The root symlink
 keeps one launcher payload; commit the new pin after testing a copied launcher
 outside this checkout. The launcher integration check uses synthetic missing-state
 fixtures and never accesses a cloud account.
+
+`--help` always prints ordinary help text, including with `--json`. A JSON
+usage error has `command: null` when argument parsing cannot identify a command.

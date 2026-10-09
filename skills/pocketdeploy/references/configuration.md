@@ -130,3 +130,12 @@ Keep local state and reconcile cloud observations before recovery from an older
 snapshot. The state document and version identify the exact saved checkpoint.
 Vault's file limit is 8 MiB. Local plaintext state remains private even though
 its remote snapshot is encrypted.
+
+## Output options
+
+`--json` and `--quiet` are command-line options, not `colors.yml` settings.
+Text is the default. `--json` returns a versioned envelope with `schema_version`,
+`command`, `ok` and either `result` or `error`; safe inventory fields are under
+`result`. Progress and timings use stderr, and `--quiet` suppresses them.
+Failure envelopes on stdout retain a nonzero exit status. SSH passes remote
+streams and exit status through without a footer and does not accept `--json`.

@@ -96,6 +96,24 @@ within that authorization. Default boot-volume retention preserves recovery
 material; disabling retention destroys the owned boot disk. Externally managed
 networking, DNS, SMTP and Vault data are not deleted.
 
+## Output and automation
+
+Default output is readable text on stdout, with progress and stage durations on
+stderr. For machine parsing use `--json`, which emits one envelope containing
+`schema_version: 1`, `command`, `ok`, and `result` on success or `error` on
+failure. Read inventory fields under `result`, for example
+`./pocketdeploy status --json | jq '.result.state.last_vault_backup'`.
+Errors carry a safe `code`, `message` and failing `stage` when known. Check the
+exit status as well as `ok`; do not parse human summaries or progress messages.
+
+`--quiet` suppresses progress, not the result or text error diagnostics. Use
+`./pocketdeploy plan --json --quiet` for a JSON result without controller progress;
+launcher/runtime diagnostics may still appear on stderr. Exit codes are 0 for
+success, 1 for operation failure, 2 for invalid usage and 130 for interruption.
+Output does not switch format when redirected. `ssh` is the exception: it
+passes through remote streams and exit status, appends nothing, and rejects
+`--json`.
+
 ## Vault recovery
 
 Use the installed VaultContext skill when authentication/unlock help is needed.
@@ -130,3 +148,6 @@ recovery material if VaultContext depends on the infrastructure being recovered.
 
 Older recovery checkpoints may restore `vault-save-after-run`; remove that
 retired configuration field and its environment override before using them.
+
+`--help` always prints ordinary help text, including with `--json`. A JSON
+usage error has `command: null` when argument parsing cannot identify a command.

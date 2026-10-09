@@ -112,3 +112,16 @@ changes and performed no automatic Vault save. Follow-up status confirmed a
 healthy running application with no pending host operations; the subsequent plan
 retained compute/firewall and reported no application changes. No new Vault
 checkpoint was created during this validation.
+
+## Text and JSON output verification
+
+The portable launcher pins package commit
+`6f07340332d614548a4cdd9e9fc1d4744e8898f9`. The suite passed 111 synthetic tests
+and 11 copied-launcher checks. Skill validation and package builds passed.
+
+Live unchanged convergence produced a human summary on stdout and timed stage
+progress only on stderr: compute 11.0s, host 2.5s, applications 1.2s, verification
+0.4s. A subsequent `plan --json --quiet` returned one versioned success envelope,
+empty stderr and no changes. An explicit harmless SSH command printed a test
+marker and exited 7; the launcher preserved exactly that stdout and exit code,
+without appending a result. No Vault snapshot was created.
