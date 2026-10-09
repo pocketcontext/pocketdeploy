@@ -125,3 +125,11 @@ progress only on stderr: compute 11.0s, host 2.5s, applications 1.2s, verificati
 empty stderr and no changes. An explicit harmless SSH command printed a test
 marker and exited 7; the launcher preserved exactly that stdout and exit code,
 without appending a result. No Vault snapshot was created.
+
+## No-argument help
+
+The launcher now pins `03c542e42f115c09ad2ccc88e43d3934e79c9485`. Running it
+without arguments prints help on stdout and exits 0, without loading configuration
+or accessing deployment resources. Unknown commands and a lone `--json` still
+exit 2. Validation passed 116 tests, 12 copied-launcher checks, skill validation
+and package builds.

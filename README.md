@@ -311,3 +311,7 @@ fixtures and never accesses a cloud account.
 
 `--help` always prints ordinary help text, including with `--json`. A JSON
 usage error has `command: null` when argument parsing cannot identify a command.
+
+Running `./pocketdeploy` with no arguments prints the same help as `--help`
+to stdout and exits 0, without loading configuration or contacting providers.
+Unknown commands and a lone `--json` remain usage errors (exit 2).

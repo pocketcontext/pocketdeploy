@@ -65,7 +65,11 @@ def main():
 
         empty = root / 'empty'
         empty.mkdir()
-        invoke(empty, '--help')
+        explicit_help = invoke(empty, '--help')
+        bare = invoke(empty)
+        assert bare.stdout == explicit_help.stdout
+        assert 'usage:' in bare.stdout and bare.stderr == ''
+        assert not list(empty.iterdir()), 'Help created local files.'
         # A standalone script must ignore the caller's project dependencies.
         (empty / 'pyproject.toml').write_text(
             '[project]\nname = "unrelated-project"\nversion = "0.0.0"\n'
@@ -130,7 +134,7 @@ def main():
         assert usage_envelope['error']['code'] and usage_envelope['error']['message']
         assert usage_json.stderr == '', usage_json.stderr
 
-    print('Portable launcher: 11 checks passed (no cloud access).')
+    print('Portable launcher: 12 checks passed (no cloud access).')
 
 
 if __name__ == '__main__':
