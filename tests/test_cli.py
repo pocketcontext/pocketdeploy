@@ -427,3 +427,17 @@ def test_verbose_quiet_direct_execute_rejected_before_config(monkeypatch):
     with pytest.raises(DeployError) as error:
         cli.execute(cli.parser().parse_args(['plan', '--verbose', '--quiet']))
     assert error.value.code == 'invalid_usage'
+
+
+def test_real_verbose_init_reports_only_safe_local_progress(tmp_path, monkeypatch, capsys):
+    import json
+    (tmp_path / 'colors.yml').write_text(SYNTHETIC_CONFIG)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli.sys, 'argv', ['pocketdeploy', 'init', '--json', '--verbose'])
+    monkeypatch.setattr(cli, 'OCI', lambda *a: pytest.fail('Init contacted OCI'))
+    assert cli.main() == 0
+    output = capsys.readouterr()
+    assert json.loads(output.out)['ok'] is True
+    assert 'init: local preparation: started' in output.err
+    assert 'init: local preparation: completed' in output.err
+    assert len(output.out.splitlines()) == 1

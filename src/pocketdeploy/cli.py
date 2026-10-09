@@ -15,7 +15,7 @@ from .state import State, deployment_lock
 from .oci import OCI
 from .host import Host
 from . import vault
-from .output import Reporter
+from .output import Reporter, operation as output_operation
 
 
 class UsageError(DeployError):
@@ -198,7 +198,8 @@ def execute(args, reporter=None):
         with manager as state:
             host = Host(config, state, root)
             if args.command == 'init':
-                return initialize(config, state, host, root)
+                with output_operation('init: local preparation'):
+                    return initialize(config, state, host, root)
             cloud = OCI(config, state)
             if read_only:
                 if args.command in ('status', 'describe'):
