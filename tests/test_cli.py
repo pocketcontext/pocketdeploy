@@ -59,6 +59,7 @@ def test_converge_never_implicitly_saves_to_vault(tmp_path, monkeypatch, fail_co
         result = cli.execute(args)
         assert calls == ['keys', 'compute', 'host', 'applications', 'verify']
         assert 'vault' not in result
+        assert result['profile'] == 'demo'
 
 
 SYNTHETIC_CONFIG = '''profile: demo
@@ -245,3 +246,109 @@ def test_missing_explicit_config_does_not_fall_back(tmp_path, monkeypatch, capsy
     assert output.out == ''
     assert 'Cannot parse configuration' in output.err
     assert not (tmp_path / '.colors.sqlite.lock').exists()
+
+
+def run_main(monkeypatch, argv, execute):
+    monkeypatch.setattr(cli.sys, 'argv', ['pocketdeploy', *argv])
+    monkeypatch.setattr(cli, 'execute', execute)
+    return cli.main()
+
+
+@pytest.mark.parametrize('flags', [[], ['--json']])
+def test_success_output_contract(monkeypatch, capsys, flags):
+    import json
+    def execute(args, reporter):
+        with reporter.stage('compute'):
+            pass
+        return {'profile': 'demo', 'actions': [], 'applications': []}
+    assert run_main(monkeypatch, ['plan', *flags], execute) == 0
+    output = capsys.readouterr()
+    assert 'compute' in output.err
+    if flags:
+        value = json.loads(output.out)
+        assert value['schema_version'] == 1
+        assert value['command'] == 'plan'
+        assert value['ok'] is True
+        assert value['result']['profile'] == 'demo'
+        assert len(output.out.splitlines()) == 1
+    else:
+        assert output.out.strip()
+        assert not output.out.startswith('{')
+
+
+def test_quiet_suppresses_progress_but_keeps_result(monkeypatch, capsys):
+    import json
+    def execute(args, reporter):
+        with reporter.stage('compute'):
+            pass
+        return {'profile': 'demo'}
+    assert run_main(monkeypatch, ['status', '--json', '--quiet'], execute) == 0
+    output = capsys.readouterr()
+    assert not output.err
+    assert json.loads(output.out)['ok']
+
+
+@pytest.mark.parametrize('failure,code,exit_code', [
+    (DeployError('Safe timeout.', code='command_timeout', stage='compute'), 'command_timeout', 1),
+    (ValueError('PRIVATE_SENTINEL'), 'operation_failed', 1),
+    (KeyboardInterrupt(), 'interrupted', 130),
+])
+def test_json_failures_one_safe_document(monkeypatch, capsys, failure, code, exit_code):
+    import json
+    def execute(args, reporter):
+        raise failure
+    assert run_main(monkeypatch, ['converge', '--json', '--quiet'], execute) == exit_code
+    output = capsys.readouterr()
+    assert not output.err
+    assert 'PRIVATE_SENTINEL' not in output.out
+    value = json.loads(output.out)
+    assert value['ok'] is False
+    assert value['error']['code'] == code
+    if isinstance(failure, DeployError):
+        assert value['error']['stage'] == 'compute'
+
+
+def test_json_usage_failure_never_echoes_bad_arguments(monkeypatch, capsys):
+    import json
+    assert run_main(monkeypatch, ['plan', '--json', '--PRIVATE_SENTINEL'], lambda *args: pytest.fail('execute called')) == 2
+    output = capsys.readouterr()
+    assert 'PRIVATE_SENTINEL' not in output.out + output.err
+    assert not output.err
+    assert json.loads(output.out)['error']['code'] == 'invalid_usage'
+
+
+@pytest.mark.parametrize('code,expected', [(0, 0), (7, 7), (255, 255), (-2, 130)])
+def test_ssh_preserves_streams_and_exit_without_footer(monkeypatch, capsys, code, expected):
+    import sys
+    def execute(args, reporter):
+        print('remote stdout')
+        print('remote stderr', file=sys.stderr)
+        return {'ssh_exit': code}
+    assert run_main(monkeypatch, ['ssh'], execute) == expected
+    output = capsys.readouterr()
+    assert output.out == 'remote stdout\n'
+    assert output.err == 'remote stderr\n'
+
+
+def test_ssh_json_rejected_before_execution(monkeypatch, capsys):
+    import json
+    assert run_main(monkeypatch, ['ssh', '--json'], lambda *args: pytest.fail('execute called')) == 2
+    output = capsys.readouterr()
+    assert json.loads(output.out)['error']['code'] == 'invalid_usage'
+
+
+def test_dag_preserves_failure_code_stage_and_progress(monkeypatch, capsys):
+    class Host:
+        def prepare_keys(self): return 'synthetic-public'
+        def cloud_init(self): return 'synthetic-private'
+    class Cloud:
+        def converge(self, *args):
+            raise DeployError('Safe timeout.', code='command_timeout')
+    with pytest.raises(DeployError) as exc:
+        asyncio.run(cli.converge({}, None, Cloud(), Host(), 'operation'))
+    assert exc.value.code == 'command_timeout'
+    assert exc.value.stage == 'compute'
+    output = capsys.readouterr()
+    assert output.out == ''
+    assert 'keys' in output.err and 'compute' in output.err
+    assert 'synthetic-private' not in output.err

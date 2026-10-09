@@ -6,15 +6,22 @@ from pathlib import Path
 class DeployError(Exception):
     """Only fixed, non-secret messages should reach this exception."""
 
+    def __init__(self, message, *, code="operation_failed", stage=None):
+        super().__init__(message)
+        self.code = code
+        self.stage = stage
+
 
 def run(args, *, input=None, timeout=120, env=None):
     try:
         r = subprocess.run(args, input=input, capture_output=True, text=True,
                            timeout=timeout, env=env)
-    except (OSError, subprocess.TimeoutExpired):
-        raise DeployError('Command unavailable or timed out; output suppressed.') from None
+    except subprocess.TimeoutExpired:
+        raise DeployError('Command timed out; output suppressed.', code="command_timeout") from None
+    except OSError:
+        raise DeployError('Command unavailable; output suppressed.', code="command_unavailable") from None
     if r.returncode:
-        raise DeployError('Command failed; output suppressed.') from None
+        raise DeployError('Command failed; output suppressed.', code='command_failed') from None
     return r.stdout
 
 

@@ -2,11 +2,11 @@
 import argparse
 import asyncio
 from contextlib import nullcontext
-import json
 import os
 from pathlib import Path
 import sys
 import stat
+import time
 
 from blue.workflow import workflow, run as run_workflow
 from blue.cli import find_up
@@ -16,12 +16,26 @@ from .state import State, deployment_lock
 from .oci import OCI
 from .host import Host
 from . import vault
+from .output import Reporter
+
+
+class UsageError(DeployError):
+    def __init__(self):
+        super().__init__('Invalid command arguments; run pocketdeploy --help.', code='invalid_usage')
+
+
+class ArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        # argparse messages can echo arbitrary user-supplied values.
+        raise UsageError()
 
 
 def parser():
-    p = argparse.ArgumentParser(prog='pocketdeploy', description=__doc__)
+    p = ArgumentParser(prog='pocketdeploy', description=__doc__, allow_abbrev=False)
     p.add_argument('command', choices=['init', 'plan', 'create', 'converge', 'status', 'describe', 'ssh', 'delete', 'adopt', 'vault-save', 'vault-restore'])
     p.add_argument('-f', '--file', help='Configuration file (default: nearest colors.yml in the current directory or its parents)')
+    p.add_argument('--json', action='store_true', help='Emit one versioned JSON result on stdout')
+    p.add_argument('--quiet', action='store_true', help='Suppress progress on stderr')
     p.add_argument('--dry-run', action='store_true')
     p.add_argument('--instance-id', help='Exact tagged OCI instance identity for explicit recovery/adoption')
     p.add_argument('--document', help='Vault state document to restore')
@@ -30,10 +44,6 @@ def parser():
     p.add_argument('--overwrite', action='store_true', help='Explicitly replace recovery destinations')
     p.add_argument('--ssh-command', help='Explicit remote command; otherwise open an interactive shell')
     return p
-
-
-def emit(value):
-    print(json.dumps(value, sort_keys=True))
 
 
 def initialize(config, state, host, root):
@@ -68,9 +78,11 @@ def initialize(config, state, host, root):
     return {'profile': config['profile'], 'initialized': True, 'deployment_id': state.deployment_id}
 
 
-async def converge(config, state, cloud, host, operation):
+async def converge(config, state, cloud, host, operation, reporter=None):
     """Blue schedules named steps; mutable secrets/state stay in closure objects."""
     results = {}
+    reporter = reporter or Reporter()
+    failure = None
 
     def keys(opts):
         public = host.prepare_keys()
@@ -100,27 +112,37 @@ async def converge(config, state, cloud, host, operation):
     def wire(name, _opts):
         fn, *successors = steps[name]
         def safe(opts):
-            print('pocketdeploy: ' + name, file=sys.stderr, flush=True)
+            nonlocal failure
             try:
-                return fn(opts)
+                with reporter.stage(name):
+                    return fn(opts)
             except DeployError as exc:
-                return {**opts, 'blue/exit': 1, 'blue/err': str(exc)}
+                if exc.stage is None:
+                    exc.stage = name
+                failure = exc
             except Exception:
-                return {**opts, 'blue/exit': 1, 'blue/err': 'Deployment step failed; private output suppressed.'}
+                failure = DeployError('Deployment step failed; private output suppressed.', stage=name)
+            return {**opts, 'blue/exit': 1, 'blue/err': str(failure)}
         return [safe, *successors]
-    result = await run_workflow(workflow(start='keys', wire_fn=wire), {})
-    config.pop('_cloud_init', None)
+    try:
+        result = await run_workflow(workflow(start='keys', wire_fn=wire), {})
+    finally:
+        config.pop('_cloud_init', None)
     if result.get('blue/exit'):
-        raise DeployError(result.get('blue/err', 'Deployment failed.'))
-    return {'connection': results['connection'], 'applications': results['applications'], 'status': results['status']}
+        raise failure or DeployError('Deployment failed.')
+    return {'profile': config.get('profile'), 'connection': results['connection'],
+            'applications': results['applications'], 'status': results['status']}
 
 
-def execute(args):
+def execute(args, reporter=None):
+    reporter = reporter or Reporter(quiet=getattr(args, "quiet", False), command=args.command)
     os.umask(0o077)
+    if args.command == 'ssh' and getattr(args, 'json', False):
+        raise UsageError()
     if args.dry_run and args.command not in ('create', 'converge', 'delete', 'plan'):
-        raise DeployError('--dry-run is supported only for plan/create/converge/delete.')
+        raise DeployError('--dry-run is supported only for plan/create/converge/delete.', code='invalid_usage')
     if args.overwrite and args.command != 'vault-restore':
-        raise DeployError('--overwrite is supported only for vault-restore.')
+        raise DeployError('--overwrite is supported only for vault-restore.', code='invalid_usage')
     read_only = args.command in ('plan', 'status', 'describe') or args.dry_run
     config_file = args.file if args.file is not None else find_up('colors.yml')
     if config_file is None:
@@ -135,7 +157,8 @@ def execute(args):
         destination = Path(args.destination).absolute() if args.destination else root
         destination.mkdir(parents=True, exist_ok=True, mode=0o700)
         with deployment_lock(local_path(destination, config['state-file'])):
-            return vault.restore(config, destination, args.document, args.version, args.overwrite)
+            with reporter.stage('vault-restore'):
+                return vault.restore(config, destination, args.document, args.version, args.overwrite)
     fresh = not state_path.exists()
     if fresh and config['compute-require-existing-state']:
         raise DeployError('Existing deployment state is required; restore it before continuing.')
@@ -164,16 +187,15 @@ def execute(args):
                 return {'profile': config['profile'], 'actions': actions, 'applications': app_actions}
             if args.command == 'ssh':
                 code = host.ssh(cloud.connection(), args.ssh_command)
-                if code:
-                    raise DeployError('SSH command failed.')
                 return {'ssh_exit': code}
             if args.command == 'vault-save':
-                return vault.save(config, state, root)
+                with reporter.stage('vault-save'):
+                    return vault.save(config, state, root)
             operation = state.begin_operation(args.command, config['_desired_hash'])
             try:
                 if args.command in ('create', 'converge'):
                     state.set_meta('desired-config', {k: v for k, v in config.items() if not k.startswith('_')})
-                    result = asyncio.run(converge(config, state, cloud, host, operation))
+                    result = asyncio.run(converge(config, state, cloud, host, operation, reporter))
                 elif args.command == 'delete':
                     result = cloud.delete(operation)
                 elif args.command == 'adopt':
@@ -190,17 +212,35 @@ def execute(args):
 
 
 def main():
-    args = parser().parse_args()
+    argv = sys.argv[1:]
+    reporter = Reporter(json_mode='--json' in argv, quiet='--quiet' in argv, command=None)
+    started = time.monotonic()
     try:
-        emit(execute(args))
+        args, unknown = parser().parse_known_args(argv)
+        reporter.command = args.command
+        if unknown:
+            raise UsageError()
+        reporter.json_mode = args.json
+        reporter.quiet = args.quiet
+        if args.command == 'ssh' and args.json:
+            raise DeployError('SSH does not support --json.', code='invalid_usage')
+        result = execute(args, reporter)
+        if args.command == 'ssh':
+            code = result['ssh_exit']
+            return code if code >= 0 else 128 - code
+        reporter.success(result, elapsed_seconds=time.monotonic() - started)
     except DeployError as exc:
-        print('pocketdeploy: ' + str(exc), file=sys.stderr)
-        return 1
+        reporter.failure(str(exc), code=exc.code, stage=exc.stage or reporter.failed_stage,
+                         elapsed_seconds=time.monotonic() - started)
+        return 2 if exc.code == 'invalid_usage' else 1
     except KeyboardInterrupt:
-        print('pocketdeploy: interrupted; reconcile recorded operations before retrying.', file=sys.stderr)
+        reporter.failure('Interrupted; reconcile recorded operations before retrying.',
+                         code='interrupted', stage=reporter.failed_stage,
+                         elapsed_seconds=time.monotonic() - started)
         return 130
     except Exception:
-        print('pocketdeploy: operation failed; private output suppressed.', file=sys.stderr)
+        reporter.failure('Operation failed; private output suppressed.',
+                         stage=reporter.failed_stage, elapsed_seconds=time.monotonic() - started)
         return 1
     return 0
 
