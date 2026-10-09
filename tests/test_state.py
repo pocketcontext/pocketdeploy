@@ -17,6 +17,11 @@ def test_identity_and_snapshot(tmp_path):
         step = state.intent(operation, 'create', {'password': 'private-value'})
         assert state.safe_status()['pending_steps'] == 1
         assert 'private-value' not in json.dumps(state.safe_status())
+        assert state.safe_status()['last_vault_backup'] is None
+        state.set_meta('vault-state-document', {'document': 'doc', 'version': 'ver',
+                                               'secret': 'private-value'})
+        assert state.safe_status()['last_vault_backup'] == {'document': 'doc', 'version': 'ver'}
+        assert 'private-value' not in json.dumps(state.safe_status())
         state.complete(step, {'secret': 'private-value'})
         state.finish_operation(operation, 'succeeded')
         assert not state.db.in_transaction

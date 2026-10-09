@@ -5,6 +5,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import time
+import tempfile
 
 from .common import DeployError, local_path
 
@@ -22,23 +23,27 @@ class Host:
         existing = getattr(self.state, 'get_resource', lambda name: None)('compute')
         if existing and any(not path.exists() for path in (self.key, self.pub, self.hostkey, self.hostpub)):
             raise DeployError('Existing compute SSH identity is missing; restore it from Vault.')
-        for path in (self.key, self.hostkey):
-            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            os.chmod(path.parent, 0o700)
-            if not path.exists():
-                result = subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(path)], capture_output=True)
+        pairs = ((self.key, self.pub), (self.hostkey, self.hostpub))
+        if any(private.exists() != public.exists() for private, public in pairs):
+            raise DeployError('SSH key pair is incomplete; restore complete identity')
+        for private, public in pairs:
+            if private.exists():
+                continue
+            for target in (private, public):
+                target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            # Publish to configured paths exclusively; existing custom public
+            # keys are authoritative, not replaceable copies of a sidecar.
+            with tempfile.TemporaryDirectory(prefix='.colors-keys-', dir=self.root) as temporary:
+                generated = Path(temporary) / 'key'
+                result = subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(generated)], capture_output=True)
                 if result.returncode:
                     raise DeployError('SSH key generation failed; output suppressed')
-            os.chmod(path, 0o600)
-            local_path(self.root, str(path) + '.pub')
-            if not Path(str(path) + '.pub').exists():
-                raise DeployError('SSH public key missing; restore complete identity')
-        for private, public in ((self.key, self.pub), (self.hostkey, self.hostpub)):
-            generated = Path(str(private) + '.pub')
-            if public != generated:
-                public.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                public.write_text(generated.read_text())
-                os.chmod(public, 0o600)
+                for source, target in ((generated, private), (Path(str(generated) + '.pub'), public)):
+                    os.chmod(source, 0o600)
+                    try:
+                        os.link(source, target)
+                    except FileExistsError:
+                        raise DeployError('SSH key destination appeared; existing files were preserved.') from None
         # Include a safe empty trust file in the pre-provision recovery set.
         self.known.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         if not self.known.exists():

@@ -25,3 +25,62 @@ def test_secret_only_in_stdin(tmp_path):
         host._remote({'ip': '192.0.2.1'}, 'plan')
     assert 'synthetic-value' not in repr(call.call_args.args)
     assert 'synthetic-value' in call.call_args.kwargs['input']
+
+
+def test_init_custom_public_paths_are_preserved_by_converge_preparation(tmp_path):
+    from pocketdeploy.cli import initialize
+    config = {
+        'profile': 'test', 'state-file': '.colors.sqlite', 'workdir': '.colors',
+        '_file': str(tmp_path / 'colors.yml'),
+        'ssh-public-key-file': '.ssh/client-public',
+        'ssh-host-public-key-file': '.ssh/server-public',
+    }
+    state = SimpleNamespace(deployment_id='test', get_resource=lambda name: None)
+    host = Host(config, state, tmp_path)
+    initialize(config, state, host, tmp_path)
+    files = (host.key, host.pub, host.hostkey, host.hostpub, host.known)
+    before = {path: path.read_bytes() for path in files}
+    assert not host.key.with_name(host.key.name + '.pub').exists()
+    with patch('pocketdeploy.host.subprocess.run', side_effect=AssertionError('Keys must be reused')):
+        assert host.prepare_keys() == host.pub.read_text().strip()
+    assert {path: path.read_bytes() for path in files} == before
+
+
+def test_prepare_custom_keys_never_uses_or_overwrites_stale_sidecar(tmp_path):
+    config = {'ssh-public-key-file': '.ssh/client-public'}
+    host = Host(config, SimpleNamespace(deployment_id='test'), tmp_path)
+    host.prepare_keys()
+    before = host.pub.read_bytes()
+    sidecar = host.key.with_name(host.key.name + '.pub')
+    sidecar.write_text('stale synthetic sidecar')
+    host.prepare_keys()
+    assert host.pub.read_bytes() == before
+    assert sidecar.read_text() == 'stale synthetic sidecar'
+
+
+def test_prepare_refuses_partial_pair_without_replacing_existing_public(tmp_path):
+    import pytest
+    from pocketdeploy.common import DeployError
+    host = Host({}, SimpleNamespace(deployment_id='test'), tmp_path)
+    host.pub.parent.mkdir()
+    host.pub.write_text('existing public authority')
+    with pytest.raises(DeployError, match='incomplete'):
+        host.prepare_keys()
+    assert not host.key.exists()
+    assert host.pub.read_text() == 'existing public authority'
+
+
+def test_init_refuses_configuration_and_lock_path_collisions(tmp_path):
+    import pytest
+    from pocketdeploy.cli import initialize
+    from pocketdeploy.common import DeployError
+    state = SimpleNamespace(deployment_id='test', get_resource=lambda name: None)
+    for reserved in ('colors.yml', '.colors.sqlite.lock', '.colors', '.envrc'):
+        config = {
+            'profile': 'test', 'state-file': '.colors.sqlite', 'workdir': '.colors',
+            '_file': str(tmp_path / 'colors.yml'), 'ssh-private-key-file': reserved,
+        }
+        host = Host(config, state, tmp_path)
+        with pytest.raises(DeployError, match='distinct paths'):
+            initialize(config, state, host, tmp_path)
+    assert list(tmp_path.iterdir()) == []

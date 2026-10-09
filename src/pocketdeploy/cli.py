@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import stat
 
 from blue.workflow import workflow, run as run_workflow
 from blue.cli import find_up
@@ -19,7 +20,7 @@ from . import vault
 
 def parser():
     p = argparse.ArgumentParser(prog='pocketdeploy', description=__doc__)
-    p.add_argument('command', choices=['plan', 'create', 'converge', 'status', 'describe', 'ssh', 'delete', 'adopt', 'vault-save', 'vault-restore'])
+    p.add_argument('command', choices=['init', 'plan', 'create', 'converge', 'status', 'describe', 'ssh', 'delete', 'adopt', 'vault-save', 'vault-restore'])
     p.add_argument('-f', '--file', help='Configuration file (default: nearest colors.yml in the current directory or its parents)')
     p.add_argument('--dry-run', action='store_true')
     p.add_argument('--instance-id', help='Exact tagged OCI instance identity for explicit recovery/adoption')
@@ -35,6 +36,38 @@ def emit(value):
     print(json.dumps(value, sort_keys=True))
 
 
+def initialize(config, state, host, root):
+    """Prepare local recovery authority without touching providers or old files."""
+    bindings = local_path(root, '.envrc.private')
+    pairs = ((host.key, host.pub), (host.hostkey, host.hostpub))
+    authority = [path for pair in pairs for path in pair] + [host.known]
+    paths = [*authority, bindings]
+    state_path = local_path(root, config['state-file'])
+    reserved = {Path(config['_file']).resolve(), local_path(root, '.envrc'),
+                local_path(root, config['workdir']), state_path,
+                *(Path(str(state_path) + suffix) for suffix in ('.lock', '-journal', '-wal', '-shm'))}
+    if len(set(paths)) != len(paths) or set(paths).intersection(reserved):
+        raise DeployError('Initialization files must have distinct paths.')
+    for path in paths:
+        if path.exists():
+            info = path.stat()
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
+                raise DeployError('Initialization files must be owned regular files without hardlinks.')
+    if state.get_resource('compute') and any(not path.exists() for path in authority):
+        raise DeployError('Existing compute SSH identity is missing; restore it from Vault.')
+    for private, public in pairs:
+        if private.exists() != public.exists():
+            raise DeployError('SSH key pair is incomplete; restore the complete identity before initialization.')
+    host.prepare_keys()
+    try:
+        descriptor = os.open(bindings, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+    except FileExistsError:
+        pass
+    else:
+        os.close(descriptor)
+    return {'profile': config['profile'], 'initialized': True, 'deployment_id': state.deployment_id}
+
+
 async def converge(config, state, cloud, host, operation):
     """Blue schedules named steps; mutable secrets/state stay in closure objects."""
     results = {}
@@ -43,8 +76,6 @@ async def converge(config, state, cloud, host, operation):
         public = host.prepare_keys()
         config['_cloud_init'] = host.cloud_init()
         results['public_key'] = public
-        if config.get('vault-save-after-run'):
-            vault.save(config, state, config['_root'])
         return dict(opts)
 
     def compute(opts):
@@ -94,7 +125,7 @@ def execute(args):
     config_file = args.file if args.file is not None else find_up('colors.yml')
     if config_file is None:
         raise DeployError('No colors.yml found in the current directory or its parents; use -f to select a configuration.')
-    config = load(config_file, resolve=args.command not in ('ssh', 'delete', 'vault-save', 'vault-restore', 'status', 'describe'))
+    config = load(config_file, resolve=args.command not in ('init', 'ssh', 'delete', 'vault-save', 'vault-restore', 'status', 'describe'))
     # Reject unsupported application behavior before any cloud mutation.
     from .host import validate_config
     validate_config(config)
@@ -108,12 +139,15 @@ def execute(args):
     fresh = not state_path.exists()
     if fresh and config['compute-require-existing-state']:
         raise DeployError('Existing deployment state is required; restore it before continuing.')
-    if fresh and args.command not in ('plan', 'create', 'converge', 'adopt'):
+    if fresh and args.command not in ('init', 'plan', 'create', 'converge', 'adopt'):
         raise DeployError('Deployment state is missing; restore or explicitly adopt it.')
     with deployment_lock(state_path):
         manager = nullcontext(None) if fresh and read_only else State(state_path, config['profile'], scope(config), create=fresh, read_only=read_only)
         with manager as state:
-            cloud, host = OCI(config, state), Host(config, state, root)
+            host = Host(config, state, root)
+            if args.command == 'init':
+                return initialize(config, state, host, root)
+            cloud = OCI(config, state)
             if read_only:
                 if args.command in ('status', 'describe'):
                     observed = cloud.inspect()
@@ -151,17 +185,7 @@ def execute(args):
                 state.finish_operation(operation, 'succeeded')
             except BaseException:
                 state.finish_operation(operation, 'failed')
-                if config.get('vault-save-after-run'):
-                    try:
-                        vault.save(config, state, root)
-                    except Exception:
-                        print('pocketdeploy: failed-run Vault backup also failed; local state preserved.', file=sys.stderr)
                 raise
-            if config.get('vault-save-after-run'):
-                try:
-                    result['vault'] = vault.save(config, state, root)
-                except Exception:
-                    raise DeployError('Deployment succeeded, but Vault backup failed; local state preserved. Run vault-save.') from None
             return result
 
 

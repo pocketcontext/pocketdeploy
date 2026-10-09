@@ -53,3 +53,23 @@ def test_only_declared_bindings_are_captured_and_env_changes_have_new_identity(t
     b = load(p, env={'COLORS_PAR_APP_TEST_TOKEN': 'second'})
     assert 'unrelated-token' not in a
     assert a['_desired_hash'] != b['_desired_hash']
+
+
+@pytest.mark.parametrize('value', ['true', 'false'])
+def test_retired_automatic_backup_option_requires_explicit_workflow(tmp_path, value):
+    path = tmp_path / 'colors.yml'
+    path.write_text(BASE + '\nvault-save-after-run: ' + value + '\n')
+    with pytest.raises(DeployError) as error:
+        load(path, env={}, resolve=False)
+    assert 'vault-save-after-run' in str(error.value)
+    assert 'vault-save' in str(error.value)
+    assert 'remove' in str(error.value).lower()
+
+
+def test_retired_automatic_backup_environment_override_is_not_silently_ignored(tmp_path):
+    path = tmp_path / 'colors.yml'
+    path.write_text(BASE)
+    with pytest.raises(DeployError) as error:
+        load(path, env={'COLORS_PAR_VAULT_SAVE_AFTER_RUN': 'false'}, resolve=False)
+    assert 'COLORS_PAR_VAULT_SAVE_AFTER_RUN' in str(error.value)
+    assert 'vault-save' in str(error.value)

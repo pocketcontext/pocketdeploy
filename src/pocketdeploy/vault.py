@@ -3,6 +3,7 @@ import json
 import os
 import sqlite3
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .common import DeployError, local_path, run
@@ -71,7 +72,7 @@ def save(config, state, root):
         state.snapshot(snapshot)
         result = _save_file(config, snapshot, config['profile'] + '-state', state_document)
     # The published snapshot deliberately does not reference its own new version.
-    state.set_meta('vault-state-document', result)
+    state.set_meta('vault-state-document', {**result, 'saved_at': datetime.now(timezone.utc).isoformat()})
     return {'state_document': result['document'], 'state_version': result['version'], 'file_count': len(refs)}
 
 

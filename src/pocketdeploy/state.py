@@ -188,7 +188,11 @@ class State:
             target.close()
 
     def safe_status(self):
+        receipt = self.get_meta('vault-state-document', {})
+        backup = {key: receipt[key] for key in ('document', 'version', 'saved_at')
+                  if isinstance(receipt, dict) and isinstance(receipt.get(key), str)}
         return {'deployment_id': self.deployment_id,
+                'last_vault_backup': backup or None,
                 'resource_count': self.db.execute('SELECT count(*) FROM resources').fetchone()[0],
                 'pending_steps': self.db.execute("SELECT count(*) FROM steps WHERE status='pending'").fetchone()[0],
                 'operations': [dict(r) for r in self.db.execute(

@@ -47,6 +47,10 @@ def test_versioned_roundtrip(tmp_path, monkeypatch):
         state.set_meta('private', 'synthetic-secret')
         first = vault.save(config, state, root)
         second = vault.save(config, state, root)
+        receipt = state.safe_status()['last_vault_backup']
+        assert receipt['document'] == second['state_document']
+        assert receipt['version'] == second['state_version']
+        assert receipt['saved_at']
         assert first['state_document'] == second['state_document']
         assert all('--document' in call for call in calls[8:16])
         old_ref = state.get_meta('vault-files')['.envrc.private']

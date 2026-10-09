@@ -18,7 +18,7 @@ DEFAULTS = {
     'compute-prevent-destroy': True, 'compute-require-existing-state': False,
     'compute-ssh-sources': [], 'compute-http-sources': [],
     'provider-dns': 'no-infra', 'provider-smtp': 'no-infra',
-    'vault-save-after-run': False, 'once-version': 'v0.3.3',
+    'once-version': 'v0.3.3',
 }
 ROOT_KEYS = set(DEFAULTS) | {
     'profile', 'oci-config-file-profile', 'oci-region', 'oci-compartment-id',
@@ -44,6 +44,9 @@ def load(path, *, env=None, resolve=True):
         raise DeployError('Cannot parse configuration.') from None
     if not isinstance(raw, dict):
         raise DeployError('Configuration must be a mapping.')
+    environment = os.environ if env is None else env
+    if 'vault-save-after-run' in raw or 'COLORS_PAR_VAULT_SAVE_AFTER_RUN' in environment:
+        raise DeployError('vault-save-after-run / COLORS_PAR_VAULT_SAVE_AFTER_RUN is retired; remove it and use explicit pocketdeploy vault-save checkpoints.')
     if set(raw) - ROOT_KEYS:
         raise DeployError('Unsupported configuration field; see the configuration reference.')
     overlaid = read_pars({**DEFAULTS, **raw}, os.environ if env is None else env)
@@ -73,7 +76,7 @@ def validate(c):
     for key in ['oci-config-file-profile', 'oci-compartment-id', 'oci-subnet-id', 'oci-availability-domain']:
         if not isinstance(c.get(key), str) or not c[key].strip() or '<' in c[key]:
             raise DeployError('OCI profile, compartment, subnet and availability domain are required.')
-    for key in ['compute-prevent-destroy', 'compute-require-existing-state', 'vault-save-after-run', 'compute-retain-boot-volume']:
+    for key in ['compute-prevent-destroy', 'compute-require-existing-state', 'compute-retain-boot-volume']:
         if key in c and type(c[key]) is not bool:
             raise DeployError('Protection, retention and backup flags must be booleans.')
     for key in ['oci-ocpus', 'oci-memory-in-gbs', 'oci-boot-volume-size-in-gbs']:

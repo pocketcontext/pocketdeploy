@@ -19,7 +19,6 @@ compute-http-sources:
 - 0.0.0.0/0
 vault-id: 3p7z9sqlxtujbsl
 vault-command: vaultcontext
-vault-save-after-run: true
 once:
   applications:
   - host: 130.61.21.56.sslip.io
