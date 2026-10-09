@@ -133,3 +133,12 @@ without arguments prints help on stdout and exits 0, without loading configurati
 or accessing deployment resources. Unknown commands and a lone `--json` still
 exit 2. Validation passed 116 tests, 12 copied-launcher checks, skill validation
 and package builds.
+
+## Current-directory configuration
+
+The launcher now pins `40f20bb2bbbd848e3a8c7bd10b1a7988faa18279`. Default
+configuration selection uses only `colors.yml` in the current working directory;
+parent files are ignored. Explicit `-f` paths remain relative to the caller, and
+state/key paths remain relative to the selected configuration. Validation passed
+117 tests, 12 copied-launcher checks and skill validation. Earlier upward-search
+verification above describes historical behavior.

@@ -83,12 +83,13 @@ def main():
         nested = deployment / 'nested/deeper'
         nested.mkdir(parents=True)
         (deployment / 'colors.yml').write_text(CONFIG)
-        invoke(nested, 'plan', expected=STATE_REQUIRED)
-        # Explicit -f must win over the invalid nearest discovered configuration.
+        parent_ignored = invoke(nested, 'plan', expected='No colors.yml found in the current directory')
+        assert STATE_REQUIRED not in parent_ignored.stdout + parent_ignored.stderr
+        # Explicit -f must win over an invalid configuration in the current directory.
         (nested / 'colors.yml').write_text('unknown-field: true\n')
         invoke(nested, 'plan', '-f', '../../colors.yml', expected=STATE_REQUIRED)
         missing = invoke(nested, 'plan', '-f', 'missing.yml', expected='pocketdeploy:')
-        assert STATE_REQUIRED not in missing.stdout + missing.stderr, 'Missing explicit config fell back to discovery.'
+        assert STATE_REQUIRED not in missing.stdout + missing.stderr, 'Missing explicit config fell back to another file.'
         assert not list(root.rglob('.colors.sqlite*')), 'Checks unexpectedly wrote deployment state.'
         fresh = root / 'fresh'
         fresh.mkdir()

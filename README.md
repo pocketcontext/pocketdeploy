@@ -58,8 +58,8 @@ repository and make it executable. Track that launcher alongside `colors.yml`
 and `.envrc`. Its package commit is explicit in the script; updating the skill
 alone does not change a previously copied launcher.
 
-Commands search for the nearest `colors.yml` from the caller's working directory
-upward. `-f /path/to/colors.yml` explicitly selects a deployment. State and key
+Commands use `colors.yml` in the caller's current working directory only;
+parent directories are not searched. `-f /path/to/colors.yml` explicitly selects a deployment. State and key
 paths resolve relative to that configuration, never relative to the launcher.
 The launcher does not load `.envrc.private`; use direnv or your trusted shell.
 See [the skill](skills/pocketdeploy/SKILL.md) for operator instructions.

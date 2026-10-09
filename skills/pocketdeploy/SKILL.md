@@ -7,7 +7,7 @@ description: Configure and operate PocketDeploy OCI VPS deployments from colors.
 
 Use the bundled `pocketdeploy` launcher, which runs an immutable package commit
 through uv. Copy it into a deployment repository and make it executable, or run
-it by absolute path. It discovers `colors.yml` from the current directory upward;
+it by absolute path. It uses `colors.yml` only in the current working directory;
 `-f /path/to/colors.yml` selects an explicit deployment. Its own installation
 location does not select the deployment. Read
 [configuration.md](references/configuration.md) before editing desired state.
