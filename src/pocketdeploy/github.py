@@ -67,12 +67,22 @@ class GitHub:
 
     def _key(self, app):
         private, public = self.key_paths(app)
-        record = self.state.get_meta('github-key:' + app['github'])
-        if record and (not private.exists() or not public.exists()):
-            raise DeployError('GitHub deployment key is missing; restore the existing authority.')
-        if private.exists() != public.exists():
-            raise DeployError('GitHub deployment key pair is incomplete; restore it.')
+        # Missing or partial local credentials are disposable. Validate every
+        # surviving file before replacement; never follow a symlink.
+        for path in (private, public):
+            if path.is_symlink():
+                raise DeployError('GitHub keys must not be symlinks.')
+            if path.exists():
+                info = path.stat()
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
+                    raise DeployError('GitHub keys must be owned regular files without hardlinks.')
+        pending = 'github-key-pending:' + app['github']
+        if self.state.get_meta(pending) == 'replace' or private.exists() != public.exists():
+            self.state.set_meta(pending, 'replace')
+            private.unlink(missing_ok=True)
+            public.unlink(missing_ok=True)
         if not private.exists():
+            self.state.set_meta(pending, 'replace')
             private.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(prefix='.github-key-', dir=self.root) as directory:
                 generated = Path(directory) / 'key'
@@ -83,12 +93,16 @@ class GitHub:
                         os.link(source, target)
                     except FileExistsError:
                         raise DeployError('GitHub key destination appeared; existing files were preserved.') from None
+            self.state.set_meta(pending, True)
         for path in (private, public):
             info = path.stat()
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
                 raise DeployError('GitHub keys must be owned regular files without hardlinks.')
         private.chmod(0o600)
         public.chmod(0o600)
+        derived = run(['ssh-keygen', '-y', '-P', '', '-f', str(private)]).split()
+        if derived[:2] != public.read_text().split()[:2] or len(derived) < 2:
+            raise DeployError('GitHub deployment key pair does not match; remove the disposable pair and retry convergence.')
         self.state.set_meta('github-key:' + app['github'], {'path': str(private.relative_to(self.root))})
         return private, public.read_text().strip()
 
@@ -120,9 +134,6 @@ class GitHub:
                 variables = {v['name']: v['value'] for v in self._pages(base + '/variables', 'variables')}
                 if variables.get('POCKETDEPLOY_DEPLOYMENT_ID') != self.state.deployment_id and not (variables.get('POCKETDEPLOY_DEPLOYMENT_ID') is None and self.state.get_meta('github-pending:' + repo, False)):
                     raise DeployError('GitHub environment deployment ownership does not match.')
-                private, public = self.key_paths(app)
-                if not private.exists() or not public.exists():
-                    raise DeployError('GitHub deployment key is missing; restore the existing authority.')
         return {'repositories': len(self.apps)}
 
     def plan(self):
@@ -157,7 +168,7 @@ class GitHub:
             removed.append({'repository': repo, 'environment': environment})
         return {'deleted_environments': removed}
 
-    def converge(self, connection, operation_id):
+    def converge(self, connection, operation_id, rotate_keys=False):
         results = []
         for app in self.apps:
             repo = app['github']
@@ -176,9 +187,15 @@ class GitHub:
                 variables = {v['name']: v['value'] for v in self._pages(base + '/variables', 'variables')}
                 if variables.get('POCKETDEPLOY_DEPLOYMENT_ID') != self.state.deployment_id and not (variables.get('POCKETDEPLOY_DEPLOYMENT_ID') is None and self.state.get_meta('github-pending:' + repo, False)):
                     raise DeployError('GitHub environment deployment ownership does not match.')
+            pending = 'github-key-pending:' + repo
+            if rotate_keys and not self.state.get_meta(pending, False):
+                # Record intent before removing local authority. An interrupted
+                # retry reuses the pending key instead of rotating it again.
+                self._key(app)  # validate existing paths before unlinking
+                self.state.set_meta(pending, 'replace')
             private, public = self._key(app)
             # Install and verify host authority before making a new CI target visible.
-            self.host.install_github(connection, [{'app': app, 'public_key': public, 'repository': repo}])
+            self.host.install_github(connection, [{'app': app, 'public_key': public, 'repository': repo, 'preserve_existing_keys': True}])
             step = self.state.intent(operation_id, 'github-environment', {'repository': repo, 'environment': self.environment})
             self.state.set_meta('github-pending:' + repo, True)
             response = existing or self._api(base, 'PUT', {'deployment_branch_policy': {'protected_branches': False, 'custom_branch_policies': True}})
@@ -199,6 +216,12 @@ class GitHub:
             for name, value in values.items():
                 run(['gh', 'variable', 'set', name, '--repo', repo, '--env', self.environment], input=value)
             run(['gh', 'secret', 'set', 'SSH_PRIVATE_KEY', '--repo', repo, '--env', self.environment], input=private.read_text())
+            # Only retire old host authority after GitHub accepted the new
+            # secret. Failure or a lost response leaves both keys usable;
+            # retries republish the same pending credential.
+            self.host.install_github(connection, [{'app': app, 'public_key': public,
+                                                   'repository': repo, 'preserve_existing_keys': False}])
+            self.state.set_meta(pending, False)
             result = {'repository': repo, 'environment': self.environment}
             self.state.complete(step, result)
             self.state.set_meta('github-pending:' + repo, False)

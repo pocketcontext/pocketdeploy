@@ -217,6 +217,31 @@ def test_github_dispatcher_restricts_key_and_command(tmp_path, monkeypatch):
     assert (home / '.ssh/authorized_keys').read_text() == line
 
 
+def test_github_rotation_keeps_old_key_until_explicit_prune(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    setup(tmp_path, monkeypatch)
+    home = tmp_path / 'home'
+    home.mkdir()
+    monkeypatch.setattr(remote.pwd, 'getpwnam', lambda _: SimpleNamespace(pw_dir=str(home), pw_uid=0, pw_gid=0))
+    monkeypatch.setattr(remote.os, 'chown', lambda *args: None)
+    target = {'app': app(), 'repository': 'example/app', 'public_key': 'ssh-ed25519 b2xk comment'}
+    request = {'deployment_id': 'test', 'user': 'ubuntu', 'source': '# synthetic', 'targets': [target]}
+    remote.install_github(request)
+    authorized = home / '.ssh/authorized_keys'
+    with authorized.open('a') as output:
+        output.write('ssh-ed25519 b3BlcmF0b3I operator\n')
+    target.update(public_key='ssh-ed25519 bmV3 comment', preserve_existing_keys=True)
+    remote.install_github(request)
+    remote.install_github(request)
+    assert len(authorized.read_text().splitlines()) == 3
+    assert ' b2xk ' in authorized.read_text()
+    target['preserve_existing_keys'] = False
+    remote.install_github(request)
+    assert ' b2xk ' not in authorized.read_text()
+    assert ' bmV3 ' in authorized.read_text()
+    assert 'operator' in authorized.read_text()
+
+
 def test_smtp_arguments_match_pinned_once_v033_settings_flags():
     # basecamp/once v0.3.3 internal/command/settings_flags.go defines five
     # StringVar settings; application_settings.go stores them under smtp.

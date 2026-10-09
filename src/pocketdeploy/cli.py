@@ -66,9 +66,10 @@ Use -f to select a deployment. Run without arguments to show this help.''')
     p.add_argument('--instance-id', help='Exact tagged OCI instance identity for explicit recovery/adoption')
     p.add_argument('--document', help='Vault state document to restore')
     p.add_argument('--version', help='Exact Vault state version to restore')
-    p.add_argument('--destination', help='Empty directory for restoring a recovery set')
+    p.add_argument('--destination', help='Recovery directory containing matching Git configuration')
     p.add_argument('--overwrite', action='store_true', help='Explicitly replace recovery destinations')
     p.add_argument('--ssh-command', help='Explicit remote command; otherwise open an interactive shell')
+    p.add_argument('--rotate-github-keys', action='store_true', help='Rotate disposable GitHub deployment keys during converge')
     p.add_argument('--to', help='Recipient for the explicit smtp-test command')
     return p
 
@@ -112,7 +113,7 @@ def initialize(config, state, host, root):
     return {'profile': config['profile'], 'initialized': True, 'deployment_id': state.deployment_id}
 
 
-async def converge(config, state, cloud, host, operation, reporter=None):
+async def converge(config, state, cloud, host, operation, reporter=None, rotate_github_keys=False):
     """Blue schedules named steps; mutable secrets/state stay in closure objects."""
     results = {}
     reporter = reporter or Reporter()
@@ -143,7 +144,7 @@ async def converge(config, state, cloud, host, operation, reporter=None):
 
     def publish_github(opts):
         if github:
-            results['github'] = github.converge(results['connection'], operation)
+            results['github'] = github.converge(results['connection'], operation, rotate_keys=rotate_github_keys)
         return dict(opts)
 
     def keys(opts):
@@ -214,6 +215,8 @@ def execute(args, reporter=None):
         raise DeployError('--overwrite is supported only for vault-restore.', code='invalid_usage')
     if bool(getattr(args, 'to', None)) != (args.command == 'smtp-test'):
         raise DeployError('smtp-test requires --to; --to is only supported for smtp-test.', code='invalid_usage')
+    if getattr(args, 'rotate_github_keys', False) and (args.command != 'converge' or args.dry_run):
+        raise DeployError('--rotate-github-keys requires converge without --dry-run.', code='invalid_usage')
     read_only = args.command in ('plan', 'status') or args.dry_run
     config_file = args.file if args.file is not None else 'colors.yml'
     if args.file is None and not Path(config_file).exists():
@@ -287,7 +290,7 @@ def execute(args, reporter=None):
             try:
                 if args.command == 'converge':
                     state.set_meta('desired-config', {k: v for k, v in config.items() if not k.startswith('_')})
-                    result = asyncio.run(converge(config, state, cloud, host, operation, reporter))
+                    result = asyncio.run(converge(config, state, cloud, host, operation, reporter, rotate_github_keys=getattr(args, 'rotate_github_keys', False)))
                 elif args.command == 'delete':
                     if config['compute-prevent-destroy']:
                         raise DeployError('Deletion protection is enabled.')

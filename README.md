@@ -283,7 +283,13 @@ SSH key, main-only branch policy, `SSH_PRIVATE_KEY` environment secret and
 `SERVER_IP`, `SERVER_USER`, `SSH_KNOWN_HOSTS`, `SITE_URL`,
 `POCKETDEPLOY_PROFILE`, `POCKETDEPLOY_DEPLOYMENT_ID` variables. SSH keys remain in
 ignored `.ssh/github-<repository-hash>` files. `init` prepares these local keys,
-and explicit Vault snapshots include them. Provisioning an environment and its
+but Vault snapshots exclude them. Missing or incomplete GitHub key pairs are
+recreated by `converge`; unchanged runs reuse them. To rotate deliberately, run
+`pocketdeploy converge --rotate-github-keys`. Rotation installs the new public key
+alongside the old one, updates the GitHub secret, then removes the old authority.
+Interrupted rotations resume with the pending key. Queued jobs that already read
+the old secret may need retrying after rotation. `plan` and `status` never rotate
+keys. Provisioning an environment and its
 settings is not atomic; a release during setup may fail until convergence completes.
 
 The website workflow discovers all existing environments after publishing its
@@ -325,20 +331,33 @@ pocketdeploy vault-restore \
   --document DOCUMENT_ID --version VERSION_ID --destination /absolute/path/to/recovery-check
 ```
 
-Recovery files are the exact config used (restored as `colors.yml`),
-`.envrc.private`, the SSH client key pair, server key pair and known hosts. They
-must exist before a complete recovery set can be saved. Create an empty private
-bindings file if the deployment needs none. File versions upload first; the
-consistent SQLite snapshot uploads last and references the exact versions.
-`colors.yml` is also included in Vault to pair the desired configuration with
-its recovery checkpoint. `.envrc` and package code are recovered from Git.
+Recovery files are `.envrc.private`, the SSH operator key pair, server key pair
+and known hosts, plus a consistent SQLite snapshot. They must exist before a
+complete recovery set can be saved. Create an empty private bindings file if the
+deployment needs none. File versions upload first; the SQLite snapshot uploads
+last and references their exact versions.
+
+`colors.yml`, `.envrc` and package code come from Git. The snapshot records the
+configuration content SHA256 and Git commit when available; the content hash
+is authoritative, so unrelated Git commits do not prevent recovery. Preserve
+uncommitted configuration separately or commit it before saving: a commit ID
+alone cannot recover local edits. GitHub deployment keys are disposable and are
+excluded from Vault; convergence recreates missing keys using the recovered
+operator SSH authority and GitHub administrator access.
+
+Before restoring, check out matching `colors.yml` in the destination directory.
+Both the selected configuration and destination configuration must match the
+checkpoint hash. Restore never replaces configuration, even with `--overwrite`.
+Older snapshots containing configuration and GitHub keys remain readable: their
+configuration is staged only to verify its hash, and their GitHub keys are skipped.
+Existing Vault documents and historical versions are not deleted.
 The snapshot does not need to contain its own newly assigned Vault version ID.
 Vault's file limit is 8 MiB. Vault operations are explicit: `converge`,
 `delete` and failed workflows never save automatically or require Vault access.
 The retired `vault-save-after-run` field is rejected, including when false; remove
 it from existing configuration and remove `COLORS_PAR_VAULT_SAVE_AFTER_RUN`
-from the operator environment. Older Vault snapshots may restore this retired
-field; remove it from restored `colors.yml` before continuing.
+from the operator environment. Older Git configurations may contain this retired field; migrate it before
+creating a new recovery checkpoint.
 
 Run `vault-save` after successful mutations and after failures that changed local
 state. Until that succeeds, Vault contains an older checkpoint and may lack new
@@ -350,7 +369,7 @@ Restore stages and validates all files before publishing them, with the database
 last. Existing destinations require `--overwrite`. A filesystem interruption
 between file replacements requires repeating restore; multi-file publication is
 not atomic. Restore never executes private bindings or starts deployments.
-Review the restored configuration and run `plan` before taking over. If the
+Review the Git configuration and run `plan` before taking over. If the
 restored config contains machine-specific executable paths, update them locally.
 
 Keep independent encrypted recovery material if VaultContext itself depends on

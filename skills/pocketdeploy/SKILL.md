@@ -139,9 +139,17 @@ it in arguments. Reuse an existing unlocked session.
   --destination /absolute/path/to/recovery-check
 ```
 
-The recovery set includes `colors.yml`, `.envrc.private`, client and host SSH
-key pairs, per-repository GitHub SSH key pairs, known hosts and a consistent SQLite snapshot. File versions upload
-first; state uploads last with exact references. `.envrc` and code come from Git.
+The recovery set includes `.envrc.private`, operator and host SSH key pairs,
+known hosts and a consistent SQLite snapshot. File versions upload first; state
+uploads last with exact references. `colors.yml`, `.envrc` and code come from Git.
+The snapshot records the configuration content SHA256 and Git commit when
+available. Commit desired configuration before saving or preserve local edits
+separately; content hashes must match during recovery.
+GitHub deployment keys are excluded. `converge` recreates missing pairs; use
+`converge --rotate-github-keys` for deliberate rotation. Old host authority stays
+until the new GitHub secret is accepted, then it is removed. Interrupted rotations
+resume; queued jobs holding an old secret may need retrying. Read-only commands
+never rotate keys.
 Vault encrypts remote copies, not local files. Only explicit `vault-save` uploads
 a checkpoint; provisioning, convergence, deletion and failed workflows never
 back up automatically. Remove the retired `vault-save-after-run` field, even if
@@ -151,7 +159,9 @@ local state and reconcile cloud reality when recovering an older checkpoint.
 Retry a failed save after fixing Vault access; do not rerun infrastructure changes
 just to retry the backup.
 
-Restore into an empty directory for verification. Existing destinations require
+Check out matching `colors.yml` into the recovery destination before restoring.
+Both selected and destination configuration must match the checkpoint hash.
+Configuration is never overwritten. Existing private destinations require
 explicit `--overwrite`. Restore neither executes private files nor deploys.
 Stop the old operator before handover, review non-secret desired state, and run
 `./pocketdeploy plan -f /absolute/path/to/recovery-check/colors.yml` before
@@ -159,8 +169,10 @@ mutations, with the required bindings supplied by your trusted shell. An interru
 restore must be repeated; publication is not atomic. Keep independent encrypted
 recovery material if VaultContext depends on the infrastructure being recovered.
 
-Older recovery checkpoints may restore `vault-save-after-run`; remove that
-retired configuration field and its environment override before using them.
+Older snapshots remain readable: their configuration is staged for hash
+verification only, and their GitHub keys are skipped. Historical Vault documents
+are retained. Retired configuration fields must be migrated before creating a
+new recovery checkpoint.
 
 `--help` always prints ordinary help text, including with `--json`. A JSON
 usage error has `command: null` when argument parsing cannot identify a command.

@@ -349,7 +349,12 @@ def install_github(request):
         dispatcher_temp.chmod(0o600)
         os.replace(dispatcher_temp, dispatcher)
         marker = 'pocketdeploy-github-' + token
-        lines = [line for line in lines if not line.endswith(' ' + marker)]
+        if not target.get('preserve_existing_keys', False):
+            lines = [line for line in lines if not line.endswith(' ' + marker)]
+        # Idempotently add the candidate while retaining prior authority until
+        # the controller has updated GitHub's secret.
+        lines = [line for line in lines if not (line.endswith(' ' + marker)
+                 and (' ' + public[0] + ' ' + public[1] + ' ') in line)]
         lines.append('restrict,command="sudo -n --preserve-env=SSH_ORIGINAL_COMMAND /usr/bin/python3 '
                      + str(dispatcher) + '" ' + public[0] + ' ' + public[1] + ' ' + marker)
     temporary = ssh / 'authorized_keys.pocketdeploy.tmp'

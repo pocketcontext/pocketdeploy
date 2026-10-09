@@ -270,3 +270,17 @@ The final live plan succeeded in 17.836 seconds: compute/firewall retained witho
 changed fields, all five DNS records no-op, and the mutable website image tag
 requires its normal converge-time digest check. SMTP/GitHub report reconciliation;
 no resource replacement was proposed.
+
+## Git configuration recovery and disposable GitHub keys
+
+New Vault snapshots exclude colors.yml and GitHub deployment key files. Synthetic
+recovery checks cover current and legacy manifests, matching caller/destination
+configuration hashes, dirty Git provenance, missing configuration and reserved
+path aliases. GitHub tests cover missing/partial keys, private/public mismatch,
+additive authorization, failed secret publication, interrupted preparation and
+failed pruning with retry. No live Vault backup or credential rotation was
+performed for this change. Existing Vault history is retained.
+
+All 240 tests passed, package source/wheel builds passed, and the portable skill
+validated. Three invalid rotation-option combinations were rejected before
+configuration access.

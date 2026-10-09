@@ -128,7 +128,11 @@ deployment automatically saves state. Save after mutations and after failures
 that changed local state; until then, the last remote checkpoint may be stale.
 Keep local state and reconcile cloud observations before recovery from an older
 snapshot. The state document and version identify the exact saved checkpoint.
-Vault's file limit is 8 MiB. Local plaintext state remains private even though
+`colors.yml` and `.envrc` come from Git; Vault excludes configuration and GitHub
+keys. Snapshots record configuration SHA256 and Git commit when available.
+Restore requires matching selected and destination `colors.yml`; it never
+replaces configuration. Legacy snapshots validate their staged configuration and
+skip GitHub keys. Vault's file limit is 8 MiB. Local plaintext state remains private even though
 its remote snapshot is encrypted.
 
 ## Output options
@@ -178,8 +182,10 @@ version or a global fixed prefix.
 Example sending identity: `smtp-domain: notifications.bigconfig.online` and
 `smtp-from: mail@notifications.bigconfig.online`. Existing resources are not
 adopted by name. SQLite stores provider IDs and sending credentials; `.ssh/`
-stores operator, host and per-repository deployment keys. Run local `init` after
-adding GitHub apps to prepare keys before the next explicit Vault checkpoint.
+stores operator, host and per-repository deployment keys. GitHub deployment keys
+are excluded from Vault and recreated during convergence when missing. Use
+`converge --rotate-github-keys` for explicit rotation; normal runs reuse keys.
+`plan` and `status` never rotate them.
 
 `converge` verifies DNS/SMTP, applications and HTTPS before publishing CI access.
 Use explicit `smtp-test --to ADDRESS` for a single authorized test email. Deletion
