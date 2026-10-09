@@ -1,0 +1,28 @@
+# Operator data and all deployment state are private.
+.envrc.private
+.envrc.private.*
+.colors*
+.ssh/
+.private/
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.pem
+*.key
+*.tfstate*
+# Local tooling
+.venv*/
+.devenv/
+.direnv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.dist/
+dist/
+build/
+*.egg-info/
+result
+
+.vault-save-*/
+.vault-restore-*/
