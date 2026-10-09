@@ -235,3 +235,38 @@ reported the domain and every record verified. The next full convergence stopped
 at local OCI token expiry before compute operations. Noninteractive OCI session
 refresh failed; renewed interactive authentication is required. No SMTP test
 email has yet been sent, and app/HTTPS/GitHub verification remains pending.
+
+## Live integration completed after OCI renewal
+
+Full convergence succeeded in 43.13 seconds against the existing OCI test VPS.
+It created `www.bigconfig.online`, retained the existing HTTP demo, verified both
+applications, and verified public HTTPS. The profile-named GitHub environment
+`pocketdeploy-oci-test` was created with restricted SSH authority. Website root
+and `/up` returned HTTPS 200.
+
+The first SMTP test exposed Ubuntu s-nail14.9.24's rejection of the obsolete
+password variable under v15 compatibility. A no-send debug check and complete
+Resend message inventory confirmed the failed attempt had not sent the test.
+Fix `534e83dc13133b239d0a22ac55381e7a6c74e849` uses credentials in the private
+temporary mailrc URL (never argv) and reports fixed safe error codes. All 217
+tests and package builds passed. The single authorized retry succeeded in 4.299
+seconds from the VPS: Resend accepted a test from
+`mail@notifications.bigconfig.online` to the user-selected recipient. This proves
+SMTP acceptance, not human receipt or inbox placement. No additional test mail
+was sent.
+
+Website workflow run
+https://github.com/pocketcontext/pocketcontext-website/actions/runs/37983137138
+passed validation, both native image builds, manifest publication and dynamically
+discovered deployments to `once-v2` and `pocketdeploy-oci-test`, including public
+health verification. Existing Colors infrastructure was unchanged.
+
+The portable launcher pins `534e83dc13133b239d0a22ac55381e7a6c74e849` and passes
+19 isolated checks, including missing SMTP recipient rejection before deployment
+access and expired OCI token rejection in 0.17 seconds. Private credentials, state
+and SSH keys remain ignored; no Vault snapshot was performed.
+
+The final live plan succeeded in 17.836 seconds: compute/firewall retained without
+changed fields, all five DNS records no-op, and the mutable website image tag
+requires its normal converge-time digest check. SMTP/GitHub report reconciliation;
+no resource replacement was proposed.
