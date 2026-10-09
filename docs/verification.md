@@ -217,3 +217,21 @@ checks, including removed-command rejection and expired OCI token rejection in
 0.17 seconds without invoking OCI. Published `init` also succeeded against the
 existing test deployment, preserving UUID and preparing its separate GitHub keys
 without cloud/provider calls. No Vault snapshot was taken.
+
+## Resend quota resolved — live retry
+
+After the user fixed the Resend account, a complete domain listing confirmed
+absence and the pending creation was explicitly reconciled. Domain
+`notifications.bigconfig.online` was created as
+`00de3ff5-8582-4b4a-9327-c86064ed5472`. The live response included a zone-relative
+tracking CNAME (`rsend.notifications`), exposing a normalization omission. Fix
+`f12fea208fd330b420c756ca2a37c7367e51fe94` handles zone-relative records only when
+the resulting FQDN remains within the sending domain; a regression verifies that
+other subdomains are rejected. It passed 210 tests and package builds. Launcher
+pin commit `9326df1` passed 17 copied-launcher checks and GitHub CI.
+
+All four email DNS records were created and resolved publicly. Resend subsequently
+reported the domain and every record verified. The next full convergence stopped
+at local OCI token expiry before compute operations. Noninteractive OCI session
+refresh failed; renewed interactive authentication is required. No SMTP test
+email has yet been sent, and app/HTTPS/GitHub verification remains pending.
