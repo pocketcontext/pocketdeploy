@@ -152,5 +152,8 @@ Local `init` and explicit Vault workflows do not perform this OCI check.
 The OCI CLI configuration comes from `OCI_CLI_CONFIG_FILE`, or `~/.oci/config`
 when unset. `oci-config-file-profile` selects the profile (default `DEFAULT`).
 An expired token returns `oci_token_expired`; refresh with
-`oci session refresh --profile PROFILE` using the same config file. If refresh
-fails, use `oci session authenticate` for that profile.
+`oci session refresh --profile PROFILE --region REGION` using the same config
+file. If refresh fails, use
+`oci session authenticate --profile-name PROFILE --region REGION`. Guidance
+resolves the region from `oci-region`, then `OCI_CLI_REGION`, then the selected
+OCI profile. If none is known, it explicitly asks you to supply `<OCI_REGION>`.

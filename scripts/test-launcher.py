@@ -150,7 +150,7 @@ def main():
         payload = base64.urlsafe_b64encode(json.dumps({'exp': int(time.time()) - 3600}).encode()).decode().rstrip('=')
         token.write_text('eyJhbGciOiJSUzI1NiJ9.' + payload + '.synthetic-signature')
         Path(environment['OCI_CLI_CONFIG_FILE']).write_text(
-            '[synthetic]\nsecurity_token_file=' + str(token) + '\n'
+            '[synthetic]\nregion=eu-frankfurt-1\nsecurity_token_file=' + str(token) + '\n'
         )
         started = time.monotonic()
         expired_run = invoke(fresh, 'plan', '--json', '--verbose', expected='')
@@ -159,7 +159,8 @@ def main():
         assert expired_run.returncode == 1 and expired['ok'] is False
         assert expired['error']['code'] == 'oci_token_expired'
         assert 'expired' in expired['error']['message'].lower()
-        assert 'oci session refresh --profile synthetic' in expired['error']['message']
+        assert 'oci session refresh --profile synthetic --region eu-frankfurt-1' in expired['error']['message']
+        assert 'oci session authenticate --profile-name synthetic --region eu-frankfurt-1' in expired['error']['message']
         assert elapsed < 10, f'Expired token failed slowly: {elapsed:.1f}s'
         assert token.read_text() not in expired_run.stdout + expired_run.stderr
         print(f'Expired synthetic OCI token rejected locally in {elapsed:.2f}s; OCI was not invoked.')

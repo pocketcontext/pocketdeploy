@@ -157,3 +157,13 @@ and reauthentication guidance in 0.90 seconds including launcher startup (5 ms
 in the CLI). No token contents or provider responses were emitted. This verified
 the real failure path; a successful live verbose plan was not run with renewed
 credentials during this change. No cloud resources or Vault snapshots changed.
+
+## Region-aware session guidance
+
+The launcher now pins `f7293be492dbfc9c8d3ef3d516087a848c31b6dd`. Renewal
+guidance includes the effective region from desired configuration, the OCI region
+environment override or the selected native profile, in that order. Unknown or
+unsafe region values produce an explicit placeholder rather than a guess.
+Validation passed 150 tests, 15 copied-launcher checks, skill validation and
+package builds. The synthetic expired-token check verified both region-qualified
+renewal commands and failed locally in 0.17 seconds without invoking OCI.
