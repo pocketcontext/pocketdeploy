@@ -13,7 +13,7 @@ location does not select the deployment. Read
 [configuration.md](references/configuration.md) before editing desired state.
 
 Use the deployment's `devenv.nix` for Python, uv, OCI CLI, OpenSSH and the
-VaultContext CLI. The portable launcher installs Python dependencies; it does
+VaultContext CLI plus pinned Cloudflare, Resend and s-nail tools. The portable launcher installs Python dependencies; it does
 not install external tools or authenticate to providers. Working-tree package
 development uses `uv run pocketdeploy` from the package checkout.
 
@@ -38,7 +38,7 @@ establish ownership. Existing subnet/VCN resources remain externally managed.
 # New deployment with Vault recovery configured
 ./pocketdeploy init
 ./pocketdeploy vault-save
-./pocketdeploy create
+./pocketdeploy converge
 ./pocketdeploy vault-save
 
 # Routine update
@@ -58,7 +58,7 @@ healthy repeat is idempotent; missing authority for an existing instance still
 requires recovery. Save this initial authority before provisioning, then save again after
 creation to checkpoint the resource identities.
 
-`plan` and `create --dry-run` validate and read live OCI resources and, for an
+`plan` and `converge --dry-run` validate and read live OCI resources and, for an
 existing host, application state through SSH. They can create a local lock;
 they do not provision resources or generate keys. They require suitable tools,
 authentication and application bindings. `status` and `describe` return the same
@@ -68,8 +68,8 @@ acknowledged Vault document/version/save time, or null; older receipts may lack 
 time. It makes no Vault call and does not establish freshness. A restored
 snapshot may contain a prior receipt. A plan is not proof of completed convergence.
 
-`create` and `converge` run the same DAG: keys → OCI → host → applications →
-verification. Cloud/app mutations must stay within the user's authorized scope;
+`converge` runs the DAG: preflight → keys → OCI → host → DNS/SMTP → applications →
+HTTPS verification → GitHub. `create` is removed; there is no compatibility alias. Cloud/app mutations must stay within the user's authorized scope;
 existing authorization applies without repeated permission requests. Expired
 provider authentication requires renewal through the configured CLI identity,
 not a different account or operator credentials. Report the failing stage and
@@ -94,7 +94,8 @@ Deletion requires the intended deployment scope and deliberate removal of
 `compute-prevent-destroy` protection. Review `delete --dry-run`, then run `delete`
 within that authorization. Default boot-volume retention preserves recovery
 material; disabling retention destroys the owned boot disk. Externally managed
-networking, DNS, SMTP and Vault data are not deleted.
+networking and Vault data are not deleted. Owned website DNS and GitHub environments
+are deleted; SMTP domain, sending key and email DNS are retained.
 
 ## Output and automation
 
@@ -139,7 +140,7 @@ it in arguments. Reuse an existing unlocked session.
 ```
 
 The recovery set includes `colors.yml`, `.envrc.private`, client and host SSH
-key pairs, known hosts and a consistent SQLite snapshot. File versions upload
+key pairs, per-repository GitHub SSH key pairs, known hosts and a consistent SQLite snapshot. File versions upload
 first; state uploads last with exact references. `.envrc` and code come from Git.
 Vault encrypts remote copies, not local files. Only explicit `vault-save` uploads
 a checkpoint; provisioning, convergence, deletion and failed workflows never
@@ -167,3 +168,18 @@ usage error has `command: null` when argument parsing cannot identify a command.
 Running `./pocketdeploy` with no arguments prints the same help as `--help`
 to stdout and exits 0, without loading configuration or contacting providers.
 Unknown commands and a lone `--json` remain usage errors (exit 2).
+
+## Managed services
+
+Read the managed-services configuration reference before Cloudflare, Resend or
+GitHub operations. Use only the supplied management credentials; never copy them
+into CI. Missing or conflicting ownership requires reconciliation. SMTP verification
+may need a later convergence after DNS propagation; uncertain credential creation
+requires operator recovery without blind retry.
+
+GitHub environments default to the exact deployment profile. All repository
+environments are active CD targets, so retire stale environments before enabling
+discovery. GitHub setup is not atomic; avoid releasing while configuring it.
+Use `smtp-test --to ADDRESS` only for an explicitly requested email test and a
+known recipient. Report SMTP acceptance separately from delivery. Never send a
+message as part of ordinary convergence. No SMTP inbox is provisioned.

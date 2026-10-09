@@ -1,5 +1,6 @@
 """Versioned recovery sets through VaultContext; never execute restored files."""
 import json
+import hashlib
 import os
 import sqlite3
 import tempfile
@@ -41,6 +42,10 @@ def _files(config):
             config.get('ssh-known-hosts-file', '.ssh/known_hosts'),
             config.get('ssh-host-private-key-file', '.ssh/host_ed25519'),
             config.get('ssh-host-public-key-file', '.ssh/host_ed25519.pub')]
+    for app in config.get('once', {}).get('applications', []):
+        if app.get('github'):
+            token = hashlib.sha256(app['github'].lower().encode()).hexdigest()[:20]
+            names.extend(['.ssh/github-' + token, '.ssh/github-' + token + '.pub'])
     if any(not isinstance(name, str) or Path(name).is_absolute() or '..' in Path(name).parts for name in names):
         raise DeployError('Recovery file configuration must use relative deployment paths.')
     if len({Path(name) for name in names}) != len(names):

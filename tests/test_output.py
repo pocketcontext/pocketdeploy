@@ -60,7 +60,7 @@ def test_status_reports_unhealthy_and_does_not_dump_unknown_fields():
 @pytest.mark.parametrize(('command', 'result', 'expected'), [
     ('init', {'deployment_id': 'uuid'}, 'Initialized'),
     ('converge', {'applications': {'actions': []}, 'status': {}}, 'No application changes'),
-    ('create', {'applications': {'actions': [{'host': 'example.test', 'action': 'create'}]}}, 'example.test: create'),
+    ('converge', {'applications': {'actions': [{'host': 'example.test', 'action': 'create'}]}}, 'example.test: create'),
     ('adopt', {'instance_id': 'instance', 'ip': '192.0.2.1'}, 'Adopted instance'),
     ('delete', {'deleted': True}, 'Deletion completed'),
     ('vault-save', {'file_count': 7, 'state_document': 'document', 'state_version': 'version'}, 'Saved recovery checkpoint'),

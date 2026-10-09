@@ -167,3 +167,44 @@ unsafe region values produce an explicit placeholder rather than a guess.
 Validation passed 150 tests, 15 copied-launcher checks, skill validation and
 package builds. The synthetic expired-token check verified both region-qualified
 renewal commands and failed locally in 0.17 seconds without invoking OCI.
+
+## Managed DNS, SMTP and GitHub integration — 9 October 2026
+
+Added profile-named GitHub environments, ownership-checked Cloudflare DNS,
+retained Resend sending infrastructure and explicit VPS s-nail testing. Removed
+`create` without an alias. The root desired configuration preserves the existing
+HTTP demo and adds `www.bigconfig.online` with sending identity
+`mail@notifications.bigconfig.online`.
+
+The website workflow was published at
+`7e029322b722d2f8064d5fa9ff286b024d10f167`; run
+https://github.com/pocketcontext/pocketcontext-website/actions/runs/37980840096
+passed checks, native image builds, dynamic environment discovery and actual
+`once-v2` deployment/health. Removed only the stale website-repository
+`once-oracle-ampere` environment; the Colors server and its repositories were
+preserved. `once-google` was already deleted. Every remaining environment is
+an active target, with no opt-in flag.
+
+Devenv built and executed Cloudflare CLI 1.0.0-beta.14, Resend CLI 2.23.0 and
+s-nail 14.9.25. npm transitives and source downloads are integrity-pinned. Actual
+CLI help and offline dry-runs verified Cloudflare/Resend command contracts.
+
+Live provider reads identified existing bigconfig.online zone
+`f8d9f9cb95c9431f754df2adec8fd504`. A dedicated zone-only DNS Write/Zone Read token
+was created using authorized account rotation authority; its private value is
+stored only in ignored `.envrc.private`. No rotation credential was copied.
+Live plan retained OCI compute and firewall. Convergence created and verified
+only the owned website A record, then stopped at Resend domain creation. The
+application/GitHub/SMTP delivery checks have not yet completed; failure handling
+and subsequent recovery are recorded below when resolved.
+
+Resend's final classified response was HTTP 403/domain-limit rejection
+(`provider_domain_quota`). Repeated complete domain listings confirmed
+`notifications.bigconfig.online` was absent before the explicit diagnostic
+retries. No Resend domain or sending key was created, no email was sent, and
+no PocketDeploy GitHub environment was published. No unrelated mail domains
+were changed. The recorded pending domain creation remains blocked for explicit
+reconciliation after the account domain allowance is resolved. Error parsing now
+handles CLI chatter preceding JSON without emitting provider-controlled text.
+Live website deployment, HTTPS, SMTP acceptance and PocketDeploy CD verification
+remain pending this external account limitation.

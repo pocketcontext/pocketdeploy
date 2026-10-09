@@ -69,7 +69,7 @@ See [the skill](skills/pocketdeploy/SKILL.md) for operator instructions.
 ```sh
 pocketdeploy init
 pocketdeploy vault-save
-pocketdeploy create
+pocketdeploy converge
 pocketdeploy vault-save
 
 # Routine update
@@ -87,11 +87,11 @@ pocketdeploy delete --dry-run
 keys, known hosts and an empty `.envrc.private` if absent. It makes no cloud or
 Vault calls, does not resolve application bindings and preserves existing files.
 Repeating a healthy initialization is safe; missing authority for an existing
-instance still requires recovery. Use `init → vault-save → create → vault-save` for a new deployment
+instance still requires recovery. Use `init → vault-save → converge → vault-save` for a new deployment
 when encrypted recovery is configured. The first snapshot preserves authority
 before provisioning; the second records the resulting resource identities.
 
-`create` and `converge` share a DAG: keys → OCI → host → applications → verify.
+`converge` runs a DAG: preflight → keys → OCI → host → DNS/SMTP → applications → HTTPS verification → GitHub.
 Each external mutation records intent first and the verified result afterward.
 An unchanged converge makes no OCI mutations and no application replacement.
 Host setup still verifies/enables services, and mutable image tags are pulled to
@@ -113,7 +113,8 @@ false, review `delete --dry-run`, then run `delete`. Only recorded resources wit
 matching deployment UUID tags may be removed. `compute-retain-boot-volume: true`
 is the default; retained disks remain recorded. Application data and recovery
 files are not automatically purged. A disposable test may explicitly set false.
-Deletion does not remove externally managed networking, DNS, SMTP or Vault data.
+Deletion removes owned website DNS records and GitHub environments. Sending domains,
+SMTP credentials, email DNS, externally managed networking and Vault data are retained.
 
 ## Command output
 
@@ -231,12 +232,82 @@ retry after uncertainty; inspect the app/data before recovery. There is no
 automatic rollback after a possible database migration. Host locks do not fence
 another host. Removed owned apps retain their data volumes.
 
-V1 rejects GitHub deployment-key publication, managed DNS/SMTP, ONCE automatic
-backups and automatic updates. DNS/TLS configuration remains the operator's
-responsibility. The local verification fixture uses HTTP with an explicit Host
+ONCE automatic backups and automatic updates remain unsupported. Managed DNS uses
+Cloudflare; managed sending domains use Resend. The local verification fixture uses HTTP with an explicit Host
 header; this is not public TLS validation. Clearing an application's final
 environment binding fails because the pinned ONCE CLI cannot express that update.
 Full adoption of `once-pocketcontext-v2` is not implemented or performed.
+
+## DNS, SMTP and GitHub delivery
+
+Use `devenv shell` for pinned `cf`, `resend`, `gh` and `s-nail` tools. Cloudflare
+1.0.0-beta.14 and Resend 2.23.0 dependencies are locked in
+`tools/cloud-clis/package-lock.json` and built with a fixed Nix dependency hash;
+s-nail 14.9.25 uses a fixed source hash. Cloudflare CLI is beta.
+
+```yaml
+provider-dns: cloudflare
+cloudflare-zone-id: YOUR_32_CHARACTER_ZONE_ID
+provider-smtp: resend
+smtp-domain: notifications.bigconfig.online
+smtp-from: mail@notifications.bigconfig.online
+resend-region: eu-west-1
+once:
+  applications:
+    - host: www.bigconfig.online
+      image: ghcr.io/pocketcontext/pocketcontext-website:latest
+      github: pocketcontext/pocketcontext-website
+      manage-dns: true
+      auto_update: false
+      deploy-strategy: rolling
+      smtp: true
+```
+
+Supply `CLOUDFLARE_API_TOKEN` and `RESEND_API_KEY` through your trusted shell.
+Cloudflare needs zone read and DNS edit on the selected existing zone. Resend
+needs domain and API-key management. Use authenticated `gh` with repository
+administrator access for environment provisioning. These management credentials
+are not sent to GitHub Actions or the VPS. A domain-scoped sending key is stored
+privately in SQLite and transmitted to the host via SSH stdin.
+
+The first implementation supports one Cloudflare zone and one sending domain per
+deployment. Existing unowned DNS records, Resend domains and GitHub environments
+require explicit recovery/ownership resolution; matching names never authorize
+adoption. Website records are DNS-only to allow origin TLS verification. Domain
+verification can be pending after DNS changes: rerun convergence after propagation.
+A lost Resend domain/key creation response requires operator reconciliation, not
+blind retries. Keys are reused; rotation is a separate operation.
+
+GitHub environment names equal the durable deployment `profile`, with one app per
+GitHub repository per deployment. The controller installs a restricted separate
+SSH key, main-only branch policy, `SSH_PRIVATE_KEY` environment secret and
+`SERVER_IP`, `SERVER_USER`, `SSH_KNOWN_HOSTS`, `SITE_URL`,
+`POCKETDEPLOY_PROFILE`, `POCKETDEPLOY_DEPLOYMENT_ID` variables. SSH keys remain in
+ignored `.ssh/github-<repository-hash>` files. `init` prepares these local keys,
+and explicit Vault snapshots include them. Provisioning an environment and its
+settings is not atomic; a release during setup may fail until convergence completes.
+
+The website workflow discovers all existing environments after publishing its
+image. Every environment is an active target, without an opt-in flag. Missing
+settings fail the target; no environments skips deployment. The current workflow
+uses no-command SSH to update the configured image tag. The restricted handler
+also supports `deploy ghcr.io/owner/repo@sha256:DIGEST`; other commands are rejected.
+Retiring an environment requires accounting for queued/running workflow snapshots.
+
+```sh
+pocketdeploy smtp-test --to YOUR_TEST_ADDRESS
+```
+
+This explicit command sends one message from `smtp-from` using s-nail on the VPS,
+Resend port 465 and certificate-verified TLS. Credentials travel over SSH stdin
+and use a temporary private configuration file, cleaned afterward. Success means
+SMTP acceptance, not inbox delivery. Convergence never sends a test message.
+A static website does not acquire email functionality from SMTP provisioning;
+its enquiry backend must consume email settings separately. Outbound SMTP does
+not create a receiving mailbox.
+
+`create` has been removed without an alias; use `converge` for initial provisioning
+and subsequent updates.
 
 ## Vault recovery
 
@@ -263,7 +334,7 @@ consistent SQLite snapshot uploads last and references the exact versions.
 `colors.yml` is also included in Vault to pair the desired configuration with
 its recovery checkpoint. `.envrc` and package code are recovered from Git.
 The snapshot does not need to contain its own newly assigned Vault version ID.
-Vault's file limit is 8 MiB. Vault operations are explicit: `create`, `converge`,
+Vault's file limit is 8 MiB. Vault operations are explicit: `converge`,
 `delete` and failed workflows never save automatically or require Vault access.
 The retired `vault-save-after-run` field is rejected, including when false; remove
 it from existing configuration and remove `COLORS_PAR_VAULT_SAVE_AFTER_RUN`

@@ -6,12 +6,14 @@ import json
 import os
 from pathlib import Path
 import platform
+import pwd
 import re
 import shutil
 import socket
 import ssl
 import subprocess
 import sys
+import time
 import urllib.request
 
 STAGE = 'request'
@@ -48,7 +50,7 @@ def save(path, data):
         os.close(fd)
 
 
-def bootstrap():
+def bootstrap(request=None):
     global STAGE
     STAGE = 'cloud-init'
     if shutil.which('cloud-init'):
@@ -57,6 +59,9 @@ def bootstrap():
     if not shutil.which('docker'):
         run('apt-get', 'update', '-qq')
         run('apt-get', 'install', '-y', '-qq', 'docker.io', 'ca-certificates')
+    if request and any(app.get('smtp') for app in request.get('applications', [])) and not shutil.which('s-nail'):
+        run('apt-get', 'update', '-qq')
+        run('apt-get', 'install', '-y', '-qq', 's-nail')
     STAGE = 'docker-service'
     run('systemctl', 'enable', '--now', 'docker')
     STAGE = 'host-firewall'
@@ -117,15 +122,17 @@ def containers():
 
 def normalized(app):
     return {'image': app['image'], 'env': app.get('resolved-env', {}),
-            'disable_tls': app.get('disable_tls', False), 'cpus': app.get('cpus', 0),
+            'smtp': app.get('resolved-smtp', {}), 'disable_tls': app.get('disable_tls', False), 'cpus': app.get('cpus', 0),
             'memory': app.get('memory', 0), 'health-path': app.get('health-path', '/'), 'strategy': app.get('deploy-strategy', 'rolling'), 'timeout': app.get('deploy-stop-timeout', 300)}
 
 
 def matching(app, current, previous):
     target = normalized(app)
-    if not previous or previous['desired'] != target or not current or not current['running'] or current.get('restart') != 'always':
+    if not previous or {**previous['desired'], 'smtp': previous['desired'].get('smtp', {})} != target or not current or not current['running'] or current.get('restart') != 'always':
         return False
     actual = current['settings']
+    if {k: v for k, v in actual.get('smtp', {}).items() if v} != target['smtp']:
+        return False
     return ((actual.get('env') or {}) == target['env'] and actual.get('disableTLS', False) == target['disable_tls']
             and actual.get('autoUpdate') is False and actual.get('backup', {}).get('autoBackup', False) is False
             and actual.get('resources', {}).get('cpus', 0) == target['cpus']
@@ -136,6 +143,8 @@ def matching(app, current, previous):
 def arguments(app):
     result = ['--auto-update=false', '--auto-backup=false', '--disable-tls=' + str(app.get('disable_tls', False)).lower(),
               '--cpus', str(app.get('cpus', 0)), '--memory', str(app.get('memory', 0))]
+    for key in ('server', 'port', 'username', 'password', 'from'):
+        result.extend(['--smtp-' + key, app.get('resolved-smtp', {}).get(key, '')])
     for key, value in app.get('resolved-env', {}).items():
         result.extend(['--env', key + '=' + value])
     return result
@@ -156,14 +165,14 @@ class LocalTLS(http.client.HTTPSConnection):
         self.sock = self._context.wrap_socket(self.sock, server_hostname=self.host)
 
 
-def health(app):
+def health(app, timeout=15):
     """Probe only this host's reverse proxy; never return content or follow redirects."""
     connection = None
     try:
         if app.get('disable_tls', False) or app['host'].endswith('.localhost'):
-            connection = http.client.HTTPConnection('127.0.0.1', 80, timeout=15)
+            connection = http.client.HTTPConnection('127.0.0.1', 80, timeout=timeout)
         else:
-            connection = LocalTLS(app['host'], 443, timeout=15, context=ssl.create_default_context())
+            connection = LocalTLS(app['host'], 443, timeout=timeout, context=ssl.create_default_context())
         connection.request('GET', app.get('health-path', '/'), headers={'Host': app['host']})
         response = connection.getresponse()
         return {'healthy': 200 <= response.status < 400, 'http_status': response.status}
@@ -172,6 +181,21 @@ def health(app):
     finally:
         if connection:
             connection.close()
+
+
+def wait_healthy(app, budget=60):
+    """Allow proxy startup and certificate issuance; never clear pending on failure."""
+    deadline = time.monotonic() + budget
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        if health(app, timeout=min(5, remaining))['healthy']:
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(2, remaining))
 
 
 def reconcile(request):
@@ -201,7 +225,7 @@ def reconcile(request):
     if desired_hosts.intersection(current) - set(manifest['apps']):
         raise RuntimeError('unmanaged application requires explicit adoption')
     actions = []
-    for host in sorted(set(manifest['apps']) - desired_hosts):
+    for host in sorted(set(manifest['apps']) - desired_hosts) if not request.get('retain_other_apps') else []:
         pending = BASE / (hashlib.sha256(host.encode()).hexdigest() + '.pending')
         if pending.exists():
             raise RuntimeError('unfinished deployment; operator recovery required')
@@ -265,7 +289,7 @@ def reconcile(request):
         completed = {'desired': normalized(app), 'image_id': image_id}
         if not matching(app, new, completed):
             raise RuntimeError('application settings verification failed')
-        if not health(app)['healthy']:
+        if not wait_healthy(app):
             raise RuntimeError('application HTTP health check failed')
         manifest['apps'][host] = completed
         save(MANIFEST, manifest)
@@ -274,6 +298,66 @@ def reconcile(request):
         current = containers()
     probes = {app['host']: health(app) for app in apps} if request['action'] != 'plan' else {}
     return {'actions': actions, 'applications': [{'host': h, 'running': c['running'], **probes.get(h, {})} for h, c in current.items()]}
+
+
+def install_github(request):
+    account = pwd.getpwnam(request['user'])
+    manifest = json.loads(MANIFEST.read_text())
+    if manifest['deployment_id'] != request['deployment_id']:
+        raise RuntimeError('host belongs to another deployment')
+    directory = BASE / 'github'
+    directory.mkdir(mode=0o700, exist_ok=True)
+    source = directory / 'reconciler.py'
+    source_temp = source.with_suffix('.tmp')
+    source_temp.write_text(request['source'])
+    source_temp.chmod(0o600)
+    os.replace(source_temp, source)
+    ssh = Path(account.pw_dir) / '.ssh'
+    ssh.mkdir(mode=0o700, exist_ok=True)
+    os.chown(ssh, account.pw_uid, account.pw_gid)
+    authorized = ssh / 'authorized_keys'
+    lines = authorized.read_text().splitlines() if authorized.exists() else []
+    for target in request['targets']:
+        app = target['app']
+        if app['host'] not in manifest['apps']:
+            raise RuntimeError('unmanaged application requires explicit adoption')
+        public = target['public_key'].split()
+        if len(public) < 2 or public[0] != 'ssh-ed25519' or not re.fullmatch('[A-Za-z0-9+/=]+', public[1]):
+            raise RuntimeError('invalid deployment public key')
+        token = hashlib.sha256(target['repository'].lower().encode()).hexdigest()[:20]
+        config = directory / (token + '.json')
+        save(config, {'action': 'converge', 'deployment_id': request['deployment_id'],
+                      'applications': [app], 'retain_other_apps': True})
+        dispatcher = directory / (token + '.py')
+        # No original SSH command is evaluated. A release digest is optional but
+        # must name the configured image repository exactly.
+        dispatcher_temp = dispatcher.with_suffix('.tmp')
+        dispatcher_temp.write_text("import importlib.util,json,os,re,sys\n"
+            + "try:\n"
+            + " s=importlib.util.spec_from_file_location('reconciler'," + repr(str(source)) + "); m=importlib.util.module_from_spec(s); s.loader.exec_module(m)\n"
+            + " with open(m.BASE/'lock','a') as lock:\n"
+            + "  m.fcntl.flock(lock,m.fcntl.LOCK_EX)\n"
+            + "  request=json.load(open(" + repr(str(config)) + "))\n"
+            + "  command=os.environ.get('SSH_ORIGINAL_COMMAND','')\n"
+            + "  if command:\n"
+            + "   image=request['applications'][0]['image']; repo=image.split('@')[0].rsplit(':',1)[0]\n"
+            + "   if not re.fullmatch('deploy '+re.escape(repo)+'@sha256:[0-9a-f]{64}',command): raise RuntimeError()\n"
+            + "   request['applications'][0]['image']=command[7:]\n"
+            + "  result=m.reconcile(request)\n"
+            + " print(json.dumps({'ok':True}))\n"
+            + "except Exception:\n print('Deployment failed; output suppressed',file=sys.stderr); sys.exit(1)\n")
+        dispatcher_temp.chmod(0o600)
+        os.replace(dispatcher_temp, dispatcher)
+        marker = 'pocketdeploy-github-' + token
+        lines = [line for line in lines if not line.endswith(' ' + marker)]
+        lines.append('restrict,command="sudo -n --preserve-env=SSH_ORIGINAL_COMMAND /usr/bin/python3 '
+                     + str(dispatcher) + '" ' + public[0] + ' ' + public[1] + ' ' + marker)
+    temporary = ssh / 'authorized_keys.pocketdeploy.tmp'
+    temporary.write_text('\n'.join(lines) + '\n')
+    temporary.chmod(0o600)
+    os.chown(temporary, account.pw_uid, account.pw_gid)
+    os.replace(temporary, authorized)
+    return {'installed': len(request['targets'])}
 
 
 def main():
@@ -287,9 +371,11 @@ def main():
     with open(BASE / 'lock', 'a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if request['action'] == 'bootstrap':
-            return bootstrap()
+            return bootstrap(request)
         if request['action'] == 'converge':
             return reconcile(request)
+        if request['action'] == 'github-install':
+            return install_github(request)
         raise RuntimeError('unknown action')
 
 

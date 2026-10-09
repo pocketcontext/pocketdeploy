@@ -32,3 +32,17 @@ once:
     deploy-stop-timeout: 30
     env:
       POCKETDEPLOY_TEST: app-pocketdeploy-test-generation
+  - host: www.bigconfig.online
+    image: ghcr.io/pocketcontext/pocketcontext-website:latest
+    github: pocketcontext/pocketcontext-website
+    manage-dns: true
+    auto_update: false
+    deploy-strategy: rolling
+    smtp: true
+    health-path: /up
+provider-dns: cloudflare
+cloudflare-zone-id: f8d9f9cb95c9431f754df2adec8fd504
+provider-smtp: resend
+smtp-domain: notifications.bigconfig.online
+smtp-from: mail@notifications.bigconfig.online
+resend-region: eu-west-1

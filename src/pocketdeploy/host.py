@@ -14,6 +14,7 @@ from .output import operation
 class Host:
     def __init__(self, config, state, root):
         self.config, self.state, self.root = config, state, Path(root)
+        self.smtp_settings = None
         self.key = local_path(self.root, config.get('ssh-private-key-file', '.ssh/id_ed25519'))
         self.pub = local_path(self.root, config.get('ssh-public-key-file', str(self.key) + '.pub'))
         self.hostkey = local_path(self.root, config.get('ssh-host-private-key-file', '.ssh/host_ed25519'))
@@ -74,10 +75,12 @@ class Host:
         with operation(labels.get(action, 'SSH: host operation')):
             return self._remote_request(connection, action)
 
-    def _remote_request(self, connection, action):
+    def _remote_request(self, connection, action, extra=None):
         source = Path(__file__).with_name('remote.py').read_text()
         request = {'action': action, 'deployment_id': self.state.deployment_id,
-                   'applications': self.config.get('once', {}).get('applications', [])}
+                   'applications': [self.resolved_app(app) if action in ('plan', 'converge') else app for app in self.config.get('once', {}).get('applications', [])]}
+        if extra:
+            request.update(extra)
         # Only non-secret program text is sent as the SSH command. Data uses stdin.
         command = 'sudo python3 -c ' + shlex.quote(source)
         try:
@@ -104,6 +107,25 @@ class Host:
             return json.loads(result.stdout)
         except ValueError:
             raise DeployError('Host returned invalid response; output suppressed') from None
+
+    def resolved_app(self, app):
+        if not app.get('smtp'):
+            return app
+        if not self.smtp_settings:
+            raise DeployError('SMTP settings are unavailable; converge sending infrastructure first.')
+        settings = self.smtp_settings
+        return {**app, 'resolved-smtp': {'server': settings['server'], 'port': str(settings['port']),
+                'username': settings['username'], 'password': settings['password'], 'from': settings['from']}}
+
+    def smtp_test(self, connection, settings, recipient):
+        from .smtp_test import smtp_test
+        return smtp_test(self, connection, settings, recipient)
+
+    def install_github(self, connection, targets):
+        source = Path(__file__).with_name('remote.py').read_text()
+        with operation('SSH: GitHub deployment authority'):
+            return self._remote_request(connection, 'github-install', {
+                'targets': [{**target, 'app': self.resolved_app(target['app'])} for target in targets], 'user': connection.get('user', 'ubuntu'), 'source': source})
 
     def bootstrap(self, connection, operation_id):
         step = self.state.intent(operation_id, 'host-bootstrap', {})
@@ -145,11 +167,13 @@ SAFE_ERRORS = {'unfinished deployment; operator recovery required',
 
 
 def validate_config(config):
+    from .github import validate_config as validate_github
+    validate_github(config)
     once = config.get('once', {})
     if once.get('namespace', 'once') != 'once':
         raise DeployError('V1 supports the once namespace only.')
     allowed = {'host', 'image', 'env', 'resolved-env', 'deploy-strategy', 'deploy-stop-timeout',
-               'auto_update', 'auto_backup', 'disable_tls', 'health-path', 'cpus', 'memory', 'smtp', 'manage-dns', 'github'}
+               'auto_update', 'auto_backup', 'disable_tls', 'health-path', 'cpus', 'memory', 'smtp', 'manage-dns', 'github', 'github-environment'}
     for app in once.get('applications', []):
         health_path = app.get('health-path', '/')
         if not isinstance(health_path, str) or not health_path.startswith('/') or any(ord(c) < 32 for c in health_path):
@@ -158,8 +182,6 @@ def validate_config(config):
             raise DeployError('Unsupported application field.')
         if app.get('auto_update', False) or app.get('auto_backup', False):
             raise DeployError('V1 requires automatic ONCE updates and backups disabled.')
-        if app.get('github') or app.get('smtp') or app.get('manage-dns'):
-            raise DeployError('V1 does not manage GitHub, SMTP or DNS.')
         if app.get('deploy-strategy', 'rolling') not in ('rolling', 'stop-first'):
             raise DeployError('Unknown deployment strategy.')
         for key in ('cpus', 'memory'):
@@ -167,6 +189,6 @@ def validate_config(config):
                 raise DeployError('Application resource limits must be nonnegative integers.')
         if type(app.get('deploy-stop-timeout', 300)) is not int or not 1 <= app.get('deploy-stop-timeout', 300) <= 3600:
             raise DeployError('Stop timeout must be between 1 and 3600 seconds.')
-        for key in ('disable_tls', 'auto_update', 'auto_backup'):
+        for key in ('disable_tls', 'auto_update', 'auto_backup', 'smtp', 'manage-dns'):
             if key in app and type(app[key]) is not bool:
                 raise DeployError('Application flags must be booleans.')

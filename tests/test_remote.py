@@ -16,7 +16,7 @@ def current():
 
 @pytest.fixture(autouse=True)
 def healthy(monkeypatch):
-    monkeypatch.setattr(remote, 'health', lambda app: {'healthy': True, 'http_status': 200})
+    monkeypatch.setattr(remote, 'health', lambda app, **kwargs: {'healthy': True, 'http_status': 200})
 
 
 def setup(tmp_path, monkeypatch):
@@ -148,7 +148,7 @@ def test_http_failure_keeps_pending_and_previous_manifest(tmp_path, monkeypatch)
     replacement = {**old, 'id': 'new', 'settings': {**old['settings'], 'env': {'FOO': 'new'}}}
     with patch.object(remote, 'containers', side_effect=[{app()['host']: old}, {app()['host']: stopped}, {app()['host']: replacement}]), \
          patch.object(remote, 'resolve_image', return_value=('example/app@sha256:abc', 'image-id')), \
-         patch.object(remote, 'run'), patch.object(remote, 'health', return_value={'healthy': False, 'http_status': 503}):
+         patch.object(remote, 'run'), patch.object(remote, 'wait_healthy', return_value=False):
         with pytest.raises(RuntimeError, match='HTTP health'):
             remote.reconcile({'action': 'converge', 'deployment_id': 'test', 'applications': [desired]})
     assert list(tmp_path.glob('*.pending'))
@@ -175,3 +175,80 @@ def test_once_nil_env_serialization_matches_empty_desired_env():
     desired = app(); desired['resolved-env'] = {}
     actual = current(); actual['settings']['env'] = None
     assert remote.matching(desired, actual, {'desired': remote.normalized(desired), 'image_id': 'image-id'})
+
+
+def test_smtp_drift_and_explicit_clear():
+    desired = app()
+    desired['resolved-smtp'] = {'server': 'smtp.resend.com', 'port': '465', 'username': 'resend', 'password': 'synthetic', 'from': 'mail@example.test'}
+    actual = current()
+    actual['settings']['smtp'] = desired['resolved-smtp'].copy()
+    previous = {'desired': remote.normalized(desired), 'image_id': 'image-id'}
+    assert remote.matching(desired, actual, previous)
+    actual['settings']['smtp']['password'] = 'changed'
+    assert not remote.matching(desired, actual, previous)
+    args = remote.arguments(app())
+    assert args[args.index('--smtp-password') + 1] == ''
+
+
+def test_github_target_retains_other_owned_apps(tmp_path, monkeypatch):
+    setup(tmp_path, monkeypatch)
+    with patch.object(remote, 'containers', return_value={app()['host']: current()}):
+        result = remote.reconcile({'deployment_id': 'test', 'action': 'plan', 'applications': [], 'retain_other_apps': True})
+    assert result['actions'] == []
+
+
+def test_github_dispatcher_restricts_key_and_command(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    setup(tmp_path, monkeypatch)
+    home = tmp_path / 'home'
+    home.mkdir()
+    monkeypatch.setattr(remote.pwd, 'getpwnam', lambda _: SimpleNamespace(pw_dir=str(home), pw_uid=0, pw_gid=0))
+    monkeypatch.setattr(remote.os, 'chown', lambda *args: None)
+    request = {'deployment_id': 'test', 'user': 'ubuntu', 'source': '# synthetic reconciler', 'targets': [
+        {'app': app(), 'repository': 'example/app', 'public_key': 'ssh-ed25519 c3ludGhldGlj comment'}]}
+    remote.install_github(request)
+    line = (home / '.ssh/authorized_keys').read_text()
+    assert line.startswith('restrict,command="sudo -n --preserve-env=SSH_ORIGINAL_COMMAND /usr/bin/python3 ')
+    scripts = [p for p in (tmp_path / 'github').glob('*.py') if p.name != 'reconciler.py']
+    assert len(scripts) == 1
+    compile(scripts[0].read_text(), str(scripts[0]), 'exec')
+    assert "re.fullmatch('deploy '" in scripts[0].read_text()
+    remote.install_github(request)
+    assert (home / '.ssh/authorized_keys').read_text() == line
+
+
+def test_smtp_arguments_match_pinned_once_v033_settings_flags():
+    # basecamp/once v0.3.3 internal/command/settings_flags.go defines five
+    # StringVar settings; application_settings.go stores them under smtp.
+    desired = app()
+    desired['resolved-smtp'] = {'server': 'smtp.resend.com', 'port': '465',
+                               'username': 'resend', 'password': 'synthetic-password',
+                               'from': 'mail@notifications.example.test'}
+    arguments = remote.arguments(desired)
+    for key, value in desired['resolved-smtp'].items():
+        assert arguments[arguments.index('--smtp-' + key) + 1] == value
+    assert all(isinstance(value, str) for value in arguments)
+    assert remote.normalized(desired)['smtp'] == desired['resolved-smtp']
+
+
+def test_new_application_health_retries_until_proxy_ready():
+    clock = [0.0]
+    def sleep(seconds):
+        clock[0] += seconds
+    with patch.object(remote.time, 'monotonic', side_effect=lambda: clock[0]), patch.object(remote.time, 'sleep', side_effect=sleep), patch.object(remote, 'health', side_effect=[{'healthy': False}, {'healthy': False}, {'healthy': True}]) as health:
+        assert remote.wait_healthy(app())
+    assert health.call_count == 3
+    assert clock[0] == 4
+    assert all(call.kwargs['timeout'] <= 5 for call in health.call_args_list)
+
+
+def test_new_application_health_retry_exhausts_budget():
+    clock = [0.0]
+    def sleep(seconds):
+        clock[0] += seconds
+    def unhealthy(*args, timeout):
+        clock[0] += timeout
+        return {'healthy': False}
+    with patch.object(remote.time, 'monotonic', side_effect=lambda: clock[0]), patch.object(remote.time, 'sleep', side_effect=sleep), patch.object(remote, 'health', side_effect=unhealthy):
+        assert not remote.wait_healthy(app(), budget=60)
+    assert clock[0] == 60

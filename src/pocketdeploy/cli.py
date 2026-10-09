@@ -36,12 +36,12 @@ def parser():
         epilog='''Deployment commands:
   init           Prepare local state and SSH keys; no cloud or Vault calls
   plan           Read live resources and report proposed changes
-  create         Provision and converge the deployment
   converge       Reconcile the deployment with desired configuration
   status         Show observed resources, application health and backup receipt
   describe       Alias for status
   ssh            Open SSH or run --ssh-command; preserve remote output and exit
   delete         Delete owned resources, subject to destruction protection
+  smtp-test      Send one explicit SMTP test using --to
   adopt          Recover an existing instance with matching deployment UUID tags
 
 Vault commands (explicit checkpoints):
@@ -58,18 +58,19 @@ Examples:
 
 Configuration defaults to colors.yml in the current working directory.
 Use -f to select a deployment. Run without arguments to show this help.''')
-    p.add_argument('command', metavar='COMMAND', choices=['init', 'plan', 'create', 'converge', 'status', 'describe', 'ssh', 'delete', 'adopt', 'vault-save', 'vault-restore'], help='Deployment or Vault command listed below')
+    p.add_argument('command', metavar='COMMAND', choices=['init', 'plan', 'converge', 'status', 'describe', 'ssh', 'delete', 'adopt', 'smtp-test', 'vault-save', 'vault-restore'], help='Deployment or Vault command listed below')
     p.add_argument('-f', '--file', help='Configuration file (default: ./colors.yml in the current working directory)')
     p.add_argument('--json', action='store_true', help='Emit one versioned JSON result on stdout')
     p.add_argument('--verbose', action='store_true', help='Show safe request timings and waiting progress on stderr')
     p.add_argument('--quiet', action='store_true', help='Suppress progress on stderr')
-    p.add_argument('--dry-run', action='store_true', help='Plan create/converge/delete without applying changes')
+    p.add_argument('--dry-run', action='store_true', help='Plan converge/delete without applying changes')
     p.add_argument('--instance-id', help='Exact tagged OCI instance identity for explicit recovery/adoption')
     p.add_argument('--document', help='Vault state document to restore')
     p.add_argument('--version', help='Exact Vault state version to restore')
     p.add_argument('--destination', help='Empty directory for restoring a recovery set')
     p.add_argument('--overwrite', action='store_true', help='Explicitly replace recovery destinations')
     p.add_argument('--ssh-command', help='Explicit remote command; otherwise open an interactive shell')
+    p.add_argument('--to', help='Recipient for the explicit smtp-test command')
     return p
 
 
@@ -79,6 +80,10 @@ def initialize(config, state, host, root):
     pairs = ((host.key, host.pub), (host.hostkey, host.hostpub))
     authority = [path for pair in pairs for path in pair] + [host.known]
     paths = [*authority, bindings]
+    if any(a.get('github') for a in config.get('once', {}).get('applications', [])):
+        from .github import GitHub
+        github = GitHub(config, state, root, host)
+        paths.extend(path for app in github.apps for path in github.key_paths(app))
     state_path = local_path(root, config['state-file'])
     reserved = {Path(config['_file']).resolve(), local_path(root, '.envrc'),
                 local_path(root, config['workdir']), state_path,
@@ -96,6 +101,9 @@ def initialize(config, state, host, root):
         if private.exists() != public.exists():
             raise DeployError('SSH key pair is incomplete; restore the complete identity before initialization.')
     host.prepare_keys()
+    if any(a.get('github') for a in config.get('once', {}).get('applications', [])):
+        from .github import GitHub
+        GitHub(config, state, root, host).prepare_keys()
     try:
         descriptor = os.open(bindings, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
     except FileExistsError:
@@ -110,6 +118,34 @@ async def converge(config, state, cloud, host, operation, reporter=None):
     results = {}
     reporter = reporter or Reporter()
     failure = None
+    services = None
+    github = None
+    if config.get('provider-dns') == 'cloudflare' or config.get('provider-smtp') == 'resend':
+        from .services import Services
+        services = Services(config, state)
+    if any(a.get('github') for a in config.get('once', {}).get('applications', [])) or (state and any(r['kind'] == 'github-environment' for r in state.resources())):
+        from .github import GitHub
+        github = GitHub(config, state, Path(config['_root']), host)
+
+    def preflight(opts):
+        if services:
+            services.preflight()
+            services.plan()
+        if github:
+            github.preflight()
+        return dict(opts)
+
+    def infrastructure_services(opts):
+        if services:
+            results['services'] = services.converge(results['connection'], operation)
+            if config.get('provider-smtp') == 'resend':
+                host.smtp_settings = services.smtp_settings()
+        return dict(opts)
+
+    def publish_github(opts):
+        if github:
+            results['github'] = github.converge(results['connection'], operation)
+        return dict(opts)
 
     def keys(opts):
         public = host.prepare_keys()
@@ -131,10 +167,13 @@ async def converge(config, state, cloud, host, operation, reporter=None):
 
     def verify(opts):
         results['status'] = host.status(results['connection'])
+        from .health import verify as verify_https
+        verify_https(config)
         return dict(opts)
 
-    steps = {'keys': [keys, 'compute'], 'compute': [compute, 'host'],
-             'host': [bootstrap, 'applications'], 'applications': [applications, 'verify'], 'verify': [verify]}
+    steps = {'preflight': [preflight, 'keys'], 'keys': [keys, 'compute'], 'compute': [compute, 'host'],
+             'host': [bootstrap, 'services'], 'services': [infrastructure_services, 'applications'],
+             'applications': [applications, 'verify'], 'verify': [verify, 'github'], 'github': [publish_github]}
     # Functions catch at the boundary so Blue never captures a secret-bearing traceback.
     def wire(name, _opts):
         fn, *successors = steps[name]
@@ -152,13 +191,15 @@ async def converge(config, state, cloud, host, operation, reporter=None):
             return {**opts, 'blue/exit': 1, 'blue/err': str(failure)}
         return [safe, *successors]
     try:
-        result = await run_workflow(workflow(start='keys', wire_fn=wire), {})
+        result = await run_workflow(workflow(start='preflight', wire_fn=wire), {})
     finally:
         config.pop('_cloud_init', None)
+        config.pop('_smtp', None)
     if result.get('blue/exit'):
         raise failure or DeployError('Deployment failed.')
     return {'profile': config.get('profile'), 'connection': results['connection'],
-            'applications': results['applications'], 'status': results['status']}
+            'applications': results['applications'], 'status': results['status'],
+            'services': results.get('services'), 'github': results.get('github')}
 
 
 def execute(args, reporter=None):
@@ -168,15 +209,17 @@ def execute(args, reporter=None):
     os.umask(0o077)
     if args.command == 'ssh' and getattr(args, 'json', False):
         raise UsageError()
-    if args.dry_run and args.command not in ('create', 'converge', 'delete', 'plan'):
-        raise DeployError('--dry-run is supported only for plan/create/converge/delete.', code='invalid_usage')
+    if args.dry_run and args.command not in ('converge', 'delete', 'plan'):
+        raise DeployError('--dry-run is supported only for plan/converge/delete.', code='invalid_usage')
     if args.overwrite and args.command != 'vault-restore':
         raise DeployError('--overwrite is supported only for vault-restore.', code='invalid_usage')
+    if bool(getattr(args, 'to', None)) != (args.command == 'smtp-test'):
+        raise DeployError('smtp-test requires --to; --to is only supported for smtp-test.', code='invalid_usage')
     read_only = args.command in ('plan', 'status', 'describe') or args.dry_run
     config_file = args.file if args.file is not None else 'colors.yml'
     if args.file is None and not Path(config_file).exists():
         raise DeployError('No colors.yml found in the current directory; use -f to select a configuration.')
-    config = load(config_file, resolve=args.command not in ('init', 'ssh', 'delete', 'vault-save', 'vault-restore', 'status', 'describe'))
+    config = load(config_file, resolve=args.command not in ('init', 'ssh', 'delete', 'vault-save', 'vault-restore', 'status', 'describe', 'smtp-test'))
     # Reject unsupported application behavior before any cloud mutation.
     from .host import validate_config
     validate_config(config)
@@ -191,7 +234,7 @@ def execute(args, reporter=None):
     fresh = not state_path.exists()
     if fresh and config['compute-require-existing-state']:
         raise DeployError('Existing deployment state is required; restore it before continuing.')
-    if fresh and args.command not in ('init', 'plan', 'create', 'converge', 'adopt'):
+    if fresh and args.command not in ('init', 'plan', 'converge', 'adopt'):
         raise DeployError('Deployment state is missing; restore or explicitly adopt it.')
     with deployment_lock(state_path):
         manager = nullcontext(None) if fresh and read_only else State(state_path, config['profile'], scope(config), create=fresh, read_only=read_only)
@@ -200,6 +243,8 @@ def execute(args, reporter=None):
             if args.command == 'init':
                 with output_operation('init: local preparation'):
                     return initialize(config, state, host, root)
+            if state and config.get('provider-dns') != 'cloudflare' and any(r['kind'] == 'cloudflare-dns' and r['attributes'].get('type') == 'A' for r in state.resources()):
+                raise DeployError('Restore the managed DNS configuration before operating its deployment.')
             cloud = OCI(config, state)
             if read_only:
                 if args.command in ('status', 'describe'):
@@ -210,11 +255,29 @@ def execute(args, reporter=None):
                     return result
                 actions = cloud.plan()
                 if args.command == 'delete':
-                    actions = [{'resource': r['name'], 'action': 'retain' if not r['owned'] or r['attributes'].get('lifecycle') == 'retained-for-recovery' or (r['name'] == 'boot-volume' and config.get('compute-retain-boot-volume', True)) else 'delete'} for r in state.resources()] if state else []
+                    actions = [{'resource': r['name'], 'action': 'retain' if not r['owned'] or r['attributes'].get('lifecycle') == 'retained-for-recovery' or r['kind'].startswith('resend-') or (r['kind'] == 'cloudflare-dns' and r['attributes'].get('type') != 'A') or (r['name'] == 'boot-volume' and config.get('compute-retain-boot-volume', True)) else 'delete'} for r in state.resources()] if state else []
                     return {'profile': config['profile'], 'protected': config['compute-prevent-destroy'], 'actions': actions,
                             'retain_boot_volume': config.get('compute-retain-boot-volume', True)}
-                app_actions = host.plan(cloud.connection()) if state and state.get_resource('compute') else [{'host': a['host'], 'action': 'create'} for a in config.get('once', {}).get('applications', [])]
-                return {'profile': config['profile'], 'actions': actions, 'applications': app_actions}
+                if config.get('provider-smtp') == 'resend' and state and state.get_resource('smtp-key'):
+                    from .services import Services
+                    host.smtp_settings = Services(config, state).smtp_settings()
+                needs_smtp = any(a.get('smtp') for a in config.get('once', {}).get('applications', [])) and not (state and state.get_resource('smtp-key'))
+                app_actions = host.plan(cloud.connection()) if state and state.get_resource('compute') and not needs_smtp else [{'host': a['host'], 'action': 'after-smtp' if needs_smtp else 'create'} for a in config.get('once', {}).get('applications', [])]
+                service_actions = []
+                if config.get('provider-dns') == 'cloudflare' or config.get('provider-smtp') == 'resend':
+                    from .services import Services
+                    services = Services(config, state)
+                    services.preflight()
+                    connection = cloud.connection() if state and state.get_resource('compute') else None
+                    service_actions = services.plan(connection)['actions']
+                github_actions = []
+                if any(a.get('github') for a in config.get('once', {}).get('applications', [])) or (state and any(r['kind'] == 'github-environment' for r in state.resources())):
+                    from .github import GitHub
+                    github = GitHub(config, state, root, host)
+                    github.preflight()
+                    github_actions = github.plan()
+                return {'profile': config['profile'], 'actions': actions, 'applications': app_actions,
+                        'services': service_actions, 'github': github_actions}
             if args.command == 'ssh':
                 code = host.ssh(cloud.connection(), args.ssh_command)
                 return {'ssh_exit': code}
@@ -223,11 +286,26 @@ def execute(args, reporter=None):
                     return vault.save(config, state, root)
             operation = state.begin_operation(args.command, config['_desired_hash'])
             try:
-                if args.command in ('create', 'converge'):
+                if args.command == 'converge':
                     state.set_meta('desired-config', {k: v for k, v in config.items() if not k.startswith('_')})
                     result = asyncio.run(converge(config, state, cloud, host, operation, reporter))
                 elif args.command == 'delete':
+                    if config['compute-prevent-destroy']:
+                        raise DeployError('Deletion protection is enabled.')
+                    if any(r['kind'] == 'cloudflare-dns' and r['attributes'].get('type') == 'A' for r in state.resources()):
+                        if config.get('provider-dns') != 'cloudflare':
+                            raise DeployError('Restore the managed DNS configuration before deleting its deployment.')
+                        from .services import Services
+                        Services(config, state).delete(operation)
+                    if any(r['kind'] == 'github-environment' for r in state.resources()):
+                        from .github import GitHub
+                        GitHub(config, state, root, host).delete(operation)
                     result = cloud.delete(operation)
+                elif args.command == 'smtp-test':
+                    from .services import Services
+                    if config.get('provider-smtp') != 'resend':
+                        raise DeployError('smtp-test requires provider-smtp: resend.')
+                    result = host.smtp_test(cloud.connection(), Services(config, state).smtp_settings(), args.to)
                 elif args.command == 'adopt':
                     if not args.instance_id:
                         raise DeployError('Adoption requires --instance-id and matching ownership tags.')

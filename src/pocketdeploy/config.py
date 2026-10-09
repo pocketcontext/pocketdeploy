@@ -26,6 +26,7 @@ ROOT_KEYS = set(DEFAULTS) | {
     'ssh-private-key-file', 'ssh-public-key-file', 'ssh-known-hosts-file',
     'vault-id', 'vault-state-document-id', 'vault-command',
     'compute-retain-boot-volume', 'once',
+    'cloudflare-zone-id', 'smtp-domain', 'smtp-from', 'resend-region',
     'ssh-host-private-key-file', 'ssh-host-public-key-file',
 }
 
@@ -91,8 +92,22 @@ def validate(c):
                     raise ValueError()
         except (ValueError, TypeError):
             raise DeployError('Firewall sources must contain valid IPv4 CIDRs.') from None
-    if c['provider-dns'] != 'no-infra' or c['provider-smtp'] != 'no-infra':
-        raise DeployError('V1 requires externally managed DNS and SMTP.')
+    if c['provider-dns'] not in ('no-infra', 'cloudflare') or c['provider-smtp'] not in ('no-infra', 'resend'):
+        raise DeployError('Supported DNS/SMTP providers are cloudflare/resend or no-infra.')
+    if c['provider-dns'] == 'cloudflare':
+        if not re.fullmatch(r'[a-f0-9]{32}', str(c.get('cloudflare-zone-id', ''))):
+            raise DeployError('Cloudflare requires an explicit cloudflare-zone-id.')
+    if c['provider-smtp'] == 'resend':
+        domain = c.get('smtp-domain', '')
+        sender = c.get('smtp-from', '')
+        if c['provider-dns'] != 'cloudflare':
+            raise DeployError('Managed Resend requires Cloudflare DNS.')
+        if not isinstance(domain, str) or not re.fullmatch(r'[a-z0-9]+(?:[.-][a-z0-9]+)*\.[a-z]{2,}', domain):
+            raise DeployError('smtp-domain must be a lowercase domain name.')
+        if not isinstance(sender, str) or not re.fullmatch(r'[a-zA-Z0-9._+-]+@' + re.escape(domain), sender):
+            raise DeployError('smtp-from must be a full address on smtp-domain.')
+        if c.get('resend-region', 'eu-west-1') not in ('us-east-1', 'eu-west-1', 'sa-east-1', 'ap-northeast-1'):
+            raise DeployError('Unsupported Resend region.')
     if c['once-version'] != 'v0.3.3':
         raise DeployError('V1 supports the checksum-pinned ONCE v0.3.3 release.')
     for key in ['state-file', 'workdir', 'ssh-private-key-file', 'ssh-public-key-file', 'ssh-known-hosts-file', 'ssh-host-private-key-file', 'ssh-host-public-key-file']:
@@ -113,8 +128,15 @@ def validate(c):
         seen.add(host)
         if not isinstance(app.get('image'), str) or not app['image'] or app['image'].startswith('-'):
             raise DeployError('Each application needs an image.')
-        if app.get('github') or app.get('smtp') is True or app.get('manage-dns') is True:
-            raise DeployError('GitHub publication and managed DNS/SMTP are not implemented in v1.')
+        for flag in ('smtp', 'manage-dns'):
+            if flag in app and type(app[flag]) is not bool:
+                raise DeployError('Application smtp and manage-dns flags must be booleans.')
+        if app.get('smtp') and c['provider-smtp'] != 'resend':
+            raise DeployError('smtp: true requires provider-smtp: resend.')
+        if app.get('manage-dns') and app.get('disable_tls'):
+            raise DeployError('Managed website DNS requires TLS enabled.')
+        if app.get('manage-dns') and c['provider-dns'] != 'cloudflare':
+            raise DeployError('manage-dns: true requires provider-dns: cloudflare.')
 
 
 def resolve_env(c, env):

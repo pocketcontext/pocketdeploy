@@ -93,8 +93,8 @@ digests. `deploy-strategy` defaults to `rolling`; use `stop-first` for stateful
 services, with `deploy-stop-timeout` from 1–3600 seconds (default 300).
 `health-path` defaults to `/`. `disable_tls: true` opts into HTTP; otherwise
 prepare working public DNS/TLS. Optional `cpus` and `memory` are nonnegative
-integers passed to ONCE. Automatic updates/backups and managed DNS/SMTP must
-remain disabled. GitHub deploy-key publication is unsupported. Application
+integers passed to ONCE. Automatic updates/backups must remain disabled.
+Managed DNS/SMTP and GitHub delivery are described below. Application
 storage bindings may reference existing R2 services, but Terraform-style state
 backend settings (`provider-backend`, infrastructure `r2-*`,
 `compute-api-version`) are not supported.
@@ -119,7 +119,7 @@ vault-command: vaultcontext
 Run `init` to prepare local state, UUID, SSH keys, known hosts and an empty
 `.envrc.private` if absent, without cloud or Vault calls. Saving requires all of
 these recovery files. VaultContext must be authenticated and user-unlocked.
-For a new deployment use `init → vault-save → create → vault-save`; for updates
+For a new deployment use `init → vault-save → converge → vault-save`; for updates
 use `plan → converge → vault-save`.
 
 Vault access happens only through explicit Vault commands. The retired
@@ -157,3 +157,31 @@ file. If refresh fails, use
 `oci session authenticate --profile-name PROFILE --region REGION`. Guidance
 resolves the region from `oci-region`, then `OCI_CLI_REGION`, then the selected
 OCI profile. If none is known, it explicitly asks you to supply `<OCI_REGION>`.
+
+## Managed services
+
+Select `provider-dns: cloudflare` with `cloudflare-zone-id` (32 lowercase hex
+characters). Select `provider-smtp: resend` with `smtp-domain`, full `smtp-from`
+on that domain, and optional `resend-region` (default `eu-west-1`). Resend requires
+managed Cloudflare DNS; one zone/domain per deployment is supported. Supply
+`CLOUDFLARE_API_TOKEN` and `RESEND_API_KEY` through the trusted shell; keep values
+outside colors.yml. Required management scopes: zone read/DNS edit and Resend
+domain/API-key management. `gh` requires repository administrator access.
+
+Applications opt into `manage-dns: true`, `smtp: true` and
+`github: owner/repository`. GitHub images must belong to that repository on GHCR;
+one app per repository is supported. The environment equals `profile`, and an
+explicit `github-environment` may only repeat that exact profile. TLS must remain
+enabled for GitHub and managed website DNS. The profile is durable, not a tool
+version or a global fixed prefix.
+
+Example sending identity: `smtp-domain: notifications.bigconfig.online` and
+`smtp-from: mail@notifications.bigconfig.online`. Existing resources are not
+adopted by name. SQLite stores provider IDs and sending credentials; `.ssh/`
+stores operator, host and per-repository deployment keys. Run local `init` after
+adding GitHub apps to prepare keys before the next explicit Vault checkpoint.
+
+`converge` verifies DNS/SMTP, applications and HTTPS before publishing CI access.
+Use explicit `smtp-test --to ADDRESS` for a single authorized test email. Deletion
+retains SMTP domains, keys and email DNS while removing owned website records and
+GitHub environments. Retire queued CI runs before deleting environments.

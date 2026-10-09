@@ -378,7 +378,7 @@ def test_help_is_stdout_success_without_deployment_access(tmp_path, monkeypatch,
     assert list(tmp_path.iterdir()) == []
 
 
-@pytest.mark.parametrize('argv', [['unknown'], ['--json']])
+@pytest.mark.parametrize('argv', [['unknown'], ['--json'], ['create'], ['create', '--json']])
 def test_missing_or_invalid_command_still_fails(monkeypatch, capsys, argv):
     import json
     assert run_main(monkeypatch, argv, lambda *a: pytest.fail('execute called')) == 2

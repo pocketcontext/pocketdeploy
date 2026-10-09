@@ -73,3 +73,24 @@ def test_retired_automatic_backup_environment_override_is_not_silently_ignored(t
         load(path, env={'COLORS_PAR_VAULT_SAVE_AFTER_RUN': 'false'}, resolve=False)
     assert 'COLORS_PAR_VAULT_SAVE_AFTER_RUN' in str(error.value)
     assert 'vault-save' in str(error.value)
+
+
+@pytest.mark.parametrize('changes,message', [
+    ({'smtp-from': 'mail@'}, 'full address'),
+    ({'smtp-from': 'mail@elsewhere.example'}, 'full address'),
+    ({'cloudflare-zone-id': 'not-an-id'}, 'zone-id'),
+    ({'provider-dns': 'no-infra'}, 'requires Cloudflare'),
+])
+def test_managed_services_reject_incomplete_configuration(tmp_path, changes, message):
+    import json
+    c = {'profile': 'demo', 'oci-config-file-profile': 'test',
+         'oci-compartment-id': 'compartment', 'oci-subnet-id': 'subnet',
+         'oci-availability-domain': 'ad', 'provider-dns': 'cloudflare',
+         'provider-smtp': 'resend', 'cloudflare-zone-id': 'a' * 32,
+         'smtp-domain': 'notifications.example.com',
+         'smtp-from': 'mail@notifications.example.com'}
+    c.update(changes)
+    path = tmp_path / 'colors.yml'
+    path.write_text(json.dumps(c))
+    with pytest.raises(DeployError, match=message):
+        load(path, env={})

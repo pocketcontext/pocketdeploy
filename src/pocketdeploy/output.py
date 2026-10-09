@@ -44,9 +44,12 @@ def text_result(command, result):
     suffix = f" for {profile}" if profile else ''
     if command == 'init':
         return [f"Initialized{suffix}.", f"Deployment: {result['deployment_id']}."]
-    if 'actions' in result and command in ('plan', 'create', 'converge', 'delete'):
+    if 'actions' in result and command in ('plan', 'converge', 'delete'):
         lines = [f"Plan{suffix}."]
-        actions = result['actions'] + result.get('applications', [])
+        actions = result['actions'] + result.get('applications', []) + [dict(a, resource=a.get('name', 'service')) for a in result.get('services', [])]
+        github = result.get('github') or {}
+        if isinstance(github, dict):
+            actions += [dict(a, resource=a['repository'] + '/' + a['environment']) for a in github.get('environments', [])]
         lines.extend(_actions(actions))
         if not actions or all(a.get('action') in ('retain', 'noop', 'unchanged') for a in actions):
             lines.append('No changes planned.')
@@ -66,8 +69,8 @@ def text_result(command, result):
         backup = state.get('last_vault_backup')
         lines.append(f"Last acknowledged Vault backup: {backup.get('saved_at', 'time unknown')} (document {backup.get('document', 'unknown')}, version {backup.get('version', 'unknown')})." if backup else 'Last acknowledged Vault backup: none.')
         return lines
-    if command in ('create', 'converge'):
-        lines = [f"{'Created' if command == 'create' else 'Converged'}{suffix}."]
+    if command == 'converge':
+        lines = [f"Converged{suffix}."]
         connection = result.get('connection', {})
         if connection.get('ip'):
             lines.append(f"SSH: {connection.get('user', 'ubuntu')}@{connection['ip']}")
@@ -77,6 +80,8 @@ def text_result(command, result):
             lines.append('No application changes.')
         lines.extend(_health(result.get('status', {})))
         return lines
+    if command == 'smtp-test':
+        return ['SMTP accepted the test message; inbox delivery is not confirmed.']
     if command == 'delete':
         return ['Deletion completed. Retained resources and application data are not purged.']
     if command == 'adopt':
