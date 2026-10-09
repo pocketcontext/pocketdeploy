@@ -151,7 +151,10 @@ def arguments(app):
 
 
 def resolve_image(image):
+    global STAGE
+    STAGE = 'application-image-pull'
     run('docker', 'pull', image)
+    STAGE = 'application-image-inspect'
     data = json.loads(run('docker', 'image', 'inspect', image))[0]
     digests = data.get('RepoDigests', [])
     if not digests:
@@ -199,6 +202,8 @@ def wait_healthy(app, budget=60):
 
 
 def reconcile(request):
+    global STAGE
+    STAGE = 'application-inventory'
     deployment = request['deployment_id']
     manifest = json.loads(MANIFEST.read_text()) if MANIFEST.exists() else {'deployment_id': deployment, 'apps': {}}
     if manifest['deployment_id'] != deployment:
@@ -229,19 +234,23 @@ def reconcile(request):
     actions = []
     for host in sorted(set(manifest['apps']) - desired_hosts) if not request.get('retain_other_apps') else []:
         pending = BASE / (hashlib.sha256(host.encode()).hexdigest() + '.pending')
+        STAGE = 'application-recovery'
         if pending.exists():
             raise RuntimeError('unfinished deployment; operator recovery required')
+        STAGE = 'application-inventory'
         actions.append({'host': host, 'action': 'remove-retain-data'})
         if request['action'] != 'converge':
             continue
         old = current.get(host)
         save(pending, {'host': host, 'deployment_id': deployment, 'action': 'remove'})
         if old:
+            STAGE = 'application-stop'
             run('docker', 'update', '--restart=no', old['id'])
             run('docker', 'stop', '--time', str(manifest['apps'][host]['desired'].get('timeout', 300)), old['id'])
             stopped = containers()[host]
             if stopped['running'] or stopped['exit_code'] != 0 or stopped['oom'] or stopped.get('restart') != 'no':
                 raise RuntimeError('application did not stop cleanly')
+            STAGE = 'application-remove'
             run(str(ONCE), '-n', 'once', 'remove', host)
             if host in containers():
                 raise RuntimeError('application removal verification failed')
@@ -251,12 +260,16 @@ def reconcile(request):
     for app in apps:
         host = app['host']
         pending = BASE / (hashlib.sha256(host.encode()).hexdigest() + '.pending')
+        STAGE = 'application-recovery'
         if pending.exists():
             raise RuntimeError('unfinished deployment; operator recovery required')
+        STAGE = 'application-inventory'
         old = current.get(host)
         resolved = resolve_image(app['image']) if request['action'] == 'converge' else None
+        STAGE = 'application-inventory'
         if matching(app, old, manifest['apps'].get(host)):
             if resolved is not None and resolved[1] == old['image_id']:
+                STAGE = 'application-health'
                 if not health(app)['healthy']:
                     raise RuntimeError('application HTTP health check failed')
                 continue
@@ -274,15 +287,19 @@ def reconcile(request):
             raise RuntimeError('unsafe existing application state')
         save(pending, {'host': host, 'deployment_id': deployment})
         if old and app.get('deploy-strategy', 'rolling') == 'stop-first':
+            STAGE = 'application-stop'
             run('docker', 'update', '--restart=no', old['id'])
             run('docker', 'stop', '--time', str(app.get('deploy-stop-timeout', 300)), old['id'])
             stopped = containers()[host]
             if stopped['id'] != old['id'] or stopped['running'] or stopped['exit_code'] != 0 or stopped['oom'] or stopped.get('restart') != 'no':
                 raise RuntimeError('application did not stop cleanly')
         if old:
+            STAGE = 'application-update'
             run(str(ONCE), '-n', 'once', 'update', host, '--image', digest, *arguments(app))
         else:
+            STAGE = 'application-deploy'
             run(str(ONCE), '-n', 'once', 'deploy', digest, '--host', host, *arguments(app))
+        STAGE = 'application-verification'
         new = containers().get(host)
         if not new or not new['running'] or new['image_id'] != image_id or new['binds'] or new.get('restart') != 'always':
             raise RuntimeError('application verification failed')
@@ -291,11 +308,13 @@ def reconcile(request):
         completed = {'desired': normalized(app), 'image_id': image_id}
         if not matching(app, new, completed):
             raise RuntimeError('application settings verification failed')
+        STAGE = 'application-health'
         if not wait_healthy(app):
             raise RuntimeError('application HTTP health check failed')
         manifest['apps'][host] = completed
         save(MANIFEST, manifest)
         pending.unlink()
+    STAGE = 'application-inventory'
     if request['action'] == 'converge':
         current = containers()
     probes = {app['host']: health(app) for app in apps} if request['action'] != 'plan' else {}
@@ -323,6 +342,7 @@ def retire(request, mutate=False):
         entry = json.loads(pending.read_text())
         if not record or entry.get('action') != 'retire' or entry.get('deployment_id') != deployment:
             raise RuntimeError('unfinished deployment; operator recovery required')
+        STAGE = 'application-inventory'
     actions = []
     for host, app in sorted(apps.items()):
         actual = current.get(host)

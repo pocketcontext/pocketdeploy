@@ -156,7 +156,11 @@ pocketdeploy plan --verbose
 Progress and stage durations go to stderr. `--quiet` suppresses progress, while
 preserving the stdout result and text-mode error diagnostics. With `--json`,
 controller errors are part of the stdout envelope; launcher/runtime diagnostics
-may still reach stderr. Exit codes are 0 for success, 1 for operation failure,
+may still reach stderr. Application failures identify a fixed operation code, such as
+`application_image_pull` or `application_deploy`, with troubleshooting guidance.
+ONCE deployment includes public hostname verification; a hostname containing an
+old VPS address must be updated or removed after recreation. Raw subprocess
+output remains suppressed. Exit codes are 0 for success, 1 for operation failure,
 2 for invalid usage and 130 for interruption.
 
 `ssh` passes through remote stdout/stderr and exit status without a result

@@ -21,17 +21,6 @@ vault-id: 3p7z9sqlxtujbsl
 vault-command: vaultcontext
 once:
   applications:
-  - host: 130.61.21.56.sslip.io
-    image: ghcr.io/pocketcontext/pocketdeploy-demo@sha256:0a856aee114c01e9af0aabd92f2b9563a649d11a2b6e2507b7f0f70009521433
-    disable_tls: true
-    auto_update: false
-    auto_backup: false
-    smtp: false
-    manage-dns: false
-    deploy-strategy: stop-first
-    deploy-stop-timeout: 30
-    env:
-      POCKETDEPLOY_TEST: app-pocketdeploy-test-generation
   - host: www.bigconfig.online
     image: ghcr.io/pocketcontext/pocketcontext-website:latest
     github: pocketcontext/pocketcontext-website

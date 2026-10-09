@@ -119,3 +119,25 @@ def test_remote_timeout_has_safe_error_and_verbose_stage(tmp_path, capsys):
     assert 'remote work may still be running' in str(caught.value)
     assert reporter.failed_stage == 'SSH: application plan'
     assert 'secret-' not in output.out + output.err + str(caught.value)
+
+
+def test_application_failure_diagnostics_are_allowlisted(tmp_path):
+    import pytest
+    from pocketdeploy.common import DeployError
+    from pocketdeploy.host import APPLICATION_ERRORS
+    host = Host({}, SimpleNamespace(deployment_id='test'), tmp_path)
+    host.prepare_keys()
+    for stage, message in APPLICATION_ERRORS.items():
+        result = SimpleNamespace(returncode=1, stdout=json.dumps({
+            'stage': stage, 'error': 'secret-value', 'command': 'secret-value'}), stderr='secret-value')
+        with patch('pocketdeploy.host.subprocess.run', return_value=result):
+            with pytest.raises(DeployError) as caught:
+                host._remote({'ip': '192.0.2.1'}, 'converge')
+        assert str(caught.value) == message
+        assert caught.value.code == stage.replace('-', '_')
+        assert 'secret-value' not in str(caught.value)
+    result.stdout = json.dumps({'stage': 'secret-value', 'error': 'secret-value'})
+    with patch('pocketdeploy.host.subprocess.run', return_value=result):
+        with pytest.raises(DeployError, match='output suppressed') as caught:
+            host._remote({'ip': '192.0.2.1'}, 'converge')
+    assert 'secret-value' not in str(caught.value)

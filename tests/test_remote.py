@@ -277,3 +277,27 @@ def test_new_application_health_retry_exhausts_budget():
     with patch.object(remote.time, 'monotonic', side_effect=lambda: clock[0]), patch.object(remote.time, 'sleep', side_effect=sleep), patch.object(remote, 'health', side_effect=unhealthy):
         assert not remote.wait_healthy(app(), budget=60)
     assert clock[0] == 60
+
+
+def test_image_pull_failure_sets_safe_stage(monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(remote.subprocess, 'run', lambda *a, **kw: SimpleNamespace(
+        returncode=1, stdout='synthetic-secret', stderr='synthetic-secret'))
+    with pytest.raises(RuntimeError, match='output suppressed') as caught:
+        remote.resolve_image('private-registry/synthetic-secret')
+    assert remote.STAGE == 'application-image-pull'
+    assert 'synthetic-secret' not in str(caught.value)
+
+
+def test_once_deploy_failure_preserves_pending_and_stage(tmp_path, monkeypatch):
+    monkeypatch.setattr(remote, 'BASE', tmp_path)
+    monkeypatch.setattr(remote, 'MANIFEST', tmp_path / 'manifest.json')
+    monkeypatch.setattr(remote, 'containers', lambda: {})
+    monkeypatch.setattr(remote, 'resolve_image', lambda image: ('example/app@sha256:abc', 'image-id'))
+    def fail(*args, **kwargs):
+        raise RuntimeError('subprocess failed; output suppressed')
+    monkeypatch.setattr(remote, 'run', fail)
+    with pytest.raises(RuntimeError):
+        remote.reconcile({'action': 'converge', 'deployment_id': 'test', 'applications': [app()]})
+    assert remote.STAGE == 'application-deploy'
+    assert len(list(tmp_path.glob('*.pending'))) == 1

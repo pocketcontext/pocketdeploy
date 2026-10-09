@@ -99,11 +99,15 @@ class Host:
                 response = json.loads(result.stdout)
                 error = response.get('error')
                 stage = response.get('stage')
+                error = error if isinstance(error, str) else None
+                stage = stage if isinstance(stage, str) else None
             except (ValueError, AttributeError):
                 error = None
                 stage = None
             if stage in {'cloud-init', 'docker-install', 'docker-service', 'host-firewall', 'once-download', 'once-service'}:
                 raise DeployError('Host bootstrap failed at ' + stage + '; output suppressed')
+            if error not in SAFE_ERRORS and isinstance(stage, str) and stage in APPLICATION_ERRORS:
+                raise DeployError(APPLICATION_ERRORS[stage], code=stage.replace('-', '_'))
             raise DeployError('Host operation failed' + (': ' + error if error in SAFE_ERRORS else '; output suppressed'))
         try:
             return json.loads(result.stdout)
@@ -215,3 +219,18 @@ def validate_config(config):
         for key in ('disable_tls', 'auto_update', 'auto_backup', 'smtp', 'manage-dns'):
             if key in app and type(app[key]) is not bool:
                 raise DeployError('Application flags must be booleans.')
+
+
+# Fixed messages only: a remote response is never trusted as display text.
+APPLICATION_ERRORS = {
+    'application-inventory': 'Application inventory failed; inspect Docker service health on the VPS.',
+    'application-recovery': 'Unfinished application deployment; inspect host state before recovering its pending marker.',
+    'application-image-pull': 'Application image pull failed; check registry access and the configured image reference.',
+    'application-image-inspect': 'Application image inspection failed; check the downloaded image and registry digest.',
+    'application-stop': 'Application graceful stop failed; inspect application health before retrying.',
+    'application-remove': 'ONCE application removal failed; inspect host state before recovering its pending marker.',
+    'application-deploy': 'ONCE application deployment failed; check hostname DNS, public reachability and container health before recovering its pending marker.',
+    'application-update': 'ONCE application update failed; check hostname DNS, public reachability and container health before recovering its pending marker.',
+    'application-verification': 'Application verification failed; inspect container state, image, settings and volume continuity before recovering its pending marker.',
+    'application-health': 'Application HTTP health check failed; check the configured health path and container health before retrying.',
+}

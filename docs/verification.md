@@ -325,3 +325,32 @@ Published source `247525cac79788dc2264f79f0f03debb7e82e16a` passed GitHub CI.
 The launcher pins that commit and passes all 19 copied-launcher checks. Its live
 post-deletion dry-run completed in 1.685 seconds, reporting compute/firewall
 absent and retained SMTP, disk and shared networking, with protection enabled.
+
+## Recovery after recreation with an obsolete demo hostname
+
+A user-triggered converge recreated compute at `132.226.198.73`, then failed
+while deploying the old `130.61.21.56.sslip.io` verification app. Docker events
+showed initial container start followed by proxy-route and container removal;
+the configured hostname still resolved to the deleted VPS. Pinned ONCE performs
+public HTTP verification and removes an initial deployment on failure. The
+original CLI diagnostic was suppressed, so this cause is supported by observed
+state and upstream behavior rather than a retained original error message.
+
+Removed the obsolete demo from root desired configuration. Under local deployment
+and remote host locks, verified the exact host/UUID pending marker, no manifest
+or retirement fence, only the proxy container, no demo volumes and an empty
+proxy route table. The bundled proxy lists a header-only table (no --json flag).
+Archived only the matching pending marker as recovery evidence. No volume or
+unrelated pending marker was deleted.
+
+Convergence then succeeded in 43.086 seconds, retaining the recreated compute,
+reusing DNS/SMTP and deploying only `www.bigconfig.online`. Application and public
+HTTPS checks returned 200, host pending operations were zero, and GitHub
+environment `pocketdeploy-oci-test` was recreated with disposable authority.
+The exact failed local application step was resolved as superseded by the
+successful convergence; unrelated historical operations remain unchanged.
+
+Application diagnostics now expose fixed operation codes and guidance for image
+pull/inspection, ONCE deploy/update, stop/removal, verification and health errors,
+without raw subprocess output or credentials. All 280 tests and source/wheel
+builds passed. No SMTP test email or Vault backup was performed.

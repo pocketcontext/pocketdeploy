@@ -9,3 +9,7 @@ Never put secrets in that variable. Other environment variables are not exposed.
 The upstream NGINX base is pinned by multi-platform digest. SIGQUIT provides a
 clean NGINX shutdown for stop-first verification. ONCE supplies its normal named
 storage volumes; removal must retain them unless explicitly authorized otherwise.
+
+This fixture is not part of the root deployment. If using an IP-derived hostname
+for a separate test, update it when the VPS address changes: ONCE verifies the
+public hostname during initial deployment.
