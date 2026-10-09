@@ -73,6 +73,15 @@ def main():
         assert bare.stdout == explicit_help.stdout
         assert 'usage:' in bare.stdout and bare.stderr == ''
         assert not list(empty.iterdir()), 'Help created local files.'
+        for flags in ([], ['--json']):
+            removed = invoke(empty, 'create', *flags, expected='')
+            assert removed.returncode == 2
+            if flags:
+                assert json.loads(removed.stdout)['error']['code'] == 'invalid_usage'
+            else:
+                assert not removed.stdout and 'Invalid command arguments' in removed.stderr
+            assert not list(empty.iterdir()), 'Removed command created deployment files.'
+        assert 'smtp-test' in bare.stdout
         # A standalone script must ignore the caller's project dependencies.
         (empty / 'pyproject.toml').write_text(
             '[project]\nname = "unrelated-project"\nversion = "0.0.0"\n'
@@ -165,7 +174,7 @@ def main():
         assert token.read_text() not in expired_run.stdout + expired_run.stderr
         print(f'Expired synthetic OCI token rejected locally in {elapsed:.2f}s; OCI was not invoked.')
 
-    print('Portable launcher: 15 checks passed (no cloud access).')
+    print('Portable launcher: 17 checks passed (no cloud access).')
 
 
 if __name__ == '__main__':

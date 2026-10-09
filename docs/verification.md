@@ -208,3 +208,12 @@ reconciliation after the account domain allowance is resolved. Error parsing now
 handles CLI chatter preceding JSON without emitting provider-controlled text.
 Live website deployment, HTTPS, SMTP acceptance and PocketDeploy CD verification
 remain pending this external account limitation.
+
+Published implementation `24a90cb04e2af0904b661bd133d7c169b0f20eb6` passed
+209 tests, skill validation and package builds; its GitHub CI passed at
+https://github.com/pocketcontext/pocketdeploy/actions/runs/37982262752 .
+The portable launcher pins that immutable implementation and passed 17 isolated
+checks, including removed-command rejection and expired OCI token rejection in
+0.17 seconds without invoking OCI. Published `init` also succeeded against the
+existing test deployment, preserving UUID and preparing its separate GitHub keys
+without cloud/provider calls. No Vault snapshot was taken.
