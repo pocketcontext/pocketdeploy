@@ -5,9 +5,10 @@ the workflow DAG; there is no Terraform, OpenTofu, Ansible or Clojure runtime.
 
 `colors.yml` is desired configuration. A private SQLite file records identities,
 operations, resolved settings and recovery checkpoints. VaultContext stores
-versioned encrypted recovery sets. The package and a public example deployment
-share this repository. Real deployment files belong in an ignored private
-folder; this repository contains no production credentials or cloud state.
+versioned encrypted recovery sets. The package and the live OCI test deployment
+share this repository. `.envrc` and `colors.yml` are tracked in Git. Private
+bindings (`.envrc.private`), state (`.colors.sqlite`) and keys (`.ssh/`) live
+alongside them and remain ignored. There is no `.private` directory.
 
 ## Setup
 
@@ -30,8 +31,10 @@ provide the `pocketdeploy` command from any working directory. Vault workflows r
 an authenticated account and an interactive user-unlocked session. Outside
 devenv, install `vaultcontext` separately or set its `vault-command` path.
 
-Create a private deployment directory and copy `colors.yml` into it. Replace the
-placeholder OCI identifiers with your existing compartment, public subnet and
+For a new deployment, copy `examples/colors.yml` into its repository as
+`colors.yml`. The root configuration in this checkout operates the existing test
+deployment; do not reuse its identity for a new deployment. Replace the example
+OCI identifiers with your existing compartment, public subnet and
 availability domain. Configure your OCI CLI authentication profile; the default
 auth mode is `security_token`. The existing subnet/VCN, internet gateway, routes
 and subnet security lists remain externally managed. Inherited subnet rules can
@@ -40,14 +43,14 @@ grant access beyond the dedicated NSG; an NSG does not subtract those permission
 ## Commands
 
 ```sh
-pocketdeploy plan -f .private/colors.yml
-pocketdeploy create -f .private/colors.yml
-pocketdeploy converge -f .private/colors.yml
-pocketdeploy status -f .private/colors.yml
-pocketdeploy describe -f .private/colors.yml
-pocketdeploy ssh -f .private/colors.yml
-pocketdeploy ssh -f .private/colors.yml --ssh-command 'uname -m'
-pocketdeploy delete -f .private/colors.yml --dry-run
+pocketdeploy plan
+pocketdeploy create
+pocketdeploy converge
+pocketdeploy status
+pocketdeploy describe
+pocketdeploy ssh
+pocketdeploy ssh --ssh-command 'uname -m'
+pocketdeploy delete --dry-run
 ```
 
 `create` and `converge` share a DAG: keys → OCI → host → applications → verify.
@@ -181,9 +184,9 @@ vault-save-after-run: true
 After `vaultcontext login` and user-operated `vaultcontext unlock --timeout 3600`:
 
 ```sh
-pocketdeploy vault-save -f .private/colors.yml
-pocketdeploy vault-restore -f .private/colors.yml \
-  --document DOCUMENT_ID --version VERSION_ID --destination .private/recovered
+pocketdeploy vault-save
+pocketdeploy vault-restore \
+  --document DOCUMENT_ID --version VERSION_ID --destination /absolute/path/to/recovery-check
 ```
 
 Recovery files are the exact config used (restored as `colors.yml`),
@@ -191,6 +194,8 @@ Recovery files are the exact config used (restored as `colors.yml`),
 must exist before a complete recovery set can be saved. Create an empty private
 bindings file if the deployment needs none. File versions upload first; the
 consistent SQLite snapshot uploads last and references the exact versions.
+`colors.yml` is also included in Vault to pair the desired configuration with
+its recovery checkpoint. `.envrc` and package code are recovered from Git.
 The snapshot does not need to contain its own newly assigned Vault version ID.
 Vault's file limit is 8 MiB. A backup failure is reported distinctly even when
 deployment succeeded. Configured convergence saves the prepared keys and state before cloud mutation,

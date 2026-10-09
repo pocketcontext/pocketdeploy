@@ -2,8 +2,11 @@
 
 PocketDeploy was exercised on a separately authorized OCI test deployment,
 profile `pocketdeploy-oci-test`. Production `once-pocketcontext-v2` resources and
-state were not adopted or changed. Real account/subnet identifiers, configuration,
-SSH keys, SQLite state and Vault document references remain ignored locally.
+state were not adopted or changed. The non-secret live desired configuration, including account/subnet identifiers,
+is tracked in root `colors.yml`; `.envrc` is tracked too. SSH keys, private
+bindings and SQLite state remain ignored at the repository root. Earlier restore
+verification files are preserved outside the repository under the operator’s
+`~/.local/state/pocketdeploy/` directory.
 
 ## Live checks
 

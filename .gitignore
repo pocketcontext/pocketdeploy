@@ -3,7 +3,6 @@
 .envrc.private.*
 .colors*
 .ssh/
-.private/
 *.sqlite
 *.sqlite-*
 *.db

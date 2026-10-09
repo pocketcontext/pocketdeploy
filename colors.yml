@@ -1,52 +1,35 @@
-# Public example only. Keep real account IDs, state and credentials private.
+oci-config-file-profile: oracle-ampere-2
+oci-compartment-id: ocid1.tenancy.oc1..aaaaaaaabz6wkmand36zaln2wbyuqqflr2uzohoj3briepj4mfpohas2bxsq
+oci-subnet-id: ocid1.subnet.oc1.eu-frankfurt-1.aaaaaaaaeo3hhvldibbw42m6atn52izm6vmaxxcjbfm2fz7t3glvw3ovihta
+oci-availability-domain: XquT:EU-FRANKFURT-1-AD-1
 schema-version: 1
-profile: pocketdeploy-example
-workdir: .colors
-state-file: .colors.sqlite
+profile: pocketdeploy-oci-test
 provider-compute: oci
-compute-prevent-destroy: true
-compute-require-existing-state: false
-compute-retain-boot-volume: true
-oci-config-file-profile: DEFAULT
 oci-auth: security_token
-oci-region: eu-frankfurt-1
-oci-compartment-id: <compartment-ocid>
-oci-subnet-id: <existing-public-subnet-ocid>
-oci-availability-domain: <availability-domain>
-# Set oci-image-id to pin explicitly; otherwise first creation records an
-# available Canonical Ubuntu 24.04 image compatible with the requested shape.
 oci-shape: VM.Standard.A1.Flex
 oci-ocpus: 1
 oci-memory-in-gbs: 6
 oci-boot-volume-size-in-gbs: 50
-oci-boot-volume-vpus-per-gb: 10
+compute-prevent-destroy: true
+compute-require-existing-state: true
+compute-retain-boot-volume: false
 compute-ssh-sources:
-  - 203.0.113.10/32
+- 35.204.34.235/32
 compute-http-sources:
-  - 0.0.0.0/0
-provider-dns: no-infra
-provider-smtp: no-infra
-once-version: v0.3.3
-ssh-private-key-file: .ssh/id_ed25519
-ssh-public-key-file: .ssh/id_ed25519.pub
-ssh-known-hosts-file: .ssh/known_hosts
-# After vaultcontext login and interactive unlock:
-# vault-id: <dedicated-vault-id>
-# vault-command: vaultcontext
-vault-save-after-run: false
+- 0.0.0.0/0
+vault-id: 3p7z9sqlxtujbsl
+vault-command: vaultcontext
+vault-save-after-run: true
 once:
   applications:
-    - host: example.com
-      image: ghcr.io/pocketcontext/pocketdeploy-demo:latest
-      # Point DNS to the instance and omit disable_tls for public HTTPS.
-      disable_tls: true
-      deploy-strategy: rolling
-      auto_update: false
-      auto_backup: false
-      smtp: false
-      manage-dns: false
-      env:
-        - POCKETDEPLOY_EXAMPLE=true
-# Mapping env values instead reference COLORS_PAR_* operator parameters:
-# env:
-#   LITESTREAM_ENDPOINT: app-wikicontext-production-litestream-endpoint
+  - host: 130.61.21.56.sslip.io
+    image: ghcr.io/pocketcontext/pocketdeploy-demo@sha256:0a856aee114c01e9af0aabd92f2b9563a649d11a2b6e2507b7f0f70009521433
+    disable_tls: true
+    auto_update: false
+    auto_backup: false
+    smtp: false
+    manage-dns: false
+    deploy-strategy: stop-first
+    deploy-stop-timeout: 30
+    env:
+      POCKETDEPLOY_TEST: app-pocketdeploy-test-generation
