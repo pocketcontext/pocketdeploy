@@ -9,7 +9,6 @@ import stat
 import time
 
 from blue.workflow import workflow, run as run_workflow
-from blue.cli import find_up
 from .common import DeployError, local_path
 from .config import load, scope
 from .state import State, deployment_lock
@@ -57,10 +56,10 @@ Examples:
   pocketdeploy init
   pocketdeploy vault-save
 
-Configuration defaults to the nearest colors.yml in this directory or a parent.
+Configuration defaults to colors.yml in the current working directory.
 Use -f to select a deployment. Run without arguments to show this help.''')
     p.add_argument('command', metavar='COMMAND', choices=['init', 'plan', 'create', 'converge', 'status', 'describe', 'ssh', 'delete', 'adopt', 'vault-save', 'vault-restore'], help='Deployment or Vault command listed below')
-    p.add_argument('-f', '--file', help='Configuration file (default: nearest colors.yml in the current directory or its parents)')
+    p.add_argument('-f', '--file', help='Configuration file (default: ./colors.yml in the current working directory)')
     p.add_argument('--json', action='store_true', help='Emit one versioned JSON result on stdout')
     p.add_argument('--quiet', action='store_true', help='Suppress progress on stderr')
     p.add_argument('--dry-run', action='store_true', help='Plan create/converge/delete without applying changes')
@@ -171,9 +170,9 @@ def execute(args, reporter=None):
     if args.overwrite and args.command != 'vault-restore':
         raise DeployError('--overwrite is supported only for vault-restore.', code='invalid_usage')
     read_only = args.command in ('plan', 'status', 'describe') or args.dry_run
-    config_file = args.file if args.file is not None else find_up('colors.yml')
-    if config_file is None:
-        raise DeployError('No colors.yml found in the current directory or its parents; use -f to select a configuration.')
+    config_file = args.file if args.file is not None else 'colors.yml'
+    if args.file is None and not Path(config_file).exists():
+        raise DeployError('No colors.yml found in the current directory; use -f to select a configuration.')
     config = load(config_file, resolve=args.command not in ('init', 'ssh', 'delete', 'vault-save', 'vault-restore', 'status', 'describe'))
     # Reject unsupported application behavior before any cloud mutation.
     from .host import validate_config

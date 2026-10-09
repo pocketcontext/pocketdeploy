@@ -183,7 +183,8 @@ def isolated_plan(monkeypatch):
     return captured
 
 
-def test_nested_cwd_selects_nearest_config_and_keeps_private_paths_beside_it(tmp_path, monkeypatch):
+@pytest.mark.parametrize('local_config', [False, True])
+def test_default_config_never_selects_parent(tmp_path, monkeypatch, local_config):
     (tmp_path / 'colors.yml').write_text(SYNTHETIC_CONFIG.replace('demo', 'outer'))
     deployment = tmp_path / 'deployment'
     nested = deployment / 'docs' / 'examples'
@@ -191,19 +192,25 @@ def test_nested_cwd_selects_nearest_config_and_keeps_private_paths_beside_it(tmp
     (deployment / 'colors.yml').write_text(SYNTHETIC_CONFIG)
     monkeypatch.chdir(nested)
     captured = isolated_plan(monkeypatch)
-
+    if not local_config:
+        with pytest.raises(DeployError, match='No colors.yml found in the current directory'):
+            cli.execute(cli.parser().parse_args(['plan']))
+        assert captured == {}
+        assert not list(tmp_path.rglob('.colors.sqlite*'))
+        return
+    (nested / 'colors.yml').write_text(SYNTHETIC_CONFIG)
     result = cli.execute(cli.parser().parse_args(['plan']))
 
     assert result['profile'] == 'demo'
-    assert captured['config']['_root'] == str(deployment)
-    assert captured['host'].key == deployment / '.ssh' / 'id_ed25519'
-    assert (deployment / '.colors.sqlite.lock').is_file()
-    assert not (nested / '.colors.sqlite.lock').exists()
+    assert captured['config']['_root'] == str(nested)
+    assert captured['host'].key == nested / '.ssh' / 'id_ed25519'
+    assert (nested / '.colors.sqlite.lock').is_file()
+    assert not (deployment / '.colors.sqlite.lock').exists()
     assert not (deployment / '.colors.sqlite').exists()
 
 
 @pytest.mark.parametrize('flag', ['-f', '--file'])
-def test_explicit_config_overrides_discovery_relative_to_caller(tmp_path, monkeypatch, flag):
+def test_explicit_config_overrides_local_default_relative_to_caller(tmp_path, monkeypatch, flag):
     (tmp_path / 'colors.yml').write_text(SYNTHETIC_CONFIG.replace('demo', 'parent'))
     nested = tmp_path / 'nested'
     nested.mkdir()
@@ -224,7 +231,6 @@ def test_explicit_config_overrides_discovery_relative_to_caller(tmp_path, monkey
 
 def test_missing_config_exits_nonzero_without_constructing_cloud(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(cli, 'find_up', lambda name: None)
     monkeypatch.setattr(cli.sys, 'argv', ['pocketdeploy', 'plan'])
     monkeypatch.setattr(cli, 'OCI', lambda *args: pytest.fail('Cloud must not be constructed'))
 
@@ -238,7 +244,6 @@ def test_missing_config_exits_nonzero_without_constructing_cloud(tmp_path, monke
 def test_missing_explicit_config_does_not_fall_back(tmp_path, monkeypatch, capsys):
     (tmp_path / 'colors.yml').write_text(SYNTHETIC_CONFIG)
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(cli, 'find_up', lambda name: pytest.fail('Explicit files must not use discovery'))
     monkeypatch.setattr(cli.sys, 'argv', ['pocketdeploy', 'plan', '-f', 'missing.yml'])
 
     assert cli.main() == 1
