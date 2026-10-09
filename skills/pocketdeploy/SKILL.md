@@ -61,7 +61,7 @@ creation to checkpoint the resource identities.
 `plan` and `converge --dry-run` validate and read live OCI resources and, for an
 existing host, application state through SSH. They can create a local lock;
 they do not provision resources or generate keys. They require suitable tools,
-authentication and application bindings. `status` and `describe` return the same
+authentication and application bindings. `status` returns
 safe observed inventory without resolving application secrets. They are live
 reads, not offline validation. `state.last_vault_backup` is the last locally
 acknowledged Vault document/version/save time, or null; older receipts may lack a

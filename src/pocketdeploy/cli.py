@@ -38,7 +38,6 @@ def parser():
   plan           Read live resources and report proposed changes
   converge       Reconcile the deployment with desired configuration
   status         Show observed resources, application health and backup receipt
-  describe       Alias for status
   ssh            Open SSH or run --ssh-command; preserve remote output and exit
   delete         Delete owned resources, subject to destruction protection
   smtp-test      Send one explicit SMTP test using --to
@@ -58,7 +57,7 @@ Examples:
 
 Configuration defaults to colors.yml in the current working directory.
 Use -f to select a deployment. Run without arguments to show this help.''')
-    p.add_argument('command', metavar='COMMAND', choices=['init', 'plan', 'converge', 'status', 'describe', 'ssh', 'delete', 'adopt', 'smtp-test', 'vault-save', 'vault-restore'], help='Deployment or Vault command listed below')
+    p.add_argument('command', metavar='COMMAND', choices=['init', 'plan', 'converge', 'status', 'ssh', 'delete', 'adopt', 'smtp-test', 'vault-save', 'vault-restore'], help='Deployment or Vault command listed below')
     p.add_argument('-f', '--file', help='Configuration file (default: ./colors.yml in the current working directory)')
     p.add_argument('--json', action='store_true', help='Emit one versioned JSON result on stdout')
     p.add_argument('--verbose', action='store_true', help='Show safe request timings and waiting progress on stderr')
@@ -215,11 +214,11 @@ def execute(args, reporter=None):
         raise DeployError('--overwrite is supported only for vault-restore.', code='invalid_usage')
     if bool(getattr(args, 'to', None)) != (args.command == 'smtp-test'):
         raise DeployError('smtp-test requires --to; --to is only supported for smtp-test.', code='invalid_usage')
-    read_only = args.command in ('plan', 'status', 'describe') or args.dry_run
+    read_only = args.command in ('plan', 'status') or args.dry_run
     config_file = args.file if args.file is not None else 'colors.yml'
     if args.file is None and not Path(config_file).exists():
         raise DeployError('No colors.yml found in the current directory; use -f to select a configuration.')
-    config = load(config_file, resolve=args.command not in ('init', 'ssh', 'delete', 'vault-save', 'vault-restore', 'status', 'describe', 'smtp-test'))
+    config = load(config_file, resolve=args.command not in ('init', 'ssh', 'delete', 'vault-save', 'vault-restore', 'status', 'smtp-test'))
     # Reject unsupported application behavior before any cloud mutation.
     from .host import validate_config
     validate_config(config)
@@ -247,7 +246,7 @@ def execute(args, reporter=None):
                 raise DeployError('Restore the managed DNS configuration before operating its deployment.')
             cloud = OCI(config, state)
             if read_only:
-                if args.command in ('status', 'describe'):
+                if args.command == 'status':
                     observed = cloud.inspect()
                     result = {'profile': config['profile'], 'state': state.safe_status(), 'resources': observed}
                     if observed.get('compute'):

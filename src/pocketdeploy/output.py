@@ -56,7 +56,7 @@ def text_result(command, result):
         if 'protected' in result:
             lines.append('Deletion protection: ' + ('enabled.' if result['protected'] else 'disabled.'))
         return lines
-    if command in ('status', 'describe'):
+    if command == 'status':
         lines = [f"Status{suffix}."]
         for name, resource in result.get('resources', {}).items():
             lines.append(f"  {name}: {resource.get('state') or 'unknown'} ({resource['id']})" if resource else f"  {name}: absent")

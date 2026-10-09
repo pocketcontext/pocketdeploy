@@ -77,7 +77,6 @@ pocketdeploy plan
 pocketdeploy converge
 pocketdeploy vault-save
 pocketdeploy status
-pocketdeploy describe
 pocketdeploy ssh
 pocketdeploy ssh --ssh-command 'uname -m'
 pocketdeploy delete --dry-run
@@ -99,8 +98,8 @@ check whether their immutable digest changed. Prefer digest-pinned app images
 for reproducibility. `plan` never creates cloud resources or keys; mutable image
 tags may need verification at converge time. Local lock files may be created.
 
-`status` and `describe` currently return the same safe inventory, operation and
-host application status. They never print resolved environments, credentials,
+`status` returns safe inventory, operation and host application status.
+It never prints resolved environments, credentials,
 raw Docker metadata, ONCE labels or cloud response bodies.
 `state.last_vault_backup` reports the locally acknowledged document/version and
 UTC `saved_at` (or null when no receipt is known). Older receipts may lack a
