@@ -320,3 +320,8 @@ provider command, ownership failures before mutations, boot-volume identity
 drift and interrupted retirement. Package builds and skill validation pass.
 The final boot-volume preflight hardening was tested synthetically after the
 retaining live termination; the live retries used the final implementation.
+
+Published source `247525cac79788dc2264f79f0f03debb7e82e16a` passed GitHub CI.
+The launcher pins that commit and passes all 19 copied-launcher checks. Its live
+post-deletion dry-run completed in 1.685 seconds, reporting compute/firewall
+absent and retained SMTP, disk and shared networking, with protection enabled.
