@@ -261,3 +261,30 @@ def test_delete_cleanup_includes_init_only_keys(tmp_path):
         assert github.plan_delete() == [{'resource': 'github-deployment-keys', 'action': 'delete'}]
         github.cleanup_keys()
         assert not private.exists() and not public.exists()
+
+
+def test_verified_deletion_clears_partial_setup_marker(tmp_path):
+    github, state = fixture(tmp_path)
+    repo = 'example/site'
+    with state:
+        state.put_resource('github:' + repo, 'github-environment', '42',
+                           {'repository': repo, 'environment': 'test-profile'}, owned=True)
+        state.set_meta('github-pending:' + repo, True)
+        operation = state.begin_operation('delete', 'test')
+        with patch.object(github, '_api', return_value={'permissions': {'admin': True}}), patch.object(github, '_pages', return_value=[]):
+            github.delete(operation)
+        assert state.get_meta('github-pending:' + repo) is False
+
+
+def test_legacy_pending_setup_without_resource_requires_absence(tmp_path):
+    github, state = fixture(tmp_path)
+    with state:
+        state.set_meta('github-pending:example/site', True)
+        op = state.begin_operation('delete', 'test')
+        with patch.object(github, '_pages', return_value=[{'name': 'test-profile', 'id': 99}]):
+            with pytest.raises(DeployError, match='verified environment deletion'):
+                github.delete(op)
+        assert state.get_meta('github-pending:example/site') is True
+        with patch.object(github, '_pages', return_value=[]):
+            github.delete(op)
+        assert state.get_meta('github-pending:example/site') is False

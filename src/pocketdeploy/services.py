@@ -1,4 +1,4 @@
-"""Cloudflare DNS and retained Resend sending infrastructure.
+"""Owned Cloudflare DNS and Resend sending infrastructure.
 
 Provider responses and API keys remain private. No mail is sent by convergence.
 """
@@ -125,56 +125,98 @@ class Services:
             if app.get('manage-dns'):
                 self._dns({'type': 'A', 'name': app['host'], 'content': '0.0.0.0'})
 
-    def plan_delete(self):
-        actions = []
-        for saved in self.state.resources():
-            if saved['kind'] != 'cloudflare-dns' or saved['attributes'].get('type') != 'A':
-                continue
-            attrs = saved['attributes']
-            if not saved['owned'] or attrs.get('zone') != self.c.get('cloudflare-zone-id'):
-                raise DeployError('Website DNS ownership does not match configuration.')
+    def _resend_inventory(self, kind):
+        rows, after = [], None
+        for _ in range(100):
+            page = self._resend([kind, 'list', '--limit', '100', *(['--after', after] if after else [])])
+            if not isinstance(page, dict) or not isinstance(page.get('data'), list):
+                raise DeployError('Resend returned an invalid resource list.')
+            rows.extend(page['data'])
+            if not page.get('has_more'):
+                return rows
+            if not page['data']:
+                raise DeployError('Resend pagination returned no continuation.')
+            after = _identifier(page['data'][-1])
+        raise DeployError('Resend pagination exceeded its safety limit.')
+
+    def _delete_current(self, saved):
+        attrs = saved['attributes']
+        if not saved['owned']:
+            raise DeployError('Service resource is not owned by this deployment.')
+        if saved['kind'] == 'cloudflare-dns':
+            if attrs.get('zone') != self.c.get('cloudflare-zone-id'):
+                raise DeployError('DNS ownership does not match configuration.')
             current = next((r for r in self._records(attrs['name']) if r.get('id') == saved['provider_id']), None)
-            if current and (current.get('comment') != self.marker or current.get('type') != 'A' or current.get('name') != attrs['name']):
-                raise DeployError('Website DNS ownership changed; refusing deletion.')
-            actions.append({'resource': saved['name'], 'name': attrs['name'], 'type': 'A', 'action': 'delete' if current else 'absent'})
-        if any(r['kind'].startswith('resend-') or (r['kind'] == 'cloudflare-dns' and r['attributes'].get('type') != 'A') for r in self.state.resources()):
-            actions.append({'resource': 'smtp', 'action': 'retain'})
-        return actions
+            if current and (current.get('comment') != self.marker or current.get('type') != attrs['type'] or current.get('name') != attrs['name']):
+                raise DeployError('DNS ownership changed; refusing deletion.')
+            return current
+        kind = 'domains' if saved['kind'] == 'resend-domain' else 'api-keys'
+        current = next((r for r in self._resend_inventory(kind) if r.get('id') == saved['provider_id']), None)
+        if saved['kind'] == 'resend-domain':
+            if attrs.get('name') != self.c.get('smtp-domain'):
+                raise DeployError('Recorded SMTP domain differs from configuration.')
+            if current and current.get('name') != attrs['name']:
+                raise DeployError('SMTP domain ownership changed; refusing deletion.')
+        else:
+            domain = self.state.get_resource('smtp-domain')
+            if not domain or attrs.get('domain_id') != domain['provider_id']:
+                raise DeployError('SMTP key ownership does not match the recorded domain.')
+            expected_name = attrs.get('name', self.c['profile'] + '-smtp-send')
+            if current and (current.get('name') != expected_name or
+                            current.get('domain_id', attrs['domain_id']) != attrs['domain_id'] or
+                            current.get('permission', 'sending_access') != 'sending_access'):
+                raise DeployError('SMTP key ownership changed; refusing deletion.')
+        return current
+
+    def _delete_resources(self):
+        order = {'resend-api-key': 0, 'resend-domain': 1, 'cloudflare-dns': 2}
+        return sorted((r for r in self.state.resources() if r['kind'] in order), key=lambda r: (order[r['kind']], r['name']))
+
+    def plan_delete(self):
+        resources = self._delete_resources()
+        if any(r['kind'] == 'cloudflare-dns' for r in resources) and not os.environ.get('CLOUDFLARE_API_TOKEN'):
+            raise DeployError('Set CLOUDFLARE_API_TOKEN with zone DNS edit permission.', code='credentials_missing')
+        if any(r['kind'].startswith('resend-') for r in resources) and not os.environ.get('RESEND_API_KEY'):
+            raise DeployError('Set RESEND_API_KEY with domain and API-key management permission.', code='credentials_missing')
+        for name in ('smtp-domain', 'smtp-key'):
+            if self.state.get_meta('pending:' + name) and not self.state.get_resource(name):
+                raise DeployError('Unrecorded SMTP creation requires ownership reconciliation before deletion.', code='provider_recovery_required')
+        for row in self.state.db.execute("SELECT key,value FROM meta WHERE key LIKE 'pending:dns:%'").fetchall():
+            if json.loads(row['value']) and not self.state.get_resource(row['key'][len('pending:'):]):
+                raise DeployError('Unrecorded DNS creation requires ownership reconciliation before deletion.', code='provider_recovery_required')
+        return [{'resource': r['name'], 'name': r['attributes'].get('name', r['name']),
+                 'type': r['attributes'].get('type', r['kind']),
+                 'action': 'delete' if self._delete_current(r) else 'absent'} for r in resources]
 
     def delete(self, operation_id):
-        """Delete only owned website A records; retain sending infrastructure."""
+        """Revoke sending authority, delete its domain, then remove owned DNS."""
         self.plan_delete()
         actions = []
-        for saved in self.state.resources():
-            if saved['kind'] != 'cloudflare-dns' or saved['attributes'].get('type') != 'A':
-                continue
-            attrs = saved['attributes']
-            if not saved['owned'] or attrs.get('zone') != self.c.get('cloudflare-zone-id'):
-                raise DeployError('Website DNS ownership does not match configuration.')
-            rows = self._records(attrs['name'])
-            current = next((r for r in rows if r.get('id') == saved['provider_id']), None)
+        for saved in self._delete_resources():
+            current = self._delete_current(saved)
+            pending_key = 'delete:' + saved['name']
             if current:
-                if current.get('comment') != self.marker or current.get('type') != 'A' or current.get('name') != attrs['name']:
-                    raise DeployError('Website DNS ownership changed; refusing deletion.')
-                pending_key = 'delete:' + saved['name']
                 step = self.state.get_meta(pending_key) or self.state.intent(operation_id, saved['name'], {'action': 'delete', 'id': saved['provider_id']})
                 self.state.set_meta(pending_key, step)
-                self._cf(['delete', saved['provider_id'], '--force'])
-                if any(r.get('id') == saved['provider_id'] for r in self._records(attrs['name'])):
-                    raise DeployError('Website DNS deletion is not verified.')
-                self.state.complete(step, {'deleted': True})
-            pending_key = 'delete:' + saved['name']
+                if saved['kind'] == 'cloudflare-dns':
+                    self._cf(['delete', saved['provider_id'], '--force'])
+                else:
+                    kind = 'domains' if saved['kind'] == 'resend-domain' else 'api-keys'
+                    self._resend([kind, 'delete', saved['provider_id'], '--yes'])
+                if self._delete_current(saved):
+                    raise DeployError('Service deletion is not verified; retry deletion to reconcile.', code='provider_recovery_required')
             step = self.state.get_meta(pending_key)
             if step:
                 self.state.complete(step, {'deleted': True, 'recovered': not bool(current)})
-                self.state.set_meta(pending_key, None)
-            for old in self.state.db.execute("SELECT id,payload FROM steps WHERE step=? AND status='pending'", (saved['name'],)).fetchall():
-                payload = json.loads(old['payload'])
-                if payload.get('action') == 'delete' and payload.get('id', saved['provider_id']) == saved['provider_id']:
-                    self.state.complete(old['id'], {'deleted': True, 'recovered': True})
+            # Verified absence also resolves previous create/update uncertainty.
+            for old in self.state.db.execute("SELECT id FROM steps WHERE step=? AND status='pending'", (saved['name'],)).fetchall():
+                self.state.complete(old['id'], {'deleted': True, 'recovered': True})
+            self.state.set_meta(pending_key, None)
+            self.state.set_meta('pending:' + saved['name'], False)
             self.state.remove_resource(saved['name'])
-            actions.append({'name': attrs['name'], 'type': 'A', 'action': 'delete'})
-        return {'actions': actions, 'smtp': 'retained'}
+            actions.append({'resource': saved['name'], 'name': saved['attributes'].get('name', saved['name']),
+                            'type': saved['attributes'].get('type', saved['kind']), 'action': 'delete'})
+        return {'actions': actions, 'smtp': 'deleted'}
 
     def _cf(self, args):
         return _call('cf', ['dns', 'records', *args, '--zone', self.c['cloudflare-zone-id']])
@@ -372,7 +414,7 @@ class Services:
                 if not isinstance(key.get('token'), str) or not key['token']:
                     raise DeployError('SMTP key response is incomplete; explicit recovery is required.')
                 self.state.put_resource('smtp-key', 'resend-api-key', _identifier(key),
-                                        {'domain_id': domain['id'], 'token': key['token']})
+                                        {'domain_id': domain['id'], 'name': self.c['profile'] + '-smtp-send', 'token': key['token']})
                 self.state.complete(step, {'id': key['id']})
                 self.state.set_meta('pending:smtp-key', False)
             actions.append({'name': self.c['smtp-domain'], 'type': 'smtp', 'action': 'verified'})

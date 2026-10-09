@@ -109,9 +109,10 @@ interactive; commands you choose can print private information in your terminal.
 
 `compute-prevent-destroy: true` is the default. To delete, deliberately set it to
 false, review `delete --dry-run`, then run `delete`. Its dedicated DAG is:
-preflight → retire GitHub environments → fence CI and stop applications → remove
-website DNS → terminate compute and remove firewall → remove disposable GitHub
-keys. Preflight checks all recorded targets and host readiness before any external
+preflight → retire GitHub environments → fence CI and stop applications →
+`delete-services` (sending key, SMTP domain and all owned DNS) → terminate compute,
+delete owned boot volumes and firewall → remove generated SSH keys and known hosts.
+Preflight checks all recorded targets and host readiness before any external
 mutation; dry-run uses these same checks without provisioning drift checks.
 Read permission checks cannot guarantee a later write will be authorized.
 
@@ -119,23 +120,27 @@ Only recorded resources with matching ownership may be removed. Host retirement
 uses the same lock as deployment, fences queued CI commands and disables restart
 before gracefully stopping all manifest-owned applications, including apps removed
 from desired configuration. Unclean stops or ownership changes block deletion.
-Retirement is permanent on that host; a retained disk is recovery material, not
-an automatically restartable deployment. A stopped/terminating instance requires
-matching shutdown evidence; inspect failures and rerun `delete` to resume.
+A stopped/terminating instance requires matching shutdown evidence; inspect
+failures and rerun `delete` to resume.
 
-`compute-retain-boot-volume: true` is the default; retained disks remain recorded.
-Interrupted termination retains the policy recorded when it started. A disposable
-test may explicitly set false. Sending domains, SMTP credentials, email DNS,
-shared networking, operator/server SSH keys, local state and Vault data are
-retained. Disposable GitHub key files are removed only after infrastructure
-deletion succeeds. No backup is made automatically.
+Deletion destroys the attached boot volume and previously retained boot volumes
+whose deployment ownership can be verified. There is no boot-volume retention
+option; remove the retired `compute-retain-boot-volume` field and
+`COLORS_PAR_COMPUTE_RETAIN_BOOT_VOLUME` override from existing deployments.
+It also revokes the owned Resend sending key, deletes its sending domain,
+and deletes owned email and website DNS records by recorded provider identity.
+Generated operator, server and GitHub SSH keys and known hosts are removed only
+after remote cleanup succeeds. A failed remote deletion preserves recovery keys.
 
+Externally managed networking, management credentials, `.envrc.private`, Git
+configuration, local SQLite deletion receipts and Vault history remain. No backup
+is made automatically. Save any required recovery checkpoint before deletion.
 The result lists deleted and retained resources. Failures identify their stage
 and previously completed stages; completed provider deletions are reconciled on
 retry. GitHub jobs that already captured a retired environment may fail, but
 host retirement prevents them from restarting applications. After full deletion,
-`converge` can provision a new instance; retained disks are not automatically
-reattached or restored.
+`converge` generates new keys and provisions fresh infrastructure and application
+storage; it does not restore previous application data.
 
 ## Command output
 
@@ -386,7 +391,10 @@ from the operator environment. Older Git configurations may contain this retired
 creating a new recovery checkpoint.
 
 Run `vault-save` after successful mutations and after failures that changed local
-state. Until that succeeds, Vault contains an older checkpoint and may lack new
+state while a complete recovery set exists. Successful deletion removes generated
+keys, so a new complete checkpoint requires `init` to regenerate local authority
+or `converge` to recreate the deployment first. Preserve the local deletion receipt
+until then. Until that succeeds, Vault contains an older checkpoint and may lack new
 resource identities or operation outcomes. Preserve local state and reconcile
 cloud reality when recovering from an older snapshot. If saving fails, fix Vault
 access and retry `vault-save`; do not rerun deployment just to retry its backup.

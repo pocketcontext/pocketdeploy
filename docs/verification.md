@@ -354,3 +354,32 @@ Application diagnostics now expose fixed operation codes and guidance for image
 pull/inspection, ONCE deploy/update, stop/removal, verification and health errors,
 without raw subprocess output or credentials. All 280 tests and source/wheel
 builds passed. No SMTP test email or Vault backup was performed.
+
+## Full owned-resource deletion (2026-10-09)
+
+Changed deletion to remove the owned sending key/domain, all website/email DNS,
+active and historical boot volumes, and generated operator/server/GitHub keys.
+Removed the boot-retention configuration option. External networking, management
+credentials, Git configuration, SQLite receipts and Vault history remain.
+
+Live preflight verified the active and historical boot volumes through recorded
+IDs and exact OCI attachment history. Both inherited the instance's compute-role
+tags; the controller now recognizes this same-deployment inheritance and migrates
+verified disks to explicit boot-volume tags. Historical generated SSH files were
+explicitly registered from the preceding authorized initialization/convergence
+history; arbitrary imported keys are not implicitly adopted.
+
+The live delete removed the GitHub test environment, quiesced the website, revoked
+the Resend sending key, deleted its domain and all five DNS records, then
+terminated the VPS. OCI firewall disappearance lagged its delete response; the
+first run stopped with a resumable deletion_pending result after 142.006 seconds.
+Retry completed in 33.189 seconds, including both 50 GiB boot volumes and seven
+SSH key/trust files. Provider absence was verified before resource records were
+removed. Local verification found zero resources and zero SSH files, while
+configuration/private bindings/state remained. A repeat delete completed in
+5.611 seconds with no changes. The production once-v2 environment remained.
+
+Added bounded firewall disappearance polling to handle this OCI delay within one
+run. Synthetic regression coverage verifies delayed disappearance and preserves
+retry state on timeout. The full suite passes 310 tests; package builds and skill
+validation pass. No SMTP email or Vault backup was performed.

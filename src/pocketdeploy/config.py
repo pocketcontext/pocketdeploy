@@ -25,7 +25,7 @@ ROOT_KEYS = set(DEFAULTS) | {
     'oci-subnet-id', 'oci-availability-domain', 'oci-image-id', 'ssh-user',
     'ssh-private-key-file', 'ssh-public-key-file', 'ssh-known-hosts-file',
     'vault-id', 'vault-state-document-id', 'vault-command',
-    'compute-retain-boot-volume', 'once',
+    'once',
     'cloudflare-zone-id', 'smtp-domain', 'smtp-from', 'resend-region',
     'ssh-host-private-key-file', 'ssh-host-public-key-file',
 }
@@ -48,6 +48,8 @@ def load(path, *, env=None, resolve=True):
     environment = os.environ if env is None else env
     if 'vault-save-after-run' in raw or 'COLORS_PAR_VAULT_SAVE_AFTER_RUN' in environment:
         raise DeployError('vault-save-after-run / COLORS_PAR_VAULT_SAVE_AFTER_RUN is retired; remove it and use explicit pocketdeploy vault-save checkpoints.')
+    if 'compute-retain-boot-volume' in raw or 'COLORS_PAR_COMPUTE_RETAIN_BOOT_VOLUME' in environment:
+        raise DeployError('compute-retain-boot-volume is retired; delete removes all deployment-owned boot volumes. Remove the field and COLORS_PAR_COMPUTE_RETAIN_BOOT_VOLUME.')
     if set(raw) - ROOT_KEYS:
         raise DeployError('Unsupported configuration field; see the configuration reference.')
     overlaid = read_pars({**DEFAULTS, **raw}, os.environ if env is None else env)
@@ -77,9 +79,9 @@ def validate(c):
     for key in ['oci-config-file-profile', 'oci-compartment-id', 'oci-subnet-id', 'oci-availability-domain']:
         if not isinstance(c.get(key), str) or not c[key].strip() or '<' in c[key]:
             raise DeployError('OCI profile, compartment, subnet and availability domain are required.')
-    for key in ['compute-prevent-destroy', 'compute-require-existing-state', 'compute-retain-boot-volume']:
+    for key in ['compute-prevent-destroy', 'compute-require-existing-state']:
         if key in c and type(c[key]) is not bool:
-            raise DeployError('Protection, retention and backup flags must be booleans.')
+            raise DeployError('Protection and existing-state flags must be booleans.')
     for key in ['oci-ocpus', 'oci-memory-in-gbs', 'oci-boot-volume-size-in-gbs']:
         if type(c[key]) not in (int, float) or c[key] <= 0:
             raise DeployError('Compute sizes must be positive numbers.')

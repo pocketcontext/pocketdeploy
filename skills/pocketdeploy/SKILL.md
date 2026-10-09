@@ -92,10 +92,11 @@ per deployment; the local lock does not coordinate different machines.
 
 Deletion requires the intended deployment scope and deliberate removal of
 `compute-prevent-destroy` protection. Review `delete --dry-run`, then run `delete`
-within that authorization. Default boot-volume retention preserves recovery
-material; disabling retention destroys the owned boot disk. Externally managed
-networking and Vault data are not deleted. Owned website DNS and GitHub environments
-are deleted; SMTP domain, sending key and email DNS are retained.
+within that authorization. Deletion destroys every recorded deployment-owned
+boot volume, including previously retained disks after ownership verification.
+It removes owned website/email DNS, the Resend sending key and domain, GitHub
+environments and generated SSH keys. External networking, management credentials,
+Git configuration, private bindings, SQLite receipts and Vault history remain.
 
 ## Output and automation
 
@@ -153,7 +154,10 @@ never rotate keys.
 Vault encrypts remote copies, not local files. Only explicit `vault-save` uploads
 a checkpoint; provisioning, convergence, deletion and failed workflows never
 back up automatically. Remove the retired `vault-save-after-run` field, even if
-false. Save after mutations and failures that changed local state. Until saving
+false. Save after mutations and failures that changed local state while a complete
+recovery set exists. Successful deletion removes SSH keys: run `init` to generate
+new local authority or recreate with `converge` before saving a new complete
+checkpoint. Preserve the local deletion receipt until then. Until saving
 succeeds, Vault may lack new resource identities and operation outcomes. Preserve
 local state and reconcile cloud reality when recovering an older checkpoint.
 Retry a failed save after fixing Vault access; do not rerun infrastructure changes
@@ -199,15 +203,19 @@ message as part of ordinary convergence. No SMTP inbox is provisioned.
 ## Deployment retirement
 
 Review `./pocketdeploy delete --dry-run` before an authorized deletion. Set
-`compute-prevent-destroy: false` explicitly for deletion; preserve boot volume
-retention unless disk destruction is authorized. The deletion DAG preflights
-OCI, GitHub, DNS and host ownership/readiness before writes. It retires GitHub
-environments, fences queued CI, gracefully stops managed apps, removes website
-DNS, terminates compute and deletes its firewall, then removes disposable GitHub
-keys. SMTP/email DNS, shared networking, recovery keys/files and Vault history
-remain. Read-only preflight cannot prove all future writes will be authorized.
+`compute-prevent-destroy: false` explicitly. There is no boot-volume retention
+option. The deletion DAG preflights OCI, GitHub, DNS, SMTP and host ownership
+and readiness before writes. It retires GitHub environments, fences queued CI,
+and gracefully stops managed apps. The `delete-services` stage revokes the
+sending key, deletes its domain and removes all owned DNS records. Compute
+cleanup destroys the instance, owned boot volumes and firewall. Finally, local
+operator, server and GitHub keys and known hosts are removed. Any failed remote
+cleanup preserves recovery authority. Read-only preflight cannot prove all future
+writes will be authorized.
 
-Do not bypass unclean-stop or ownership failures. Inspect the failing stage and
-rerun `delete` to reconcile and resume. Retired hosts refuse convergence; retained
-disks are recovery material. No automatic backup or restoration is performed.
-Successful output lists removed and retained resources.
+External networking, management credentials, `.envrc.private`, Git configuration,
+SQLite deletion receipts and Vault history remain. Do not bypass unclean-stop or
+ownership failures. Inspect the failing stage and rerun `delete` to reconcile and
+resume. Recreation starts with fresh keys and application storage. No automatic
+backup or restoration is performed. Successful output lists removed and retained
+resources.

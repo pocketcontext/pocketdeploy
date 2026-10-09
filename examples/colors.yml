@@ -6,7 +6,6 @@ state-file: .colors.sqlite
 provider-compute: oci
 compute-prevent-destroy: true
 compute-require-existing-state: false
-compute-retain-boot-volume: true
 oci-config-file-profile: DEFAULT
 oci-auth: security_token
 oci-region: eu-frankfurt-1

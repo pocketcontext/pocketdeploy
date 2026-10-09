@@ -1,5 +1,7 @@
 """SSH transport with deployment-owned host trust and no payload in argv."""
 import json
+import hashlib
+import stat
 import os
 from pathlib import Path
 import shlex
@@ -46,12 +48,82 @@ class Host:
                         os.link(source, target)
                     except FileExistsError:
                         raise DeployError('SSH key destination appeared; existing files were preserved.') from None
+                    self._record_key(source, target)
         # Include a safe empty trust file in the pre-provision recovery set.
         self.known.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         if not self.known.exists():
             fd = os.open(self.known, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             os.close(fd)
+            self._record_key(self.known, self.known, mutable=True)
         return self.pub.read_text().strip()
+
+    def _record_key(self, source, target, mutable=False):
+        # Existing user-supplied files are never implicitly adopted.
+        if not hasattr(self.state, 'set_meta'):
+            return
+        records = self.state.get_meta('ssh-generated-files', {})
+        records[str(target.relative_to(self.root))] = {
+            'sha256': None if mutable else hashlib.sha256(source.read_bytes()).hexdigest(),
+            'mutable': mutable,
+        }
+        self.state.set_meta('ssh-generated-files', records)
+
+    def _cleanup_paths(self):
+        paths = [self.key, self.pub, self.hostkey, self.hostpub, self.known]
+        state_path = local_path(self.root, self.config.get('state-file', '.colors.sqlite'))
+        reserved = {state_path, Path(str(state_path) + '.lock'),
+                    *(Path(str(state_path) + suffix) for suffix in ('-journal', '-wal', '-shm')),
+                    local_path(self.root, self.config.get('_file', 'colors.yml')),
+                    local_path(self.root, '.envrc'), local_path(self.root, '.envrc.private')}
+        if getattr(self.state, 'path', None):
+            actual = Path(self.state.path)
+            reserved.update({actual, *(Path(str(actual) + suffix) for suffix in ('.lock', '-journal', '-wal', '-shm'))})
+        records = self.state.get_meta('ssh-generated-files', {})
+        # Include recorded paths no longer present in desired configuration.
+        for name in records:
+            path = local_path(self.root, name)
+            if path not in paths:
+                paths.append(path)
+        if len(set((self.key, self.pub, self.hostkey, self.hostpub, self.known))) != 5:
+            raise DeployError('SSH cleanup paths must be distinct.')
+        repositories = [app['github'] for app in self.config.get('once', {}).get('applications', []) if app.get('github')]
+        repositories += self.state.get_meta('github-delete-keys', [])
+        for row in self.state.db.execute("SELECT key,value FROM meta WHERE key LIKE 'github-key:%'"):
+            if json.loads(row['value']):
+                repositories.append(row['key'][len('github-key:'):])
+        for repo in repositories:
+            key = self.root / '.ssh' / ('github-' + hashlib.sha256(repo.lower().encode()).hexdigest()[:20])
+            reserved.update({key, Path(str(key) + '.pub')})
+        for path in paths:
+            local_path(self.root, path)  # Reject symlinks created since initialization.
+            if path in reserved:
+                raise DeployError('SSH cleanup path overlaps configuration, state or GitHub authority.')
+            if not path.exists():
+                continue
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
+                raise DeployError('SSH cleanup requires owned regular files without hardlinks.')
+            record = records.get(str(path.relative_to(self.root)))
+            if not record:
+                raise DeployError('SSH key ownership is unrecorded; verify provenance before deletion.')
+            if record.get('mutable'):
+                if path != self.known:
+                    raise DeployError('Only the recorded SSH known-hosts file may have mutable contents.')
+            elif record.get('sha256') != hashlib.sha256(path.read_bytes()).hexdigest():
+                raise DeployError('SSH key contents changed since generation; refusing deletion.')
+        return paths
+
+    def plan_key_cleanup(self):
+        files = [str(path.relative_to(self.root)) for path in self._cleanup_paths() if path.exists()]
+        return [{'resource': 'ssh-key-files', 'action': 'delete' if files else 'absent', 'files': files}]
+
+    def cleanup_keys(self):
+        paths = self._cleanup_paths()
+        existing = sum(path.exists() for path in paths)
+        for path in paths:
+            path.unlink(missing_ok=True)
+        self.state.set_meta('ssh-generated-files', {})
+        return {'deleted_key_files': existing}
 
     def cloud_init(self):
         return '#cloud-config\n' + json.dumps({'ssh_deletekeys': True, 'ssh_keys': {

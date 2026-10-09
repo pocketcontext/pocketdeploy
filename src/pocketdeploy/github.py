@@ -201,6 +201,12 @@ class GitHub:
                 repo, environment, existing, _ = self._delete_target(record)
                 actions.append({'resource': record['name'], 'repository': repo, 'environment': environment,
                                 'action': 'delete' if existing else 'absent'})
+        for repo in self._cleanup_repositories():
+            if (self.state.get_meta('github-pending:' + repo, False)
+                    and not self.state.get_resource('github:' + repo)):
+                environments = self._pages(f'repos/{repo}/environments', 'environments')
+                if any(e['name'].lower() == self.environment.lower() for e in environments):
+                    raise DeployError('GitHub setup intent remains without verified environment deletion.')
         if any(path.exists() for path in paths):
             actions.append({'resource': 'github-deployment-keys', 'action': 'delete'})
         return actions
@@ -239,8 +245,17 @@ class GitHub:
                 payload = json.loads(old['payload'])
                 if payload.get('repository') == repo and payload.get('environment') == environment and payload.get('id', record['provider_id']) == record['provider_id']:
                     self.state.complete(old['id'], {'deleted': True, 'recovered': True})
+            self.state.set_meta('github-pending:' + repo, False)
             self.state.remove_resource(record['name'])
             removed.append({'repository': repo, 'environment': environment})
+        # Older interrupted/completed deletions could remove the resource row
+        # but retain setup intent. Clear it only after another absence check.
+        for repo in self._cleanup_repositories():
+            if self.state.get_meta('github-pending:' + repo, False):
+                environments = self._pages(f'repos/{repo}/environments', 'environments')
+                if any(e['name'].lower() == self.environment.lower() for e in environments):
+                    raise DeployError('GitHub setup intent remains without verified environment deletion.')
+                self.state.set_meta('github-pending:' + repo, False)
         return {'deleted_environments': removed}
 
     def converge(self, connection, operation_id, rotate_keys=False):

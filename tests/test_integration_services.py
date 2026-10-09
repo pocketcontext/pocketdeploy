@@ -127,9 +127,19 @@ def test_delete_retires_recorded_github_even_after_app_removed(tmp_path, monkeyp
     with State(tmp_path / '.colors.sqlite', 'demo', scope) as state:
         state.put_resource('github:example/site', 'github-environment', '42', {'repository': 'example/site', 'environment': 'demo'})
     events = []
-    github = SimpleNamespace(plan_delete=lambda: [], delete=lambda operation: events.append('github-delete'), cleanup_keys=lambda: {})
-    cloud = SimpleNamespace(plan_delete=lambda: [], delete=lambda operation: events.append('compute-delete'))
-    with patch.object(cli, 'OCI', return_value=cloud), patch('pocketdeploy.deletion.GitHub', return_value=github):
+    def github_factory(config, state, root, host):
+        def delete(operation):
+            events.append('github-delete')
+            state.remove_resource('github:example/site')
+            return {'deleted_environments': [{'repository': 'example/site', 'environment': 'demo'}]}
+        return SimpleNamespace(plan_delete=lambda: [], delete=delete, cleanup_keys=lambda: {})
+    def cloud_factory(config, state):
+        def delete(operation):
+            events.append('compute-delete')
+            state.remove_resource('compute')
+            return {'deleted': True}
+        return SimpleNamespace(plan_delete=lambda: [], delete=delete)
+    with patch.object(cli, 'OCI', side_effect=cloud_factory), patch('pocketdeploy.deletion.GitHub', side_effect=github_factory):
         cli.execute(cli.parser().parse_args(['delete']))
     assert events == ['github-delete', 'compute-delete']
 

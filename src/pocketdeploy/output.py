@@ -86,7 +86,7 @@ def text_result(command, result):
         lines = [f'Deletion completed{suffix}.']
         lines.extend('  deleted: ' + name for name in result.get('deleted_resources', []))
         lines.extend('  retained: ' + item['resource'] for item in result.get('retained_resources', []))
-        lines.append('Shared networking, local recovery files and Vault history retained.')
+        lines.append('Shared networking, configuration, private bindings, SQLite receipt and Vault history retained.')
         return lines
     if command == 'adopt':
         return [f"Adopted instance {result['instance_id']}.", f"SSH: {result.get('user', 'ubuntu')}@{result['ip']}"]

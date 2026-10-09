@@ -125,6 +125,7 @@ class OCI:
                              ('compute', 'instance', 'list-vnics'),
                              ('compute', 'boot-volume-attachment', 'list'),
                              ('compute', 'image', 'list'),
+                             ('bv', 'boot-volume', 'list'),
                              ('network', 'nsg', 'list'),
                              ('network', 'nsg', 'rules', 'list'))
             return [] if any(tuple(args[:len(prefix)]) == prefix for prefix in list_commands) else None
@@ -314,6 +315,17 @@ class OCI:
         previous = self.state.get_resource('boot-volume')
         if previous and previous['provider_id'] != volume['id']:
             self._retain_boot_volume()
+        if not self._owned(instance, 'compute'):
+            raise DeployError('Boot volume tagging requires owned compute.')
+        tags = volume.get('freeform-tags') or {}
+        if not self._owned(volume, 'compute') and any(k in tags and tags[k] != v for k, v in self._tags('boot-volume').items()):
+            raise DeployError('Boot volume ownership tags conflict.')
+        if not self._owned(volume, 'boot-volume'):
+            self._call('bv', 'boot-volume', 'update', '--boot-volume-id', volume['id'],
+                       '--force', body={'freeformTags': {**tags, **self._tags('boot-volume')}})
+            volume = self._read_boot_volume(instance)
+            if not self._owned(volume, 'boot-volume'):
+                raise DeployError('Boot volume ownership tagging was not verified.')
         self.state.put_resource('boot-volume', 'oci-boot-volume', volume['id'],
             {'instance_id': instance['id'], 'size_gib': volume.get('size-in-gbs'),
              'vpus_per_gb': volume.get('vpus-per-gb')}, owned=True)
@@ -390,22 +402,56 @@ class OCI:
             raise DeployError('OCI instance subnet differs from desired configuration.')
         return {'instance_id': item['id'], 'ip': primary['public-ip'], 'user': self.config.get('ssh-user', 'ubuntu')}
 
-    def _delete_boot_volume(self, instance, retain):
+    def _delete_boot_volume(self, instance):
         volume = self._read_boot_volume(instance)
         recorded = self.state.get_resource('boot-volume')
-        if recorded:
-            if (not recorded['owned'] or recorded['provider_id'] != volume['id']
-                    or recorded['attributes'].get('instance_id') != instance['id']):
-                raise DeployError('Attached boot volume differs from recorded deletion ownership.')
-        elif not retain:
-            raise DeployError('Deleting a boot volume requires recorded ownership; retain the unrecorded volume or reconcile explicitly.')
+        if not recorded:
+            raise DeployError('Deleting a boot volume requires recorded ownership.')
+        if (not recorded['owned'] or recorded['provider_id'] != volume['id']
+                or recorded['attributes'].get('instance_id') != instance['id']):
+            raise DeployError('Attached boot volume differs from recorded deletion ownership.')
         return volume
+
+    def _volumes_for_delete(self):
+        records = [r for r in self.state.resources() if r['name'] == 'boot-volume'
+                   or r['name'].startswith('retained-boot-volume:')]
+        if not records:
+            return []
+        volumes = self._list('bv', 'boot-volume', 'list', '--compartment-id',
+                            self.config['oci-compartment-id'], '--availability-domain',
+                            self.config['oci-availability-domain'], '--all')
+        attachments = self._list('compute', 'boot-volume-attachment', 'list',
+                                '--compartment-id', self.config['oci-compartment-id'],
+                                '--availability-domain', self.config['oci-availability-domain'], '--all')
+        result = []
+        for record in records:
+            if not record['owned'] or record['kind'] != 'oci-boot-volume':
+                raise DeployError('Boot volume deletion requires recorded ownership.')
+            volume = next((v for v in volumes if v.get('id') == record['provider_id']
+                           and v.get('lifecycle-state') != 'TERMINATED'), None)
+            pending = self.state.get_meta('oci-delete-volume:' + record['provider_id'])
+            if pending and pending.get('id') != record['provider_id']:
+                raise DeployError('Pending boot volume deletion identity differs.')
+            if volume:
+                tags = volume.get('freeform-tags') or {}
+                # OCI image launches inherit the instance's freeform compute tags.
+                # Treat these as migratable only with the recorded attachment proof below.
+                if not self._owned(volume, 'compute') and any(k in tags and tags[k] != v for k, v in self._tags('boot-volume').items()):
+                    raise DeployError('Boot volume ownership tags conflict.')
+                related = [a for a in attachments if a.get('boot-volume-id') == volume['id']]
+                origin = record['attributes'].get('instance_id')
+                if any(a.get('lifecycle-state') != 'DETACHED' and a.get('instance-id') != origin for a in related):
+                    raise DeployError('Boot volume is attached to another instance.')
+                if not self._owned(volume, 'boot-volume'):
+                    if not origin or not any(a.get('instance-id') == origin for a in related):
+                        raise DeployError('Legacy boot volume ownership needs attachment evidence; reconcile explicitly.')
+            result.append((record, volume))
+        return result
 
     def plan_delete(self):
         """Observe only deletion identities; desired provisioning drift is irrelevant."""
         self._check_token()
         actions = []
-        observed_volume = None
         for role in ('compute', 'firewall'):
             pending = self.state.get_meta('oci-delete-' + role)
             recorded = self.state.get_resource(role)
@@ -415,20 +461,13 @@ class OCI:
             if pending and recorded and pending.get('id') != recorded['provider_id']:
                 raise DeployError('Pending OCI deletion identity does not match recorded ownership.')
             if role == 'compute' and item and item.get('lifecycle-state') != 'TERMINATING':
-                retain = (pending or {}).get('retain_boot', self.config.get('compute-retain-boot-volume', True))
-                observed_volume = self._delete_boot_volume(item, retain)
+                self._delete_boot_volume(item)
             actions.append({'resource': role, 'action': 'delete' if item else 'absent',
                             'id': item['id'] if item else (recorded['provider_id'] if recorded else None),
                             'state': item.get('lifecycle-state') if item else None})
-        pending = self.state.get_meta('oci-delete-compute') or {}
-        volume = self.state.get_resource('boot-volume')
-        if volume or observed_volume:
-            retain = pending.get('retain_boot', self.config.get('compute-retain-boot-volume', True))
-            actions.append({'resource': 'boot-volume', 'action': 'retain' if retain else 'delete',
-                            'id': volume['provider_id'] if volume else observed_volume['id']})
-        for record in self.state.resources():
-            if record['name'].startswith('retained-boot-volume:'):
-                actions.append({'resource': record['name'], 'action': 'retain', 'id': record['provider_id']})
+        for record, volume in self._volumes_for_delete():
+            actions.append({'resource': record['name'], 'action': 'delete' if volume else 'absent',
+                            'id': record['provider_id']})
         actions.append({'resource': 'shared-network', 'action': 'retain'})
         return actions
 
@@ -436,16 +475,19 @@ class OCI:
         if self.config.get('compute-prevent-destroy', True):
             raise DeployError('Deployment destruction is protected.')
         self.plan_delete()
+        # Migrate proven legacy ownership before attachment history can disappear.
+        for record, volume in self._volumes_for_delete():
+            if volume and not self._owned(volume, 'boot-volume'):
+                self._call('bv', 'boot-volume', 'update', '--boot-volume-id', record['provider_id'],
+                           '--force', body={'freeformTags': {**(volume.get('freeform-tags') or {}), **self._tags('boot-volume')}})
+                verified = self._call('bv', 'boot-volume', 'get', '--boot-volume-id', record['provider_id'])
+                if not isinstance(verified, dict) or verified.get('id') != record['provider_id'] or not self._owned(verified, 'boot-volume'):
+                    raise DeployError('Boot volume ownership tagging was not verified.')
         for role in ('compute', 'firewall'):
             pending = self.state.get_meta('oci-delete-' + role)
             item = self._find(role, allow_missing=bool(pending))
             if not item:
                 if pending:
-                    if role == 'compute':
-                        if pending.get('retain_boot', True):
-                            self._retain_boot_volume()
-                        else:
-                            self.state.remove_resource('boot-volume')
                     self.state.remove_resource(role)
                     self.state.complete(pending['step'], {'deleted': True, 'recovered': True})
                     self.state.set_meta('oci-delete-' + role, None)
@@ -454,28 +496,45 @@ class OCI:
             if not recorded or not recorded.get('owned') or recorded['provider_id'] != item['id']:
                 raise DeployError('Deletion requires recorded ownership and matching cloud tags.')
             step = pending['step'] if pending else self.state.intent(operation_id, 'delete-' + role, {'id': item['id']})
-            retain_boot = pending.get('retain_boot', True) if pending else self.config.get('compute-retain-boot-volume', True)
-            self.state.set_meta('oci-delete-' + role, {'step': step, 'id': item['id'], 'retain_boot': retain_boot})
+            self.state.set_meta('oci-delete-' + role, {'step': step, 'id': item['id']})
             if role == 'compute':
                 if item.get('lifecycle-state') != 'TERMINATING':
-                    volume = self._delete_boot_volume(item, retain_boot)
-                    if not self.state.get_resource('boot-volume'):
-                        self.state.put_resource('boot-volume', 'oci-boot-volume', volume['id'],
-                            {'instance_id': item['id'], 'size_gib': volume.get('size-in-gbs'),
-                             'vpus_per_gb': volume.get('vpus-per-gb')}, owned=True)
-                self._call('compute', 'instance', 'terminate', '--instance-id', item['id'], '--force', '--preserve-boot-volume', str(retain_boot).lower(), '--wait-for-state', 'SUCCEEDED', timeout=1500)
+                    self._delete_boot_volume(item)
+                # Delete disks explicitly after termination; keep their identities on failure.
+                self._call('compute', 'instance', 'terminate', '--instance-id', item['id'], '--force', '--preserve-boot-volume', 'true', '--wait-for-state', 'SUCCEEDED', timeout=1500)
             else:
                 self._call('network', 'nsg', 'delete', '--nsg-id', item['id'], '--force')
-            if self._find(role, allow_missing=True) is not None:
-                raise DeployError('OCI deletion is not complete; retry delete to reconcile.', code='deletion_pending')
-            if role == 'compute':
-                if retain_boot:
-                    self._retain_boot_volume()
-                else:
-                    self.state.remove_resource('boot-volume')
+            # NSG deletion is eventually visible in list responses. Bound polling
+            # without dropping the durable intent if the provider remains stale.
+            attempts = 16 if role == 'firewall' else 1
+            for attempt in range(attempts):
+                if self._find(role, allow_missing=True) is None:
+                    break
+                if attempt + 1 == attempts:
+                    raise DeployError('OCI deletion is not complete; retry delete to reconcile.', code='deletion_pending')
+                time.sleep(2)
             self.state.remove_resource(role)
             self.state.complete(step, {'deleted': True})
             self.state.set_meta('oci-delete-' + role, None)
+        for record, volume in self._volumes_for_delete():
+            key = 'oci-delete-volume:' + record['provider_id']
+            pending = self.state.get_meta(key)
+            step = pending['step'] if pending else self.state.intent(operation_id, 'delete-boot-volume', {'id': record['provider_id']})
+            self.state.set_meta(key, {'step': step, 'id': record['provider_id']})
+            if volume:
+                attachments = self._list('compute', 'boot-volume-attachment', 'list',
+                                        '--compartment-id', self.config['oci-compartment-id'],
+                                        '--availability-domain', self.config['oci-availability-domain'], '--all')
+                if any(a.get('boot-volume-id') == record['provider_id'] and a.get('lifecycle-state') != 'DETACHED' for a in attachments):
+                    raise DeployError('Boot volume is still attached; retry after termination completes.', code='deletion_pending')
+                self._call('bv', 'boot-volume', 'delete', '--boot-volume-id', record['provider_id'],
+                           '--force', '--wait-for-state', 'TERMINATED', timeout=1500)
+                current = self._volumes_for_delete()
+                if any(r['provider_id'] == record['provider_id'] and v for r, v in current):
+                    raise DeployError('Boot volume deletion is not complete; retry delete.', code='deletion_pending')
+            self.state.remove_resource(record['name'])
+            self.state.complete(step, {'deleted': True})
+            self.state.set_meta(key, None)
         return {'deleted': True}
 
     def adopt(self, instance_id, operation_id):

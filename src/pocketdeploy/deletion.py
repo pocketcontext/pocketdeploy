@@ -21,9 +21,14 @@ class Deletion:
     def plan(self):
         # Cloud authentication/ownership is checked before any external writes,
         # including DNS and GitHub retirement. No provisioning planner is used.
+        supported = {'oci-compute', 'oci-firewall', 'oci-boot-volume', 'cloudflare-dns',
+                     'resend-domain', 'resend-api-key', 'github-environment'}
+        if any(r['owned'] and r['kind'] not in supported for r in self.state.resources()):
+            raise DeployError('Deployment contains an unsupported owned resource; reconcile it before deletion.')
         cloud_actions = self.cloud.plan_delete()
         github_actions = self.github.plan_delete()
         service_actions = self.services.plan_delete()
+        host_key_actions = self.host.plan_key_cleanup()
         compute = next((a for a in cloud_actions if a.get('resource') == 'compute'), None)
         host_actions = []
         self.connection = None
@@ -45,12 +50,11 @@ class Deletion:
         key_actions = [a for a in github_actions if a['resource'] == 'github-deployment-keys']
         actions = [*[a for a in github_actions if a['resource'] != 'github-deployment-keys'],
                    *[{'resource': a['host'], **a} for a in host_actions],
-                   *service_actions, *cloud_actions, *key_actions]
+                   *service_actions, *cloud_actions, *key_actions, *host_key_actions]
         self.prepared = {'profile': self.config['profile'], 'dry_run': True,
                          'protected': self.config.get('compute-prevent-destroy', True),
-                         'retain_boot_volume': (self.state.get_meta('oci-delete-compute') or {}).get('retain_boot', self.config.get('compute-retain-boot-volume', True)),
                          'actions': actions,
-                         'retained_local': ['configuration', 'private-bindings', 'sqlite-state', 'operator-and-host-ssh-keys'],
+                         'retained_local': ['configuration', 'private-bindings', 'sqlite-state'],
                          'vault': 'unchanged'}
         return self.prepared
 
@@ -74,19 +78,29 @@ class Deletion:
             else:
                 results['applications'] = {'applications': [], 'skipped': 'already-absent-or-verified-stopped'}
 
-        def dns():
+        def services():
             results['services'] = self.services.delete(operation)
 
         def infrastructure():
             results['infrastructure'] = self.cloud.delete(operation)
 
         def cleanup():
-            results['local_keys'] = self.github.cleanup_keys()
+            if any(resource['owned'] for resource in self.state.resources()):
+                raise DeployError('Owned remote resources remain; SSH recovery keys were preserved.')
+            # Validate both groups before unlinking either one.
+            self.github.plan_delete()
+            self.host.plan_key_cleanup()
+            github_keys = self.github.cleanup_keys()
+            host_keys = self.host.cleanup_keys()
+            results['local_keys'] = {
+                'deleted_key_files': github_keys.get('deleted_key_files', 0) + host_keys.get('deleted_key_files', 0),
+                'github': github_keys, 'ssh': host_keys,
+            }
 
         steps = {'delete-preflight': [preflight, 'delete-github'],
                  'delete-github': [github, 'delete-applications'],
-                 'delete-applications': [quiesce, 'delete-dns'],
-                 'delete-dns': [dns, 'delete-infrastructure'],
+                 'delete-applications': [quiesce, 'delete-services'],
+                 'delete-services': [services, 'delete-infrastructure'],
                  'delete-infrastructure': [infrastructure, 'delete-local-keys'],
                  'delete-local-keys': [cleanup]}
 

@@ -8,7 +8,9 @@ from pocketdeploy.state import State
 
 
 @pytest.fixture
-def service(tmp_path):
+def service(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "synthetic")
+    monkeypatch.setenv("RESEND_API_KEY", "synthetic")
     state = State(tmp_path / 'state', 'test', {}, create=True)
     config = {'profile': 'test', 'cloudflare-zone-id': 'zone', 'smtp-domain': 'notifications.example.com',
               'smtp-from': 'mail@notifications.example.com', 'once': {'applications': []}}
@@ -103,12 +105,36 @@ def test_smtp_key_scope_reuse_and_private_output(service, monkeypatch):
     assert service.smtp_settings()['password'] == 'SYNTHETIC_SECRET'
 
 
-def test_delete_retains_smtp(service, monkeypatch):
-    service.state.put_resource('smtp-domain', 'resend-domain', 'd', {'name': 'domain'})
-    service.state.put_resource('dns:TXT:domain', 'cloudflare-dns', 'txt', {'type': 'TXT'})
-    monkeypatch.setattr(service, '_cf', lambda a: pytest.fail('must retain email DNS'))
-    assert service.delete('op')['smtp'] == 'retained'
-    assert len(service.state.resources()) == 2
+def test_delete_all_services_and_retry(service, monkeypatch):
+    domain = {'id': 'd', 'name': service.c['smtp-domain']}
+    key = {'id': 'k', 'name': 'test-smtp-send'}
+    service.state.put_resource('smtp-domain', 'resend-domain', 'd', {'name': domain['name']})
+    service.state.put_resource('smtp-key', 'resend-api-key', 'k', {'domain_id': 'd', 'token': 'SECRET'})
+    service.state.put_resource('dns:TXT:domain', 'cloudflare-dns', 'txt', {'type': 'TXT', 'name': domain['name'], 'zone': 'zone'})
+    inventories = {'domains': [domain], 'api-keys': [key]}
+    records = [{'id': 'txt', 'type': 'TXT', 'name': domain['name'], 'comment': service.marker}]
+    mutations = []
+    def resend(args):
+        if args[1] == 'list':
+            return {'data': inventories[args[0]]}
+        mutations.append(args[0])
+        inventories[args[0]].clear()
+        return {}
+    monkeypatch.setattr(service, '_resend', resend)
+    monkeypatch.setattr(service, '_records', lambda name: records)
+    monkeypatch.setattr(service, '_cf', lambda args: (mutations.append('dns'), records.clear()))
+    op = service.state.begin_operation('delete', 'hash')
+    service.state.set_meta('pending:smtp-domain', True)
+    service.state.intent(op, 'smtp-domain', {'action': 'create'})
+    assert len(service.plan_delete()) == 3
+    assert mutations == []
+    result = service.delete(op)
+    assert mutations == ['api-keys', 'domains', 'dns']
+    assert 'SECRET' not in json.dumps(result)
+    assert service.state.resources() == []
+    assert not service.state.get_meta('pending:smtp-domain')
+    assert service.state.safe_status()['pending_steps'] == 0
+    assert service.delete(op)['actions'] == []
 
 
 def test_preflight_missing_credentials_before_cloud(service, monkeypatch):
@@ -324,3 +350,45 @@ def test_delete_validates_all_dns_before_first_mutation(service, monkeypatch):
     monkeypatch.setattr(service, '_cf', lambda a: pytest.fail('must preflight all records'))
     with pytest.raises(DeployError, match='ownership changed'):
         service.delete('unused')
+
+
+def test_delete_smtp_checks_key_before_any_mutation(service, monkeypatch):
+    service.state.put_resource('smtp-domain', 'resend-domain', 'd', {'name': service.c['smtp-domain']})
+    service.state.put_resource('smtp-key', 'resend-api-key', 'k', {'domain_id': 'd'})
+    monkeypatch.setattr(service, '_resend', lambda args: {'data': [{'id': 'k', 'name': 'foreign'}]} if args[:2] == ['api-keys', 'list'] else pytest.fail('unexpected call'))
+    with pytest.raises(DeployError, match='ownership changed'):
+        service.delete('unused')
+
+
+def test_delete_resend_lost_response_recovers_absence(service, monkeypatch):
+    service.state.put_resource('smtp-domain', 'resend-domain', 'd', {'name': service.c['smtp-domain']})
+    rows = [{'id': 'd', 'name': service.c['smtp-domain']}]
+    def resend(args):
+        if args[1] == 'list':
+            return {'data': rows}
+        rows.clear()
+        raise DeployError('lost')
+    monkeypatch.setattr(service, '_resend', resend)
+    op = service.state.begin_operation('delete', 'hash')
+    with pytest.raises(DeployError, match='lost'):
+        service.delete(op)
+    assert service.state.get_resource('smtp-domain')
+    service.delete(op)
+    assert not service.state.resources()
+    assert service.state.safe_status()['pending_steps'] == 0
+
+
+def test_delete_unknown_smtp_creation_blocks(service):
+    service.state.set_meta('pending:smtp-key', True)
+    with pytest.raises(DeployError, match='ownership reconciliation'):
+        service.plan_delete()
+
+
+def test_delete_unknown_dns_creation_blocks_before_mutations(service, monkeypatch):
+    service.state.set_meta('pending:dns:TXT:send.notifications.example.com', True)
+    monkeypatch.setattr(service, '_cf', lambda args: pytest.fail('unreconciled DNS mutation'))
+    with pytest.raises(DeployError, match='Unrecorded DNS creation') as error:
+        service.delete('unused')
+    assert error.value.code == 'provider_recovery_required'
+    service.state.set_meta('pending:dns:TXT:send.notifications.example.com', False)
+    assert service.plan_delete() == []

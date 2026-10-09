@@ -200,7 +200,7 @@ def test_create_then_converge_has_no_cloud_mutations(adapter, monkeypatch):
         if command == ('compute', 'boot-volume-attachment', 'list'):
             return [{'boot-volume-id': 'boot-id', 'lifecycle-state': 'ATTACHED'}]
         if command == ('bv', 'boot-volume', 'get'):
-            return {'id': 'boot-id', 'size-in-gbs': 50, 'vpus-per-gb': 10}
+            return {'id': 'boot-id', 'size-in-gbs': 50, 'vpus-per-gb': 10, 'freeform-tags': adapter._tags('boot-volume')}
         if command == ('compute', 'instance', 'list-vnics'):
             return [{'is-primary': True, 'public-ip': '192.0.2.2', 'subnet-id': 'subnet', 'nsg-ids': ['firewall-id']}]
         pytest.fail('Unexpected OCI command')
@@ -219,6 +219,7 @@ def test_oci_cli_successful_empty_list_output(adapter, monkeypatch):
     monkeypatch.setattr('pocketdeploy.oci.run', lambda *a, **kw: '')
     assert adapter._list('network', 'nsg', 'rules', 'list', '--nsg-id', 'synthetic', '--all') == []
     assert adapter._list('compute', 'instance', 'list', '--all') == []
+    assert adapter._list('bv', 'boot-volume', 'list', '--all') == []
     assert adapter._call('network', 'nsg', 'delete', '--nsg-id', 'synthetic') is None
 
 
@@ -228,40 +229,9 @@ def test_json_null_list_still_rejected(adapter, monkeypatch):
         adapter._list('network', 'nsg', 'rules', 'list', '--all')
 
 
-def test_retained_boot_volume_survives_delete_and_recreate(adapter, monkeypatch):
-    adapter.config['compute-prevent-destroy'] = False
-    adapter.config['compute-retain-boot-volume'] = True
-    adapter._remember('compute', resource(adapter))
-    cloud = {'instances': [resource(adapter)], 'volume': {'id': 'original-boot', 'size-in-gbs': 50, 'vpus-per-gb': 10}}
-    def call(*args, **kwargs):
-        if args[:3] == ('compute', 'instance', 'list'):
-            return cloud['instances']
-        if args[:3] == ('network', 'nsg', 'list'):
-            return []
-        if args[:3] == ('compute', 'instance', 'terminate'):
-            assert args[args.index('--preserve-boot-volume') + 1] == 'true'
-            cloud['instances'] = []
-            return None
-        pytest.fail('Unexpected OCI command')
-    monkeypatch.setattr(adapter, '_call', call)
-    monkeypatch.setattr(adapter, '_read_boot_volume', lambda item: cloud['volume'])
-    operation = adapter.state.begin_operation('delete', 'hash')
-    adapter.delete(operation)
-    retained = adapter.state.get_resource('retained-boot-volume:original-boot')
-    assert retained['attributes']['lifecycle'] == 'retained-for-recovery'
-    assert adapter.state.get_resource('boot-volume') is None
-    # Simulate the next create binding a new instance and its new boot volume.
-    cloud['instances'] = [resource(adapter, id='new-instance')]
-    cloud['volume'] = {'id': 'new-boot', 'size-in-gbs': 50, 'vpus-per-gb': 10}
-    adapter._remember('compute', cloud['instances'][0])
-    adapter._boot_volume(cloud['instances'][0])
-    assert adapter.state.get_resource('boot-volume')['provider_id'] == 'new-boot'
-    assert adapter.state.get_resource('retained-boot-volume:original-boot')['provider_id'] == 'original-boot'
-
-
 def test_legacy_retained_binding_archived_before_replacement(adapter, monkeypatch):
     adapter.state.put_resource('boot-volume', 'oci-boot-volume', 'old-boot', {'instance_id': 'old-instance'})
-    monkeypatch.setattr(adapter, '_read_boot_volume', lambda item: {'id': 'new-boot', 'size-in-gbs': 50, 'vpus-per-gb': 10})
+    monkeypatch.setattr(adapter, '_read_boot_volume', lambda item: {'id': 'new-boot', 'size-in-gbs': 50, 'vpus-per-gb': 10, 'freeform-tags': adapter._tags('boot-volume')})
     adapter._boot_volume(resource(adapter))
     assert adapter.state.get_resource('retained-boot-volume:old-boot')['attributes']['lifecycle'] == 'retained-for-recovery'
     assert adapter.state.get_resource('boot-volume')['provider_id'] == 'new-boot'
@@ -277,10 +247,12 @@ def test_interrupted_retaining_delete_archives_disk(adapter, monkeypatch):
     monkeypatch.setattr(adapter, '_call', lambda *a, **kw: [])
     adapter.delete(operation)
     assert adapter.state.get_resource('boot-volume') is None
-    assert adapter.state.get_resource('retained-boot-volume:retained-boot')['provider_id'] == 'retained-boot'
+    assert adapter.state.get_resource('retained-boot-volume:retained-boot') is None
 
 
 def test_delete_plan_ignores_provisioning_drift(adapter, monkeypatch):
+    adapter.state.put_resource('boot-volume', 'oci-boot-volume', 'boot', {'instance_id': 'compute-id'})
+    monkeypatch.setattr(adapter, '_volumes_for_delete', lambda: [])
     monkeypatch.setattr(adapter, '_read_boot_volume', lambda item: {'id': 'boot'})
     adapter._remember('compute', resource(adapter))
     monkeypatch.setattr(adapter, '_find', lambda role, **kw: resource(adapter) if role == 'compute' else None)
@@ -304,6 +276,7 @@ def test_delete_validates_firewall_before_terminating(adapter, monkeypatch):
 
 
 def test_delete_keeps_state_until_cloud_absence_verified(adapter, monkeypatch):
+    monkeypatch.setattr('pocketdeploy.oci.time.sleep', lambda seconds: None)
     adapter.config['compute-prevent-destroy'] = False
     adapter._remember('firewall', resource(adapter, 'firewall'))
     monkeypatch.setattr(adapter, '_find', lambda role, **kw: resource(adapter, role) if role == 'firewall' else None)
@@ -315,7 +288,8 @@ def test_delete_keeps_state_until_cloud_absence_verified(adapter, monkeypatch):
     assert adapter.state.get_meta('oci-delete-firewall')
 
 
-def test_delete_plan_uses_interrupted_retention_policy(adapter, monkeypatch):
+def test_delete_plan_retires_previously_retained_disk(adapter, monkeypatch):
+    monkeypatch.setattr(adapter, '_volumes_for_delete', lambda: [(adapter.state.get_resource('boot-volume'), {'id': 'boot'})])
     adapter.config['compute-retain-boot-volume'] = False
     adapter._remember('compute', resource(adapter))
     adapter.state.put_resource('boot-volume', 'oci-boot-volume', 'boot', {})
@@ -323,7 +297,7 @@ def test_delete_plan_uses_interrupted_retention_policy(adapter, monkeypatch):
     step = adapter.state.intent(op, 'delete-compute', {'id': 'compute-id'})
     adapter.state.set_meta('oci-delete-compute', {'id': 'compute-id', 'step': step, 'retain_boot': True})
     monkeypatch.setattr(adapter, '_find', lambda role, **kw: None)
-    assert next(a for a in adapter.plan_delete() if a['resource'] == 'boot-volume')['action'] == 'retain'
+    assert next(a for a in adapter.plan_delete() if a['resource'] == 'boot-volume')['action'] == 'delete'
 
 
 @pytest.mark.parametrize('recorded_id,instance_id,owned', [('other', 'compute-id', True), ('boot', 'other', True), ('boot', 'compute-id', False)])
@@ -364,6 +338,7 @@ def test_delete_cannot_destroy_unrecorded_boot_volume(adapter, monkeypatch):
 
 
 def test_delete_rechecks_boot_identity_immediately_before_termination(adapter, monkeypatch):
+    monkeypatch.setattr(adapter, '_volumes_for_delete', lambda: [])
     adapter.config['compute-prevent-destroy'] = False
     adapter._remember('compute', resource(adapter))
     adapter.state.put_resource('boot-volume', 'oci-boot-volume', 'boot', {'instance_id': 'compute-id'})
@@ -375,3 +350,165 @@ def test_delete_rechecks_boot_identity_immediately_before_termination(adapter, m
     with pytest.raises(DeployError, match='boot volume differs'):
         adapter.delete(op)
     assert adapter.state.get_resource('boot-volume')['provider_id'] == 'boot'
+
+
+def volume_cloud(adapter, monkeypatch, *, legacy=False, foreign=False):
+    adapter.config['compute-prevent-destroy'] = False
+    adapter._remember('compute', resource(adapter))
+    volumes = {name: {'id': name, 'lifecycle-state': 'AVAILABLE',
+                     'freeform-tags': {} if legacy else adapter._tags('boot-volume')}
+               for name in ('current', 'historical')}
+    for name, instance in [('current', 'compute-id'), ('historical', 'old-instance')]:
+        adapter.state.put_resource('boot-volume' if name == 'current' else 'retained-boot-volume:' + name,
+                                   'oci-boot-volume', name, {'instance_id': instance})
+    cloud = {'instance': resource(adapter), 'volumes': volumes, 'calls': []}
+    def call(*args, body=None, **kw):
+        command = args[:3]
+        cloud['calls'].append(command)
+        if command == ('compute', 'instance', 'list'):
+            return [cloud['instance']] if cloud['instance'] else []
+        if command == ('network', 'nsg', 'list'):
+            return []
+        if command == ('bv', 'boot-volume', 'list'):
+            return list(volumes.values())
+        if command == ('compute', 'boot-volume-attachment', 'list'):
+            return [{'boot-volume-id': name, 'instance-id': 'foreign' if foreign else instance,
+                     'lifecycle-state': 'ATTACHED' if foreign or (name == 'current' and cloud['instance']) else 'DETACHED'}
+                    for name, instance in [('current', 'compute-id'), ('historical', 'old-instance')]]
+        if command == ('bv', 'boot-volume', 'update'):
+            volumes[args[4]]['freeform-tags'] = body['freeformTags']
+            return volumes[args[4]]
+        if command == ('bv', 'boot-volume', 'get'):
+            return volumes[args[4]]
+        if command == ('compute', 'instance', 'terminate'):
+            assert args[args.index('--preserve-boot-volume') + 1] == 'true'
+            cloud['instance'] = None
+            return None
+        if command == ('bv', 'boot-volume', 'delete'):
+            del volumes[args[4]]
+            return None
+        pytest.fail('Unexpected synthetic OCI request')
+    monkeypatch.setattr(adapter, '_call', call)
+    monkeypatch.setattr(adapter, '_read_boot_volume', lambda instance: volumes['current'])
+    return cloud
+
+
+@pytest.mark.parametrize('legacy', [False, True])
+def test_all_owned_volumes_deleted_and_retries_noop(adapter, monkeypatch, legacy):
+    cloud = volume_cloud(adapter, monkeypatch, legacy=legacy)
+    operation = adapter.state.begin_operation('delete', 'test')
+    plan = adapter.plan_delete()
+    assert len([a for a in plan if 'volume' in a['resource'] and a['action'] == 'delete']) == 2
+    assert adapter.delete(operation) == {'deleted': True}
+    assert cloud['volumes'] == {}
+    assert adapter.state.resources() == []
+    assert adapter.state.safe_status()['pending_steps'] == 0
+    assert adapter.delete(operation) == {'deleted': True}
+    if legacy:
+        assert cloud['calls'].index(('bv', 'boot-volume', 'update')) < cloud['calls'].index(('compute', 'instance', 'terminate'))
+
+
+def test_volume_foreign_attachment_blocks_every_mutation(adapter, monkeypatch):
+    cloud = volume_cloud(adapter, monkeypatch, foreign=True)
+    with pytest.raises(DeployError, match='another instance'):
+        adapter.delete('unused')
+    assert not any(c[-1] in ('delete', 'update', 'terminate') for c in cloud['calls'])
+
+
+def test_legacy_volume_requires_live_attachment_evidence(adapter, monkeypatch):
+    cloud = volume_cloud(adapter, monkeypatch, legacy=True)
+    original = adapter._call
+    monkeypatch.setattr(adapter, '_call', lambda *a, **kw: [] if a[:3] == ('compute', 'boot-volume-attachment', 'list') else original(*a, **kw))
+    with pytest.raises(DeployError, match='attachment evidence'):
+        adapter.delete('unused')
+    assert cloud['instance']
+
+
+def test_failed_volume_delete_preserves_intent_for_retry(adapter, monkeypatch):
+    cloud = volume_cloud(adapter, monkeypatch)
+    original = adapter._call
+    def uncertain(*a, **kw):
+        result = original(*a, **kw)
+        if a[:3] == ('bv', 'boot-volume', 'delete'):
+            raise DeployError('Synthetic connection lost after deletion')
+        return result
+    monkeypatch.setattr(adapter, '_call', uncertain)
+    operation = adapter.state.begin_operation('delete', 'test')
+    with pytest.raises(DeployError, match='connection lost'):
+        adapter.delete(operation)
+    assert adapter.state.get_meta('oci-delete-volume:current')
+    monkeypatch.setattr(adapter, '_call', original)
+    adapter.delete(operation)
+    assert not adapter.state.resources()
+    assert adapter.state.safe_status()['pending_steps'] == 0
+
+
+def test_inherited_compute_tags_migrate_only_with_attachment_evidence(adapter, monkeypatch):
+    cloud = volume_cloud(adapter, monkeypatch)
+    for volume in cloud['volumes'].values():
+        volume['freeform-tags'] = adapter._tags('compute')
+    op = adapter.state.begin_operation('delete', 'test')
+    adapter.delete(op)
+    assert cloud['volumes'] == {}
+    assert ('bv', 'boot-volume', 'update') in cloud['calls']
+
+
+def test_inherited_tags_without_recorded_attachment_evidence_block(adapter, monkeypatch):
+    cloud = volume_cloud(adapter, monkeypatch)
+    for volume in cloud['volumes'].values():
+        volume['freeform-tags'] = adapter._tags('compute')
+    original = adapter._call
+    monkeypatch.setattr(adapter, '_call', lambda *a, **kw: [] if a[:3] == ('compute', 'boot-volume-attachment', 'list') else original(*a, **kw))
+    with pytest.raises(DeployError, match='attachment evidence'):
+        adapter.delete('unused')
+    assert not any(c[-1] in ('update', 'terminate', 'delete') for c in cloud['calls'])
+
+
+def test_inherited_compute_tags_of_other_deployment_are_not_migrated(adapter, monkeypatch):
+    cloud = volume_cloud(adapter, monkeypatch)
+    cloud['volumes']['historical']['freeform-tags'] = {'pocketdeploy-id': 'someone-else', 'pocketdeploy-role': 'compute'}
+    with pytest.raises(DeployError, match='tags conflict'):
+        adapter.delete('unused')
+    assert not any(c[-1] in ('update', 'terminate', 'delete') for c in cloud['calls'])
+
+
+def test_new_disk_inherited_compute_tags_are_replaced_after_owned_attachment(adapter, monkeypatch):
+    volume = {'id': 'new', 'freeform-tags': adapter._tags('compute')}
+    monkeypatch.setattr(adapter, '_read_boot_volume', lambda instance: volume)
+    def call(*args, body=None, **kw):
+        assert args[:3] == ('bv', 'boot-volume', 'update')
+        volume['freeform-tags'] = body['freeformTags']
+        return volume
+    monkeypatch.setattr(adapter, '_call', call)
+    adapter._boot_volume(resource(adapter))
+    assert adapter._owned(volume, 'boot-volume')
+    assert adapter.state.get_resource('boot-volume')['provider_id'] == 'new'
+
+
+def test_firewall_delete_polls_eventual_absence_without_repeating_mutation(adapter, monkeypatch):
+    adapter.config['compute-prevent-destroy'] = False
+    adapter._remember('firewall', resource(adapter, 'firewall'))
+    observed = {'deleted': False, 'polls': 0, 'mutations': 0}
+    sleeps = []
+    def find(role, **kw):
+        if role != 'firewall':
+            return None
+        if observed['deleted']:
+            observed['polls'] += 1
+            if observed['polls'] >= 3:
+                return None
+        return resource(adapter, 'firewall')
+    def call(*args, **kw):
+        assert args[:3] == ('network', 'nsg', 'delete')
+        observed['deleted'] = True
+        observed['mutations'] += 1
+    monkeypatch.setattr(adapter, '_find', find)
+    monkeypatch.setattr(adapter, '_call', call)
+    monkeypatch.setattr('pocketdeploy.oci.time.sleep', sleeps.append)
+    operation = adapter.state.begin_operation('delete', 'test')
+    adapter.delete(operation)
+    assert observed['mutations'] == 1
+    assert sleeps == [2, 2]
+    assert adapter.state.get_resource('firewall') is None
+    assert adapter.state.get_meta('oci-delete-firewall') is None
+    assert adapter.state.safe_status()['pending_steps'] == 0

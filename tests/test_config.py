@@ -94,3 +94,10 @@ def test_managed_services_reject_incomplete_configuration(tmp_path, changes, mes
     path.write_text(json.dumps(c))
     with pytest.raises(DeployError, match=message):
         load(path, env={})
+
+@pytest.mark.parametrize('environment,extra', [({}, '\ncompute-retain-boot-volume: false\n'), ({'COLORS_PAR_COMPUTE_RETAIN_BOOT_VOLUME': 'true'}, '')])
+def test_retired_boot_retention_rejected(tmp_path, environment, extra):
+    path = tmp_path / 'colors.yml'
+    path.write_text(BASE + extra)
+    with pytest.raises(DeployError, match='retired'):
+        load(path, env=environment, resolve=False)
