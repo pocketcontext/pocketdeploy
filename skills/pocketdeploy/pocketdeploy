@@ -1,0 +1,10 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["pocketdeploy @ git+https://github.com/pocketcontext/pocketdeploy.git@78fc76f04c9f3d0df227205416e10645680abbfe"]
+# ///
+"""Portable PocketDeploy CLI; deployment selection follows the caller's directory."""
+from pocketdeploy.cli import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())

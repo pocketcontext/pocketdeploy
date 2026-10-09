@@ -26,8 +26,13 @@ Python dependencies. Blue is pinned to a tested Git commit. `direnv allow` is
 optional; `.envrc` loads devenv and an optional ignored `.envrc.private`.
 Nothing automatically sources private files during deployment or restoration.
 
-The checkout launcher `./pocketdeploy` also runs through uv. Installed packages
-provide the `pocketdeploy` command from any working directory. Vault workflows require
+The portable launcher `./pocketdeploy` is a symlink to the executable bundled in
+`skills/pocketdeploy/`. Copy that executable into a deployment repository or onto
+PATH; uv fetches its immutable PocketDeploy package pin and Python dependencies.
+It runs the published package, even inside this source checkout. For local
+development use `uv run pocketdeploy` or devenv’s `pocketdeploy` command.
+External tools still come from devenv or your PATH. Installed packages also
+provide the `pocketdeploy` command. Vault workflows require
 an authenticated account and an interactive user-unlocked session. Outside
 devenv, install `vaultcontext` separately or set its `vault-command` path.
 
@@ -39,6 +44,25 @@ availability domain. Configure your OCI CLI authentication profile; the default
 auth mode is `security_token`. The existing subnet/VCN, internet gateway, routes
 and subnet security lists remain externally managed. Inherited subnet rules can
 grant access beyond the dedicated NSG; an NSG does not subtract those permissions.
+
+## Portable skill and launcher
+
+Install the skill for your agent from this repository:
+
+```sh
+npx skills add pocketcontext/pocketdeploy --skill pocketdeploy --agent codex --yes
+```
+
+Copy the installed skill's `pocketdeploy` executable into your deployment
+repository and make it executable. Track that launcher alongside `colors.yml`
+and `.envrc`. Its package commit is explicit in the script; updating the skill
+alone does not change a previously copied launcher.
+
+Commands search for the nearest `colors.yml` from the caller's working directory
+upward. `-f /path/to/colors.yml` explicitly selects a deployment. State and key
+paths resolve relative to that configuration, never relative to the launcher.
+The launcher does not load `.envrc.private`; use direnv or your trusted shell.
+See [the skill](skills/pocketdeploy/SKILL.md) for operator instructions.
 
 ## Commands
 
@@ -221,6 +245,7 @@ devenv shell
 uv sync --locked --extra test
 uv run pytest -q
 uv build
+uv run python scripts/test-launcher.py
 ```
 
 Tests use synthetic providers and state. They cover interrupted creates/deletes,
@@ -228,3 +253,9 @@ ownership mismatches, immutable drift, private snapshot recovery, secret-safe
 errors, SSH host trust, stop-first delivery and idempotent convergence. Cloud
 mutation is never part of the default suite. Live verification results are in
 `docs/verification.md` when available; they are distinct from mocked coverage.
+
+Publish and test package changes before updating the Git commit in the skill
+launcher. Pin a full published commit, never a moving branch. The root symlink
+keeps one launcher payload; commit the new pin after testing a copied launcher
+outside this checkout. The launcher integration check uses synthetic missing-state
+fixtures and never accesses a cloud account.

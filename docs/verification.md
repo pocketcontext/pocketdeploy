@@ -67,3 +67,16 @@ stdin and command/error logs suppress them. The pinned ONCE CLI cannot clear the
 last environment binding, which is rejected explicitly. SQLite is plaintext
 locally, encrypted only in Vault; one deployment operator is supported. Restoring
 state does not restore the VPS or establish distributed ownership.
+
+## Portable launcher verification
+
+The portable uv launcher pins published PocketDeploy commit
+`78fc76f04c9f3d0df227205416e10645680abbfe`. Configuration discovery and explicit
+file selection increased the synthetic suite to 66 passing tests. Six additional
+copied-launcher checks passed outside the checkout, including an unrelated
+project with invalid dependencies, nested configuration discovery, explicit file
+selection and nonzero failures. These checks block external deployment tools.
+The skill passed its frontmatter validator and independent operational review.
+A copy of the launcher outside the checkout also ran from its `docs/`
+subdirectory against the live test deployment: status was healthy and the plan
+reported no changes. No cloud mutation was required for this verification.

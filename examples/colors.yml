@@ -1,4 +1,4 @@
-# Public example only. Keep real account IDs, state and credentials private.
+# Non-secret desired configuration belongs in Git. Keep state and credentials ignored.
 schema-version: 1
 profile: pocketdeploy-example
 workdir: .colors
