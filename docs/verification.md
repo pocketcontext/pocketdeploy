@@ -104,5 +104,11 @@ launcher now pins published package commit
 
 A live unchanged convergence was attempted after removing the automatic-save
 setting. It reached compute and failed in about one second; OCI local session
-validation reported an expired/invalid session, and CLI refresh failed. No
-successful live converge or new Vault checkpoint is claimed for this release.
+validation reported an expired/invalid session, and CLI refresh failed. That attempt did not complete convergence or create a Vault checkpoint.
+
+After the user refreshed the OCI token, the published portable launcher completed
+an unchanged live convergence in 15.4 seconds. It reported zero application
+changes and performed no automatic Vault save. Follow-up status confirmed a
+healthy running application with no pending host operations; the subsequent plan
+retained compute/firewall and reported no application changes. No new Vault
+checkpoint was created during this validation.
