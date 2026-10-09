@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Exercise the published portable launcher outside this checkout; no cloud calls."""
 import os
+import base64
+import time
 import json
 from pathlib import Path
 import shutil
@@ -33,7 +35,7 @@ def main():
         launcher.chmod(0o700)
         environment = {
             key: value for key, value in os.environ.items()
-            if not key.startswith('COLORS_PAR_') and key not in {
+            if not key.startswith(('COLORS_PAR_', 'OCI_')) and key not in {
                 'VIRTUAL_ENV', 'PYTHONPATH', 'PYTHONHOME', 'UV_PROJECT',
                 'UV_PROJECT_ENVIRONMENT', 'UV_WORKING_DIRECTORY',
             }
@@ -45,6 +47,7 @@ def main():
             stub = launcher.parent / command
             stub.write_text(guard)
             stub.chmod(0o700)
+        environment['OCI_CLI_CONFIG_FILE'] = str(root / 'oci-config')
         environment['PATH'] = str(launcher.parent) + os.pathsep + environment.get('PATH', '')
 
         def invoke(directory, *arguments, expected=None, successful=False):
@@ -95,6 +98,10 @@ def main():
         fresh.mkdir()
         (fresh / 'colors.yml').write_text(CONFIG.replace('compute-require-existing-state: true',
                                                        'compute-require-existing-state: false'))
+        conflicting = invoke(fresh, 'init', '--json', '--verbose', '--quiet', expected='')
+        conflict_envelope = json.loads(conflicting.stdout)
+        assert conflicting.returncode == 2 and conflict_envelope['ok'] is False
+        assert not (fresh / '.colors.sqlite').exists(), 'Conflicting flags initialized state.'
         initialized_run = invoke(fresh, 'init', '--json', '--quiet', successful=True)
         initialized_envelope = json.loads(initialized_run.stdout)
         assert initialized_envelope['schema_version'] == 1
@@ -109,6 +116,9 @@ def main():
         repeated = json.loads(invoke(fresh, 'init', '--json', '--quiet', successful=True).stdout)['result']
         assert initialized['deployment_id'] == repeated['deployment_id']
         assert contents == [path.read_bytes() for path in authority]
+        verbose_run = invoke(fresh, 'init', '--json', '--verbose', successful=True)
+        assert json.loads(verbose_run.stdout)['ok'] is True
+        assert verbose_run.stderr.strip(), 'Verbose mode omitted progress.'
         text_run = invoke(fresh, 'init', '--quiet', successful=True)
         assert text_run.stdout.strip(), 'Quiet mode suppressed the text result.'
         assert text_run.stderr == '', text_run.stderr
@@ -135,7 +145,26 @@ def main():
         assert usage_envelope['error']['code'] and usage_envelope['error']['message']
         assert usage_json.stderr == '', usage_json.stderr
 
-    print('Portable launcher: 12 checks passed (no cloud access).')
+        # Expired synthetic credentials must fail before the guarded OCI binary runs.
+        token = root / 'synthetic-token'
+        payload = base64.urlsafe_b64encode(json.dumps({'exp': int(time.time()) - 3600}).encode()).decode().rstrip('=')
+        token.write_text('eyJhbGciOiJSUzI1NiJ9.' + payload + '.synthetic-signature')
+        Path(environment['OCI_CLI_CONFIG_FILE']).write_text(
+            '[synthetic]\nsecurity_token_file=' + str(token) + '\n'
+        )
+        started = time.monotonic()
+        expired_run = invoke(fresh, 'plan', '--json', '--verbose', expected='')
+        elapsed = time.monotonic() - started
+        expired = json.loads(expired_run.stdout)
+        assert expired_run.returncode == 1 and expired['ok'] is False
+        assert expired['error']['code'] == 'oci_token_expired'
+        assert 'expired' in expired['error']['message'].lower()
+        assert 'oci session refresh --profile synthetic' in expired['error']['message']
+        assert elapsed < 10, f'Expired token failed slowly: {elapsed:.1f}s'
+        assert token.read_text() not in expired_run.stdout + expired_run.stderr
+        print(f'Expired synthetic OCI token rejected locally in {elapsed:.2f}s; OCI was not invoked.')
+
+    print('Portable launcher: 15 checks passed (no cloud access).')
 
 
 if __name__ == '__main__':

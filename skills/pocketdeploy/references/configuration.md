@@ -133,9 +133,24 @@ its remote snapshot is encrypted.
 
 ## Output options
 
-`--json` and `--quiet` are command-line options, not `colors.yml` settings.
+`--json`, `--quiet` and `--verbose` are command-line options, not `colors.yml` settings.
 Text is the default. `--json` returns a versioned envelope with `schema_version`,
 `command`, `ok` and either `result` or `error`; safe inventory fields are under
 `result`. Progress and timings use stderr, and `--quiet` suppresses them.
 Failure envelopes on stdout retain a nonzero exit status. SSH passes remote
 streams and exit status through without a footer and does not accept `--json`.
+
+`--verbose` adds safe per-request timings and periodic still-waiting messages on
+stderr, including with `--json`. It never prints raw arguments or responses.
+Combining `--verbose` with `--quiet` is a usage error (exit 2).
+
+For `oci-auth: security_token`, cloud workflows check local token expiry before
+starting OCI requests and fail with renewal guidance when it has expired.
+This check does not authenticate the token or detect all revoked credentials.
+Local `init` and explicit Vault workflows do not perform this OCI check.
+
+The OCI CLI configuration comes from `OCI_CLI_CONFIG_FILE`, or `~/.oci/config`
+when unset. `oci-config-file-profile` selects the profile (default `DEFAULT`).
+An expired token returns `oci_token_expired`; refresh with
+`oci session refresh --profile PROFILE` using the same config file. If refresh
+fails, use `oci session authenticate` for that profile.

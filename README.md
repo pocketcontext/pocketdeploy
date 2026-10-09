@@ -128,6 +128,7 @@ Existing scripts that read JSON must add `--json` and read the `result` field.
 pocketdeploy status --json | jq '.result'
 pocketdeploy plan --json --quiet > plan.json
 pocketdeploy converge --quiet
+pocketdeploy plan --verbose
 ```
 
 Progress and stage durations go to stderr. `--quiet` suppresses progress, while
@@ -315,3 +316,18 @@ usage error has `command: null` when argument parsing cannot identify a command.
 Running `./pocketdeploy` with no arguments prints the same help as `--help`
 to stdout and exits 0, without loading configuration or contacting providers.
 Unknown commands and a lone `--json` remain usage errors (exit 2).
+
+### Verbose diagnostics
+
+Use `pocketdeploy plan --verbose` or `pocketdeploy converge --verbose` to see
+individual OCI and SSH requests start, finish, and report elapsed time on
+stderr. Long-running requests periodically report that they are still waiting.
+Labels are authored by PocketDeploy; arguments, credentials and raw provider
+responses are never printed. `--json --verbose` keeps one JSON result on stdout.
+`--verbose` and `--quiet` conflict and exit 2 before deployment work begins.
+
+For `oci-auth: security_token`, cloud workflows check the selected profile's
+local token expiry before invoking OCI. An expired token fails with a safe
+renewal instruction instead of waiting for a provider request. This local check
+does not prove a token is otherwise valid; OCI may still reject revoked or
+invalid credentials. `init` and Vault workflows do not require OCI credentials.

@@ -106,6 +106,18 @@ failure. Read inventory fields under `result`, for example
 Errors carry a safe `code`, `message` and failing `stage` when known. Check the
 exit status as well as `ok`; do not parse human summaries or progress messages.
 
+Use `--verbose` to diagnose slow plans or convergence: individual OCI and SSH
+requests report timings and periodic still-waiting messages on stderr. It never
+prints raw command arguments or provider output. `--json --verbose` preserves the
+single JSON result on stdout. `--verbose` conflicts with `--quiet` (exit 2 before
+work); neither option belongs in `colors.yml`.
+
+With security-token authentication, cloud workflows check local token expiry
+before invoking OCI. Follow the safe renewal instruction for expired tokens;
+never print the token or substitute another identity. Local expiry validation
+cannot detect every invalid or revoked credential. `init` and Vault workflows
+remain independent of OCI authentication.
+
 `--quiet` suppresses progress, not the result or text error diagnostics. Use
 `./pocketdeploy plan --json --quiet` for a JSON result without controller progress;
 launcher/runtime diagnostics may still appear on stderr. Exit codes are 0 for

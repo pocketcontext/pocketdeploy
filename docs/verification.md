@@ -142,3 +142,18 @@ parent files are ignored. Explicit `-f` paths remain relative to the caller, and
 state/key paths remain relative to the selected configuration. Validation passed
 117 tests, 12 copied-launcher checks and skill validation. Earlier upward-search
 verification above describes historical behavior.
+
+## Verbose diagnostics and expired OCI sessions
+
+The launcher now pins `4b250673977f1d0329e38251860c0d17aaaa4efb`. Validation passed
+146 tests, including safe OCI/SSH timing output, heartbeat cleanup and distinct
+expired-token versus rejected-authentication errors. The copied launcher passed
+15 isolated checks. A synthetic expired JWT was rejected in 0.17 seconds before
+the guarded OCI executable could run.
+
+The operator's current OCI session had also expired. The published CLI rejected
+it locally with `oci_token_expired`, exit 1 and exact profile-specific refresh
+and reauthentication guidance in 0.90 seconds including launcher startup (5 ms
+in the CLI). No token contents or provider responses were emitted. This verified
+the real failure path; a successful live verbose plan was not run with renewed
+credentials during this change. No cloud resources or Vault snapshots changed.
