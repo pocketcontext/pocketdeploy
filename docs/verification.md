@@ -284,3 +284,7 @@ performed for this change. Existing Vault history is retained.
 All 240 tests passed, package source/wheel builds passed, and the portable skill
 validated. Three invalid rotation-option combinations were rejected before
 configuration access.
+
+The portable launcher pins source commit
+`d2c143bea2d5384a0098c89fe8aecb998726dd49`; all 19 copied-launcher checks passed
+without cloud access.
