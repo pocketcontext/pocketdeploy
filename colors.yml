@@ -37,7 +37,7 @@ vault-save-after-run: false
 once:
   applications:
     - host: example.com
-      image: nginx:stable-alpine
+      image: ghcr.io/pocketcontext/pocketdeploy-demo:latest
       # Point DNS to the instance and omit disable_tls for public HTTPS.
       disable_tls: true
       deploy-strategy: rolling

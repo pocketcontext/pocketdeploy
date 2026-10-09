@@ -67,9 +67,14 @@ class Host:
                                 capture_output=True, text=True, timeout=1200)
         if result.returncode:
             try:
-                error = json.loads(result.stdout).get('error')
+                response = json.loads(result.stdout)
+                error = response.get('error')
+                stage = response.get('stage')
             except (ValueError, AttributeError):
                 error = None
+                stage = None
+            if stage in {'cloud-init', 'docker-install', 'docker-service', 'host-firewall', 'once-download', 'once-service'}:
+                raise DeployError('Host bootstrap failed at ' + stage + '; output suppressed')
             raise DeployError('Host operation failed' + (': ' + error if error in SAFE_ERRORS else '; output suppressed'))
         try:
             return json.loads(result.stdout)

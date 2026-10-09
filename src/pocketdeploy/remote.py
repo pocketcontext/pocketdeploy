@@ -14,6 +14,7 @@ import subprocess
 import sys
 import urllib.request
 
+STAGE = 'request'
 BASE = Path('/var/lib/pocketdeploy')
 MANIFEST = BASE / 'manifest.json'
 ONCE = Path('/usr/local/bin/once')
@@ -48,12 +49,17 @@ def save(path, data):
 
 
 def bootstrap():
+    global STAGE
+    STAGE = 'cloud-init'
     if shutil.which('cloud-init'):
         run('cloud-init', 'status', '--wait')
+    STAGE = 'docker-install'
     if not shutil.which('docker'):
         run('apt-get', 'update', '-qq')
         run('apt-get', 'install', '-y', '-qq', 'docker.io', 'ca-certificates')
+    STAGE = 'docker-service'
     run('systemctl', 'enable', '--now', 'docker')
+    STAGE = 'host-firewall'
     # OCI Ubuntu's host firewall rejects web traffic before Docker's proxy starts.
     for port in ('80', '443'):
         rule = ('INPUT', '-p', 'tcp', '--dport', port, '-m', 'comment', '--comment', 'pocketdeploy-web', '-j', 'ACCEPT')
@@ -62,6 +68,7 @@ def bootstrap():
             run('iptables', '-I', *rule)
     if shutil.which('netfilter-persistent'):
         run('netfilter-persistent', 'save')
+    STAGE = 'once-download'
     arch, checksum = CHECKSUMS[platform.machine()]
     if not ONCE.exists() or hashlib.sha256(ONCE.read_bytes()).hexdigest() != checksum:
         data = urllib.request.urlopen(f'https://github.com/basecamp/once/releases/download/v0.3.3/once-linux-{arch}', timeout=120).read()
@@ -71,6 +78,7 @@ def bootstrap():
         temporary.write_bytes(data)
         temporary.chmod(0o755)
         os.replace(temporary, ONCE)
+    STAGE = 'once-service'
     # Disable the updater before installing its unit, including first startup.
     drop = Path('/etc/systemd/system/once-background.service.d')
     drop.mkdir(parents=True, exist_ok=True)
@@ -174,6 +182,20 @@ def reconcile(request):
     apps = request['applications']
     desired_hosts = {app['host'] for app in apps}
     current = containers()
+    if request['action'] == 'status':
+        by_host = {app['host']: app for app in apps}
+        summaries = []
+        for host in sorted(set(manifest['apps']) | set(current) | desired_hosts):
+            actual = current.get(host)
+            record = manifest['apps'].get(host, {})
+            # Health uses desired non-secret probe options, never env resolution.
+            probe = by_host.get(host, {'host': host, **record.get('desired', {})})
+            pending = BASE / (hashlib.sha256(host.encode()).hexdigest() + '.pending')
+            summary = {'host': host, 'running': bool(actual and actual['running']),
+                       'managed': host in manifest['apps'], 'pending': pending.exists()}
+            summary.update(health(probe) if actual and actual['running'] else {'healthy': False, 'http_status': None})
+            summaries.append(summary)
+        return {'applications': summaries, 'pending_operations': len(list(BASE.glob('*.pending')))}
     if desired_hosts.intersection(current) - set(manifest['apps']):
         raise RuntimeError('unmanaged application requires explicit adoption')
     actions = []
@@ -276,5 +298,5 @@ if __name__ == '__main__':
         safe = {'unfinished deployment; operator recovery required', 'application removal requires explicit operator action',
                 'host belongs to another deployment', 'unmanaged application requires explicit adoption',
                 'cannot clear final environment binding with pinned ONCE CLI'}
-        print(json.dumps({'error': str(exc) if str(exc) in safe else 'operation failed; output suppressed'}))
+        print(json.dumps({'error': str(exc) if str(exc) in safe else 'operation failed; output suppressed', 'stage': STAGE}))
         sys.exit(1)

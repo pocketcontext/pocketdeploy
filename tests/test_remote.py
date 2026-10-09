@@ -153,3 +153,18 @@ def test_http_failure_keeps_pending_and_previous_manifest(tmp_path, monkeypatch)
             remote.reconcile({'action': 'converge', 'deployment_id': 'test', 'applications': [desired]})
     assert list(tmp_path.glob('*.pending'))
     assert json.loads(remote.MANIFEST.read_text())['apps'][app()['host']]['desired']['env'] == {'FOO': 'bar'}
+
+
+def test_status_needs_no_resolved_secrets_and_reports_pending(tmp_path, monkeypatch):
+    setup(tmp_path, monkeypatch)
+    desired = app(); desired.pop('resolved-env')
+    (tmp_path / (remote.hashlib.sha256(app()['host'].encode()).hexdigest() + '.pending')).write_text('{}')
+    with patch.object(remote, 'containers', return_value={app()['host']: current()}), \
+         patch.object(remote, 'resolve_image') as image, patch.object(remote, 'run') as run:
+        result = remote.reconcile({'action': 'status', 'deployment_id': 'test', 'applications': [desired]})
+    assert 'actions' not in result
+    assert result['pending_operations'] == 1
+    assert result['applications'][0] == {'host': app()['host'], 'running': True, 'managed': True,
+                                        'pending': True, 'healthy': True, 'http_status': 200}
+    image.assert_not_called()
+    run.assert_not_called()
