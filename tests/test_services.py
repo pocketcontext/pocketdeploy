@@ -264,3 +264,40 @@ def test_resend_zone_relative_cname_stays_within_sending_domain(service):
     assert records[0]['name'] == 'rsend.notifications.example.com'
     with pytest.raises(DeployError, match='outside'):
         service._email_dns({'records': [{'name': 'rsend.other', 'type': 'CNAME', 'value': 'tracking.resend.com'}]})
+
+
+def test_smtp_v15_credentials_in_private_url(monkeypatch):
+    from pocketdeploy.smtp_test_remote import submit
+    from pathlib import Path
+    from types import SimpleNamespace
+    def execute(args, **kwargs):
+        settings = Path(kwargs['env']['MAILRC']).read_text()
+        assert 'set mta=smtps://resend:SYNTHETIC_SECRET@smtp.resend.com:465' in settings
+        assert 'smtp-auth-password' not in settings
+        assert 'SYNTHETIC_SECRET' not in str(args)
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr('pocketdeploy.smtp_test_remote.subprocess.run', execute)
+    submit({'smtp': {'server': 'smtp.resend.com', 'port': 465, 'username': 'resend',
+                     'password': 'SYNTHETIC_SECRET', 'from': 'mail@example.com'}, 'to': 'test@example.com'})
+
+
+@pytest.mark.parametrize('diagnostic,code', [
+    ('A password is necessary for SMTP authentication SECRET', 'smtp_credentials_missing'),
+    ('certificate verification failed SECRET', 'smtp_tls_failed'),
+    ('535 authentication failed SECRET', 'smtp_authentication_failed'),
+    ('Connection refused SECRET', 'smtp_connection_failed'),
+    ('SECRET', 'smtp_submission_failed'),
+])
+def test_smtp_failure_safe_classification(diagnostic, code):
+    from pocketdeploy.smtp_test_remote import classify_failure
+    assert classify_failure(diagnostic) == code
+
+
+def test_smtp_test_reports_fixed_remote_error(monkeypatch):
+    from pocketdeploy.smtp_test import smtp_test
+    from types import SimpleNamespace
+    monkeypatch.setattr('pocketdeploy.smtp_test.run', lambda *a, **k: json.dumps({'accepted': False, 'error': 'smtp_credentials_missing', 'raw': 'SECRET'}))
+    with pytest.raises(DeployError) as result:
+        smtp_test(SimpleNamespace(_argv=lambda connection: ['ssh']), {}, {}, 'test@example.com')
+    assert result.value.code == 'smtp_credentials_missing'
+    assert 'SECRET' not in str(result.value)

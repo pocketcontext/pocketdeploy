@@ -21,5 +21,18 @@ def smtp_test(host, connection, settings, recipient):
     except ValueError:
         raise DeployError('SMTP test returned an invalid response; output suppressed.') from None
     if result != {'accepted': True}:
-        raise DeployError('SMTP submission failed; output suppressed.')
+        errors = {
+            'smtp_credentials_missing': 's-nail could not resolve its SMTP credentials.',
+            'smtp_tls_failed': 'SMTP TLS verification failed; check the host certificate trust and clock.',
+            'smtp_authentication_failed': 'Resend rejected SMTP authentication; check the scoped sending credential.',
+            'smtp_connection_failed': 'The VPS could not connect to Resend SMTP.',
+            'smtp_submission_failed': 'Resend SMTP submission failed; provider output suppressed.',
+            'smtp_timeout': 'SMTP submission timed out; delivery is uncertain. Check provider history before retrying.',
+            'smtp_client_unavailable': 's-nail is unavailable on the VPS; converge host setup first.',
+            'smtp_invalid_configuration': 'The SMTP test configuration is invalid.',
+        }
+        code = result.get('error') if isinstance(result, dict) else None
+        if code in errors:
+            raise DeployError(errors[code], code=code)
+        raise DeployError('SMTP submission failed; output suppressed.', code='smtp_submission_failed')
     return {'accepted': True, 'delivery_confirmed': False}

@@ -8,6 +8,19 @@ import sys
 import tempfile
 
 
+def classify_failure(stderr):
+    text = stderr.lower()
+    if 'a password is necessary' in text or 'a user is necessary' in text:
+        return 'smtp_credentials_missing'
+    if 'certificate' in text or 'tls' in text and any(word in text for word in ('fail', 'error', 'required')):
+        return 'smtp_tls_failed'
+    if any(word in text for word in ('535', 'authentication failed', 'authentication unsuccessful')):
+        return 'smtp_authentication_failed'
+    if any(word in text for word in ('connection refused', 'connection timed out', 'name or service not known', 'network is unreachable')):
+        return 'smtp_connection_failed'
+    return 'smtp_submission_failed'
+
+
 def submit(request):
     smtp, recipient = request['smtp'], request['to']
     address = r'[A-Za-z0-9._+%-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
@@ -22,8 +35,8 @@ def submit(request):
         config = Path(directory) / 'mailrc'
         config.write_text('\n'.join([
             'set v15-compat', 'set sendwait', 'set tls-verify=strict',
-            'set mta=smtps://resend@smtp.resend.com:465', 'set smtp-auth=login',
-            'set smtp-auth-password=' + smtp['password'], 'set from=' + smtp['from'],
+            'set mta=smtps://resend:' + smtp['password'] + '@smtp.resend.com:465',
+            'set smtp-auth=login', 'set from=' + smtp['from'],
             'unset record', 'unset save', '',
         ]))
         result = subprocess.run(['s-nail', '-n', '-s', 'PocketDeploy SMTP verification', recipient],
@@ -31,13 +44,16 @@ def submit(request):
                                 env={'PATH': '/usr/bin:/bin', 'HOME': directory, 'MAILRC': str(config), 'LC_ALL': 'C'},
                                 text=True, capture_output=True, timeout=90)
         if result.returncode:
-            raise RuntimeError('SMTP submission failed')
+            return {'accepted': False, 'error': classify_failure(result.stderr)}
     return {'accepted': True}
 
 
 if __name__ == '__main__':
     try:
         print(json.dumps(submit(json.load(sys.stdin))))
+    except subprocess.TimeoutExpired:
+        print(json.dumps({'accepted': False, 'error': 'smtp_timeout'}))
+    except OSError:
+        print(json.dumps({'accepted': False, 'error': 'smtp_client_unavailable'}))
     except Exception:
-        print(json.dumps({'accepted': False}))
-        sys.exit(1)
+        print(json.dumps({'accepted': False, 'error': 'smtp_invalid_configuration'}))
