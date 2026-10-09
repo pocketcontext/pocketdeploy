@@ -263,12 +263,12 @@ class Services:
                 raise DeployError('Resend returned an unsupported DNS record.')
             name = name.rstrip('.')
             suffix = self.c['smtp-domain']
-            if name in ('send', 'resend._domainkey'):
+            if name in ('send', 'resend._domainkey', 'rsend'):
                 name += '.' + suffix
             elif getattr(self, 'zone_name', None) and suffix.endswith('.' + self.zone_name):
-                relative = suffix[:-(len(self.zone_name) + 1)]
-                if name in ('send.' + relative, 'resend._domainkey.' + relative):
-                    name += '.' + self.zone_name
+                candidate = name + '.' + self.zone_name
+                if candidate == suffix or candidate.endswith('.' + suffix):
+                    name = candidate
             if name != suffix and not name.endswith('.' + suffix):
                 raise DeployError('Resend requested DNS outside the configured sending domain.')
             record = {'type': kind, 'name': name, 'content': value}

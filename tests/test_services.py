@@ -255,3 +255,12 @@ def test_pending_domain_preflight_blocks_before_compute(service, monkeypatch):
     with pytest.raises(DeployError) as error:
         service.preflight()
     assert error.value.code == 'provider_recovery_required'
+
+
+def test_resend_zone_relative_cname_stays_within_sending_domain(service):
+    service.c['smtp-domain'] = 'notifications.example.com'
+    service.zone_name = 'example.com'
+    records = service._email_dns({'records': [{'name': 'rsend.notifications', 'type': 'CNAME', 'value': 'tracking.resend.com'}]})
+    assert records[0]['name'] == 'rsend.notifications.example.com'
+    with pytest.raises(DeployError, match='outside'):
+        service._email_dns({'records': [{'name': 'rsend.other', 'type': 'CNAME', 'value': 'tracking.resend.com'}]})
