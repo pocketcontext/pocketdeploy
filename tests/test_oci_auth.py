@@ -117,3 +117,34 @@ def test_unrecognized_profile_does_not_inject_error_output(tmp_path, monkeypatch
         adapter._check_token()
     assert 'unsafe' not in str(caught.value)
     assert 'secret' not in str(caught.value)
+
+
+@pytest.mark.parametrize(('desired', 'environment', 'expected'), [
+    ('eu-frankfurt-1', 'us-ashburn-1', 'eu-frankfurt-1'),
+    (None, 'us-ashburn-1', 'us-ashburn-1'),
+    (None, None, 'uk-london-1'),
+])
+def test_expiry_guidance_uses_effective_region(tmp_path, monkeypatch, desired, environment, expected):
+    adapter, _ = token_config(tmp_path, monkeypatch, {'exp': 1})
+    path = tmp_path / 'config'
+    path.write_text(path.read_text() + 'region=uk-london-1\n')
+    monkeypatch.delenv('OCI_CLI_REGION', raising=False)
+    if environment:
+        monkeypatch.setenv('OCI_CLI_REGION', environment)
+    if desired:
+        adapter.config['oci-region'] = desired
+    with pytest.raises(DeployError) as caught:
+        adapter._check_token()
+    message = str(caught.value)
+    assert f'oci session refresh --profile session --region {expected}' in message
+    assert f'oci session authenticate --profile-name session --region {expected}' in message
+
+
+def test_missing_or_unsafe_region_is_not_guessed_or_echoed(tmp_path, monkeypatch):
+    adapter, _ = token_config(tmp_path, monkeypatch, {'exp': 1})
+    monkeypatch.delenv('OCI_CLI_REGION', raising=False)
+    adapter.config['oci-region'] = 'private-sentinel; command'
+    with pytest.raises(DeployError) as caught:
+        adapter._check_token()
+    assert '--region <OCI_REGION>' in str(caught.value)
+    assert 'private-sentinel' not in str(caught.value)

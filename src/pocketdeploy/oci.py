@@ -16,13 +16,34 @@ class OCI:
     def __init__(self, config, state=None):
         self.config, self.state = config, state
 
+    def _profile_settings(self):
+        """Read only the native OCI settings needed by local diagnostics."""
+        try:
+            path = Path(os.environ.get('OCI_CLI_CONFIG_FILE', '~/.oci/config')).expanduser()
+            parser = configparser.ConfigParser(interpolation=None)
+            with path.open() as source:
+                text = source.read(1024 * 1024 + 1)
+            if len(text) > 1024 * 1024:
+                return {}
+            parser.read_string(text)
+            section = parser[self.config.get('oci-config-file-profile', 'DEFAULT')]
+            return {key: section.get(key) for key in ('region', 'security_token_file')}
+        except (OSError, UnicodeError, ValueError, KeyError, configparser.Error):
+            return {}
+
     def _refresh_guidance(self):
         profile = self.config.get('oci-config-file-profile', 'DEFAULT')
         # Only conventional profile names may enter a displayed command.
         if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}', profile):
             return 'Refresh the configured OCI session, or authenticate again if refresh fails.'
-        return (f'Run `oci session refresh --profile {profile}` using the same OCI config file; '
-                f'if refresh fails, run `oci session authenticate --profile-name {profile}`.')
+        region = (self.config.get('oci-region') or os.environ.get('OCI_CLI_REGION')
+                  or self._profile_settings().get('region'))
+        region_known = isinstance(region, str) and re.fullmatch(r'[a-z][a-z0-9-]{0,79}', region)
+        region_argument = region if region_known else '<OCI_REGION>'
+        return (f'Run `oci session refresh --profile {profile} --region {region_argument}` '
+                'using the same OCI config file; '
+                f'if refresh fails, run `oci session authenticate --profile-name {profile} --region {region_argument}`.'
+                + ('' if region_known else ' Replace <OCI_REGION> with your OCI region; set oci-region in colors.yml or region in the OCI profile.'))
 
     def _check_token(self):
         """Best-effort expiry check, not token validation; never emit token data."""
@@ -31,15 +52,7 @@ class OCI:
         try:
             token_path = os.environ.get('OCI_CLI_SECURITY_TOKEN_FILE')
             if not token_path:
-                path = Path(os.environ.get('OCI_CLI_CONFIG_FILE', '~/.oci/config')).expanduser()
-                parser = configparser.ConfigParser(interpolation=None)
-                with path.open() as source:
-                    text = source.read(1024 * 1024 + 1)
-                if len(text) > 1024 * 1024:
-                    return
-                parser.read_string(text)
-                profile = self.config.get('oci-config-file-profile', 'DEFAULT')
-                token_path = parser[profile].get('security_token_file')
+                token_path = self._profile_settings().get('security_token_file')
             if not token_path:
                 return
             with Path(token_path).expanduser().open() as source:
