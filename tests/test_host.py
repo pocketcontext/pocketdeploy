@@ -84,3 +84,38 @@ def test_init_refuses_configuration_and_lock_path_collisions(tmp_path):
         with pytest.raises(DeployError, match='distinct paths'):
             initialize(config, state, host, tmp_path)
     assert list(tmp_path.iterdir()) == []
+
+
+def test_verbose_remote_timing_never_emits_payload(tmp_path, capsys):
+    from pocketdeploy.output import Reporter
+    host = Host({'once': {'applications': [{'resolved-env': {'SECRET': 'payload-sentinel'}}]}},
+                SimpleNamespace(deployment_id='test'), tmp_path)
+    host.prepare_keys()
+    with Reporter(verbose=True).activate():
+        with patch('pocketdeploy.host.subprocess.run', return_value=SimpleNamespace(returncode=0, stdout='{}')):
+            host._remote({'ip': '192.0.2.1'}, 'status')
+    output = capsys.readouterr()
+    assert output.out == ''
+    assert 'SSH: application status: started' in output.err
+    assert 'SSH: application status: completed' in output.err
+    assert 'payload-sentinel' not in output.err
+
+
+def test_remote_timeout_has_safe_error_and_verbose_stage(tmp_path, capsys):
+    import subprocess
+    import pytest
+    from pocketdeploy.common import DeployError
+    from pocketdeploy.output import Reporter
+    host = Host({}, SimpleNamespace(deployment_id='test'), tmp_path)
+    host.prepare_keys()
+    reporter = Reporter(verbose=True)
+    with reporter.activate():
+        with patch('pocketdeploy.host.subprocess.run', side_effect=subprocess.TimeoutExpired(
+                ['secret-argument'], 1200, output='secret-output', stderr='secret-error')):
+            with pytest.raises(DeployError) as caught:
+                host._remote({'ip': '192.0.2.1'}, 'plan')
+    output = capsys.readouterr()
+    assert caught.value.code == 'command_timeout'
+    assert 'remote work may still be running' in str(caught.value)
+    assert reporter.failed_stage == 'SSH: application plan'
+    assert 'secret-' not in output.out + output.err + str(caught.value)

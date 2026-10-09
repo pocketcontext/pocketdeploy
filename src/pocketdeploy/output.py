@@ -1,8 +1,24 @@
 """Small stdout result and stderr progress boundary for safe CLI payloads."""
 from contextlib import contextmanager
+from contextvars import ContextVar
 import json
 import sys
 import time
+import threading
+
+
+_active_reporter = ContextVar('pocketdeploy_reporter', default=None)
+
+
+@contextmanager
+def operation(label):
+    """Time a fixed, code-authored operation label; never pass commands or data."""
+    reporter = _active_reporter.get()
+    if reporter is None or not reporter.verbose:
+        yield
+    else:
+        with reporter.stage(label):
+            yield
 
 
 def _actions(actions):
@@ -75,16 +91,29 @@ def text_result(command, result):
 
 
 class Reporter:
-    def __init__(self, json_mode=False, quiet=False, command=''):
+    def __init__(self, json_mode=False, quiet=False, command='', verbose=False, heartbeat_interval=10):
+        self.verbose = verbose
+        self.heartbeat_interval = heartbeat_interval
+        self._active_spans = []
+        self._progress_lock = threading.Lock()
         self.json_mode = json_mode
         self.quiet = quiet
         self.command = command
         self.current_stage = None
         self.failed_stage = None
 
+    @contextmanager
+    def activate(self):
+        token = _active_reporter.set(self)
+        try:
+            yield self
+        finally:
+            _active_reporter.reset(token)
+
     def progress(self, message):
         if not self.quiet:
-            print(message, file=sys.stderr, flush=True)
+            with self._progress_lock:
+                print(message, file=sys.stderr, flush=True)
 
     @contextmanager
     def stage(self, name):
@@ -92,16 +121,35 @@ class Reporter:
         self.current_stage = name
         start = time.monotonic()
         self.progress(f'{name}: started')
+        stopped = threading.Event()
+        span = object()
+        self._active_spans.append(span)
+        def heartbeat():
+            while not stopped.wait(self.heartbeat_interval):
+                if self._active_spans and self._active_spans[-1] is span:
+                    self.progress(f'{name}: still waiting ({time.monotonic() - start:.1f}s)')
+        worker = None
+        if self.verbose and not self.quiet:
+            worker = threading.Thread(target=heartbeat, name='pocketdeploy-progress', daemon=True)
+            worker.start()
+        def stop_heartbeat():
+            stopped.set()
+            if worker is not None:
+                worker.join()
         try:
             yield
         except BaseException:
+            stop_heartbeat()
             if self.failed_stage is None:
                 self.failed_stage = name
             self.progress(f'{name}: failed ({time.monotonic() - start:.1f}s)')
             raise
         else:
+            stop_heartbeat()
             self.progress(f'{name}: completed ({time.monotonic() - start:.1f}s)')
         finally:
+            stop_heartbeat()
+            self._active_spans.remove(span)
             self.current_stage = previous
 
     def _emit(self, payload, elapsed_seconds):

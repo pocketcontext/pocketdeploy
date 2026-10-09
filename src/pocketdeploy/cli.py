@@ -61,6 +61,7 @@ Use -f to select a deployment. Run without arguments to show this help.''')
     p.add_argument('command', metavar='COMMAND', choices=['init', 'plan', 'create', 'converge', 'status', 'describe', 'ssh', 'delete', 'adopt', 'vault-save', 'vault-restore'], help='Deployment or Vault command listed below')
     p.add_argument('-f', '--file', help='Configuration file (default: ./colors.yml in the current working directory)')
     p.add_argument('--json', action='store_true', help='Emit one versioned JSON result on stdout')
+    p.add_argument('--verbose', action='store_true', help='Show safe request timings and waiting progress on stderr')
     p.add_argument('--quiet', action='store_true', help='Suppress progress on stderr')
     p.add_argument('--dry-run', action='store_true', help='Plan create/converge/delete without applying changes')
     p.add_argument('--instance-id', help='Exact tagged OCI instance identity for explicit recovery/adoption')
@@ -162,6 +163,8 @@ async def converge(config, state, cloud, host, operation, reporter=None):
 
 def execute(args, reporter=None):
     reporter = reporter or Reporter(quiet=getattr(args, "quiet", False), command=args.command)
+    if getattr(args, 'verbose', False) and getattr(args, 'quiet', False):
+        raise DeployError('--verbose and --quiet cannot be combined.', code='invalid_usage')
     os.umask(0o077)
     if args.command == 'ssh' and getattr(args, 'json', False):
         raise UsageError()
@@ -251,9 +254,13 @@ def main():
             raise UsageError()
         reporter.json_mode = args.json
         reporter.quiet = args.quiet
+        reporter.verbose = args.verbose
+        if args.verbose and args.quiet:
+            raise DeployError('--verbose and --quiet cannot be combined.', code='invalid_usage')
         if args.command == 'ssh' and args.json:
             raise DeployError('SSH does not support --json.', code='invalid_usage')
-        result = execute(args, reporter)
+        with reporter.activate():
+            result = execute(args, reporter)
         if args.command == 'ssh':
             code = result['ssh_exit']
             return code if code >= 0 else 128 - code

@@ -390,3 +390,40 @@ def test_missing_or_invalid_command_still_fails(monkeypatch, capsys, argv):
         assert result['error']['code'] == 'invalid_usage'
     else:
         assert not output.out and 'Invalid command arguments' in output.err
+
+
+@pytest.mark.parametrize('json_mode', [False, True])
+def test_verbose_quiet_conflict_before_execution(monkeypatch, capsys, json_mode):
+    import json
+    argv = ['plan', '--verbose', '--quiet'] + (['--json'] if json_mode else [])
+    assert run_main(monkeypatch, argv, lambda *a: pytest.fail('execute called')) == 2
+    output = capsys.readouterr()
+    if json_mode:
+        assert not output.err
+        assert json.loads(output.out)['error']['code'] == 'invalid_usage'
+        assert '--verbose and --quiet' in json.loads(output.out)['error']['message']
+    else:
+        assert not output.out
+        assert '--verbose and --quiet' in output.err
+
+
+def test_verbose_operation_uses_stderr_with_json(monkeypatch, capsys):
+    import json
+    from pocketdeploy.output import operation
+    def execute(args, reporter):
+        with operation('oci: inspect'):
+            pass
+        return {'actions': []}
+    assert run_main(monkeypatch, ['plan', '--verbose', '--json'], execute) == 0
+    output = capsys.readouterr()
+    assert len(output.out.splitlines()) == 1
+    assert json.loads(output.out)['ok']
+    assert 'oci: inspect: started' in output.err
+    assert 'oci: inspect: completed' in output.err
+
+
+def test_verbose_quiet_direct_execute_rejected_before_config(monkeypatch):
+    monkeypatch.setattr(cli, 'load', lambda *a, **kw: pytest.fail('Configuration read'))
+    with pytest.raises(DeployError) as error:
+        cli.execute(cli.parser().parse_args(['plan', '--verbose', '--quiet']))
+    assert error.value.code == 'invalid_usage'

@@ -8,6 +8,7 @@ import time
 import tempfile
 
 from .common import DeployError, local_path
+from .output import operation
 
 
 class Host:
@@ -68,13 +69,26 @@ class Host:
                 connection.get('user', 'ubuntu') + '@' + connection['ip']]
 
     def _remote(self, connection, action):
+        labels = {'bootstrap': 'SSH: host setup', 'plan': 'SSH: application plan',
+                  'converge': 'SSH: application convergence', 'status': 'SSH: application status'}
+        with operation(labels.get(action, 'SSH: host operation')):
+            return self._remote_request(connection, action)
+
+    def _remote_request(self, connection, action):
         source = Path(__file__).with_name('remote.py').read_text()
         request = {'action': action, 'deployment_id': self.state.deployment_id,
                    'applications': self.config.get('once', {}).get('applications', [])}
         # Only non-secret program text is sent as the SSH command. Data uses stdin.
         command = 'sudo python3 -c ' + shlex.quote(source)
-        result = subprocess.run(self._argv(connection) + [command], input=json.dumps(request),
-                                capture_output=True, text=True, timeout=1200)
+        try:
+            result = subprocess.run(self._argv(connection) + [command], input=json.dumps(request),
+                                    capture_output=True, text=True, timeout=1200)
+        except subprocess.TimeoutExpired:
+            raise DeployError('SSH host operation timed out; remote work may still be running.',
+                              code='command_timeout') from None
+        except OSError:
+            raise DeployError('SSH could not be started; check OpenSSH installation.',
+                              code='command_unavailable') from None
         if result.returncode:
             try:
                 response = json.loads(result.stdout)
@@ -93,14 +107,15 @@ class Host:
 
     def bootstrap(self, connection, operation_id):
         step = self.state.intent(operation_id, 'host-bootstrap', {})
-        deadline = time.monotonic() + 360
-        while True:
-            result = subprocess.run(self._argv(connection) + ['true'], capture_output=True)
-            if result.returncode == 0:
-                break
-            if time.monotonic() >= deadline:
-                raise DeployError('SSH readiness timed out; check network and pinned host key')
-            time.sleep(5)
+        with operation('SSH: readiness'):
+            deadline = time.monotonic() + 360
+            while True:
+                result = subprocess.run(self._argv(connection) + ['true'], capture_output=True)
+                if result.returncode == 0:
+                    break
+                if time.monotonic() >= deadline:
+                    raise DeployError('SSH readiness timed out; check network and pinned host key', code='command_timeout')
+                time.sleep(5)
         result = self._remote(connection, 'bootstrap')
         self.state.complete(step, result)
         return result
@@ -118,7 +133,8 @@ class Host:
         return self._remote(connection, 'status')
 
     def ssh(self, connection, command=None):
-        return subprocess.call(self._argv(connection) + ([command] if command else []))
+        with operation('SSH: session'):
+            return subprocess.call(self._argv(connection) + ([command] if command else []))
 
 
 SAFE_ERRORS = {'unfinished deployment; operator recovery required',

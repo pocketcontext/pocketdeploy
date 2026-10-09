@@ -6,7 +6,9 @@ from pocketdeploy.state import State
 
 
 @pytest.fixture
-def adapter(tmp_path):
+def adapter(tmp_path, monkeypatch):
+    monkeypatch.delenv("OCI_CLI_SECURITY_TOKEN_FILE", raising=False)
+    monkeypatch.setenv("OCI_CLI_CONFIG_FILE", str(tmp_path / "absent-config"))
     config = {'profile': 'test', 'oci-compartment-id': 'compartment', 'oci-subnet-id': 'subnet',
               'oci-availability-domain': 'AD1', 'oci-shape': 'VM.Standard.A1.Flex',
               'oci-ocpus': 1, 'oci-memory-in-gbs': 6, 'oci-image-id': 'image',

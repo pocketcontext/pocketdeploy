@@ -12,7 +12,7 @@ class DeployError(Exception):
         self.stage = stage
 
 
-def run(args, *, input=None, timeout=120, env=None):
+def run(args, *, input=None, timeout=120, env=None, error_classifier=None):
     try:
         r = subprocess.run(args, input=input, capture_output=True, text=True,
                            timeout=timeout, env=env)
@@ -21,6 +21,10 @@ def run(args, *, input=None, timeout=120, env=None):
     except OSError:
         raise DeployError('Command unavailable; output suppressed.', code="command_unavailable") from None
     if r.returncode:
+        if error_classifier is not None:
+            classified = error_classifier(r.stderr)
+            if classified is not None:
+                raise classified from None
         raise DeployError('Command failed; output suppressed.', code='command_failed') from None
     return r.stdout
 

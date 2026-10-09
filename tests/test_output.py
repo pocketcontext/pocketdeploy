@@ -68,3 +68,51 @@ def test_status_reports_unhealthy_and_does_not_dump_unknown_fields():
 ])
 def test_command_summaries(command, result, expected):
     assert expected in '\n'.join(text_result(command, result))
+
+
+@pytest.mark.parametrize('verbose', [False, True])
+def test_operation_only_verbose_and_reporter_scope_resets(capsys, verbose):
+    from pocketdeploy.output import operation
+    reporter = Reporter(json_mode=True, verbose=verbose, command='plan')
+    with reporter.activate():
+        with operation('oci: inspect'):
+            pass
+    with operation('outside scope'):
+        pass
+    reporter.success({'actions': []})
+    output = capsys.readouterr()
+    assert json.loads(output.out)['ok']
+    assert ('oci: inspect: completed' in output.err) == verbose
+    assert 'outside scope' not in output.err
+
+
+@pytest.mark.parametrize('failure', [None, RuntimeError('PRIVATE_SENTINEL'), KeyboardInterrupt()])
+def test_verbose_waiting_and_worker_cleanup(capsys, failure):
+    import threading
+    from pocketdeploy.output import operation
+    reporter = Reporter(verbose=True, heartbeat_interval=0.005)
+    waiting = threading.Event()
+    original = reporter.progress
+    def progress(message):
+        original(message)
+        if 'still waiting' in message:
+            waiting.set()
+    reporter.progress = progress
+    def work():
+        with reporter.activate(), reporter.stage('workflow'), operation('ssh: inspect'):
+            assert waiting.wait(2), 'Heartbeat was not emitted'
+            if failure:
+                raise failure
+    if failure:
+        with pytest.raises(type(failure)):
+            work()
+    else:
+        work()
+    output = capsys.readouterr()
+    assert not output.out
+    assert 'ssh: inspect: still waiting' in output.err
+    assert 'PRIVATE_SENTINEL' not in output.err
+    assert reporter.current_stage is None
+    assert reporter._active_spans == []
+    assert not [thread for thread in threading.enumerate() if thread.name == 'pocketdeploy-progress']
+    assert output.err.splitlines()[-1].startswith('workflow: failed' if failure else 'workflow: completed')

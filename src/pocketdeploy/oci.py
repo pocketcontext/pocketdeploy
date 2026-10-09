@@ -1,16 +1,89 @@
 """OCI CLI adapter. Cloud responses stay private; ownership is never name-based."""
 import base64
+import configparser
+import math
+import os
+from pathlib import Path
+import re
 import ipaddress
 import json
 import time
 from .common import DeployError, run
+from .output import operation
 
 
 class OCI:
     def __init__(self, config, state=None):
         self.config, self.state = config, state
 
+    def _refresh_guidance(self):
+        profile = self.config.get('oci-config-file-profile', 'DEFAULT')
+        # Only conventional profile names may enter a displayed command.
+        if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}', profile):
+            return 'Refresh the configured OCI session, or authenticate again if refresh fails.'
+        return (f'Run `oci session refresh --profile {profile}` using the same OCI config file; '
+                f'if refresh fails, run `oci session authenticate --profile-name {profile}`.')
+
+    def _check_token(self):
+        """Best-effort expiry check, not token validation; never emit token data."""
+        if self.config.get('oci-auth', 'security_token') != 'security_token':
+            return
+        try:
+            token_path = os.environ.get('OCI_CLI_SECURITY_TOKEN_FILE')
+            if not token_path:
+                path = Path(os.environ.get('OCI_CLI_CONFIG_FILE', '~/.oci/config')).expanduser()
+                parser = configparser.ConfigParser(interpolation=None)
+                with path.open() as source:
+                    text = source.read(1024 * 1024 + 1)
+                if len(text) > 1024 * 1024:
+                    return
+                parser.read_string(text)
+                profile = self.config.get('oci-config-file-profile', 'DEFAULT')
+                token_path = parser[profile].get('security_token_file')
+            if not token_path:
+                return
+            with Path(token_path).expanduser().open() as source:
+                token = source.read(65537).strip()
+            if len(token) > 65536:
+                return
+            parts = token.split('.')
+            if len(parts) != 3:
+                return
+            payload = parts[1]
+            data = json.loads(base64.b64decode(payload + '=' * (-len(payload) % 4),
+                                              altchars=b'-_', validate=True))
+            expiry = data.get('exp') if isinstance(data, dict) else None
+            if (isinstance(expiry, bool) or not isinstance(expiry, (int, float))
+                    or not math.isfinite(expiry)):
+                return
+        except (OSError, UnicodeError, ValueError, KeyError, OverflowError, RecursionError, configparser.Error):
+            # Let OCI handle unsupported/missing configuration; don't misdiagnose it.
+            return
+        if expiry <= time.time():
+            raise DeployError('OCI security token has expired. ' + self._refresh_guidance(),
+                              code='oci_token_expired')
+
+    def _auth_error(self, stderr):
+        # OCI emits ServiceError followed by JSON. Parse only this known envelope.
+        # All message/request/debug fields remain private and are discarded.
+        marker = 'ServiceError:'
+        if marker not in stderr or len(stderr) > 1024 * 1024:
+            return None
+        try:
+            data = json.loads(stderr.split(marker, 1)[1].strip())
+        except (ValueError, TypeError, RecursionError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        if data.get('status') == 401 or data.get('code') == 'NotAuthenticated':
+            return DeployError('OCI authentication failed; credentials were rejected. '
+                               'Check the configured OCI profile and authentication method. '
+                               + (self._refresh_guidance() if self.config.get('oci-auth', 'security_token')
+                                  == 'security_token' else ''), code='oci_authentication_failed')
+        return None
+
     def _call(self, *args, body=None, timeout=180):
+        self._check_token()
         command = ['oci', '--auth', self.config.get('oci-auth', 'security_token'),
                    '--profile', self.config.get('oci-config-file-profile', 'DEFAULT'), '--output', 'json']
         if self.config.get('oci-region'):
@@ -18,7 +91,19 @@ class OCI:
         command += list(args)
         if body is not None:
             command += ['--from-json', 'file:///dev/stdin']
-        output = run(command, input=json.dumps(body) if body is not None else None, timeout=timeout)
+        # The operation label uses only known command vocabulary, never arguments.
+        vocabulary = {'compute', 'instance', 'list', 'list-vnics', 'get', 'launch',
+                      'terminate', 'boot-volume-attachment', 'image', 'network',
+                      'subnet', 'nsg', 'rules', 'add', 'remove', 'create', 'delete',
+                      'update', 'bv', 'boot-volume', 'vnic'}
+        label = []
+        for arg in args:
+            if arg not in vocabulary:
+                break
+            label.append(arg)
+        with operation('oci: ' + (' '.join(label) or 'request')):
+            output = run(command, input=json.dumps(body) if body is not None else None,
+                         timeout=timeout, error_classifier=self._auth_error)
         # OCI CLI render() suppresses all output for a successful empty list.
         # Accept that exact representation only for our known list commands;
         # malformed JSON/null data and failed commands remain errors.
