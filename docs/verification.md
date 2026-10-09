@@ -398,3 +398,13 @@ reports verified. Do not describe the replacement website as live yet.
 Published source 363e79dd27e53293f4a12a6f53bab4c51c39134b and launcher pin
 9932c4ebd2b6d90565a1446759c2726aff78a09d both passed GitHub CI. The portable
 launcher passed 19 checks, including fast local expired-token rejection.
+
+### Recreation completed (2026-10-10)
+
+Resend subsequently verified the sending domain and all four email DNS records.
+Resumed convergence completed in 47.462 seconds, creating the website application
+and GitHub environment pocketdeploy-oci-test. The replacement VPS is
+130.61.212.72. Public HTTPS verification returned 200 for www.bigconfig.online;
+the application was running and healthy, with zero pending host operations.
+The full owned-resource delete/recreate cycle is now complete. No test email
+or Vault backup was performed during this completion.
