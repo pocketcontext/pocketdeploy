@@ -38,12 +38,14 @@ def _save_file(config, path, name, document=None):
 
 
 def _files(config):
+    private_key = config.get('ssh-private-key-file', '.ssh/id_ed25519')
+    host_private_key = config.get('ssh-host-private-key-file', '.ssh/host_ed25519')
     names = ['.envrc.private',
-            config.get('ssh-private-key-file', '.ssh/id_ed25519'),
-            config.get('ssh-public-key-file', '.ssh/id_ed25519.pub'),
+            private_key,
+            config.get('ssh-public-key-file', f'{private_key}.pub'),
             config.get('ssh-known-hosts-file', '.ssh/known_hosts'),
-            config.get('ssh-host-private-key-file', '.ssh/host_ed25519'),
-            config.get('ssh-host-public-key-file', '.ssh/host_ed25519.pub')]
+            host_private_key,
+            config.get('ssh-host-public-key-file', f'{host_private_key}.pub')]
     if any(not isinstance(name, str) or Path(name).is_absolute() or '..' in Path(name).parts for name in names):
         raise DeployError('Recovery file configuration must use relative deployment paths.')
     reserved = {Path('colors.yml'), Path('.envrc'), Path(config.get('state-file', '.colors.sqlite'))}
@@ -73,7 +75,7 @@ def _legacy_files(config):
 
 def _config_hash(path):
     if not path.is_file() or path.stat().st_size > MAX_FILE_SIZE:
-        raise DeployError('Restore matching colors.yml from Git before saving or restoring private state.')
+        raise DeployError('Restore matching configuration from Git before saving or restoring private state.')
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
@@ -99,9 +101,10 @@ def _provenance(config, root):
 def _check_configuration(config, root, expected_hash):
     caller_root = Path(config.get('_root', root)).resolve()
     caller = local_path(caller_root, config.get('_file', 'colors.yml'))
-    destination = local_path(root, 'colors.yml')
+    destination = local_path(root, caller.relative_to(caller_root))
     if _config_hash(caller) != expected_hash or _config_hash(destination) != expected_hash:
-        raise DeployError('Recovery configuration differs from the checkpoint; restore matching colors.yml from Git first.')
+        raise DeployError('Recovery configuration differs from the checkpoint; restore matching configuration from Git first.')
+    return destination
 
 
 def save(config, state, root):
@@ -188,10 +191,11 @@ def restore(config, root, document, version, overwrite=False):
             expected_hash = _config_hash(old_config)
         else:
             expected_hash = provenance['sha256']
-        _check_configuration(config, root, expected_hash)
+        configuration = _check_configuration(config, root, expected_hash)
         destinations = [(name, local_path(root, name)) for name in _files(config)]
         targets = [destination, *(path for _, path in destinations)]
-        if len(set(targets)) != len(targets) or local_path(root, 'colors.yml') in targets:
+        if (len(set(targets)) != len(targets)
+                or {configuration, local_path(root, 'colors.yml')}.intersection(targets)):
             raise DeployError('Recovery destinations must be distinct.')
         if any(path.exists() for path in targets) and not overwrite:
             raise DeployError('Recovery destination exists; explicit overwrite is required.')

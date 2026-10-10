@@ -65,6 +65,33 @@ def test_pruning_keeps_pending_and_foreign_keys(tmp_path):
         assert state.safe_status()['pending_steps'] == 1
 
 
+@pytest.mark.parametrize('outcome', ['failed', 'interrupted', 'succeeded'])
+def test_pruning_preserves_finished_operations_until_pending_steps_resolve(tmp_path, outcome):
+    with State(tmp_path / 'state', 'test', {}, create=True) as state:
+        unresolved = state.begin_operation('converge', 'hash')
+        first_step = state.intent(unresolved, 'create-instance', {'name': 'synthetic'})
+        last_step = state.intent(unresolved, 'create-firewall', {})
+        state.finish_operation(unresolved, outcome)
+        for _ in range(103):
+            operation = state.begin_operation('converge', 'hash')
+            state.finish_operation(operation, 'succeeded')
+        assert state.db.execute('SELECT count(*) FROM operations').fetchone()[0] == 101
+        assert state.safe_status()['pending_steps'] == 2
+        assert state.db.execute('SELECT payload FROM steps WHERE id=?', (first_step,)).fetchone()[0] == json.dumps({'name': 'synthetic'})
+
+        state.complete(first_step, {'id': 'synthetic-instance'})
+        state.finish_operation(state.begin_operation('converge', 'hash'), 'succeeded')
+        assert state.safe_status()['pending_steps'] == 1
+        assert state.db.execute('SELECT count(*) FROM steps WHERE operation_id=?', (unresolved,)).fetchone()[0] == 2
+
+        state.complete(last_step, {'id': 'synthetic-firewall'})
+        state.finish_operation(state.begin_operation('converge', 'hash'), 'succeeded')
+        assert state.safe_status()['pending_steps'] == 0
+        assert state.db.execute('SELECT count(*) FROM operations').fetchone()[0] == 100
+        assert state.db.execute('SELECT id FROM operations WHERE id=?', (unresolved,)).fetchone() is None
+        assert state.db.execute('SELECT count(*) FROM steps WHERE operation_id=?', (unresolved,)).fetchone()[0] == 0
+
+
 def test_readonly_and_invalid_state_unchanged(tmp_path):
     path = tmp_path / 'state'
     with State(path, 'test', {}, create=True):

@@ -14,7 +14,7 @@ def retired_host(tmp_path, monkeypatch):
     monkeypatch.setattr(remote.shutil, 'which', lambda _: '/usr/bin/docker')
     home = tmp_path / 'home'
     (home / '.ssh').mkdir(parents=True)
-    monkeypatch.setattr(remote.pwd, 'getpwnam', lambda _: SimpleNamespace(pw_dir=str(home), pw_uid=0, pw_gid=0))
+    monkeypatch.setattr(remote.pwd, 'getpwnam', lambda _: SimpleNamespace(pw_dir=str(home), pw_uid=remote.os.getuid(), pw_gid=remote.os.getgid()))
     monkeypatch.setattr(remote.os, 'chown', lambda *args: None)
     token = 'a' * 20
     directory = tmp_path / 'github'

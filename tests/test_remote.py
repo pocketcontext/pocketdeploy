@@ -202,7 +202,7 @@ def test_github_dispatcher_restricts_key_and_command(tmp_path, monkeypatch):
     setup(tmp_path, monkeypatch)
     home = tmp_path / 'home'
     home.mkdir()
-    monkeypatch.setattr(remote.pwd, 'getpwnam', lambda _: SimpleNamespace(pw_dir=str(home), pw_uid=0, pw_gid=0))
+    monkeypatch.setattr(remote.pwd, 'getpwnam', lambda _: SimpleNamespace(pw_dir=str(home), pw_uid=remote.os.getuid(), pw_gid=remote.os.getgid()))
     monkeypatch.setattr(remote.os, 'chown', lambda *args: None)
     request = {'deployment_id': 'test', 'user': 'ubuntu', 'source': '# synthetic reconciler', 'targets': [
         {'app': app(), 'repository': 'example/app', 'public_key': 'ssh-ed25519 c3ludGhldGlj comment'}]}
@@ -222,7 +222,7 @@ def test_github_rotation_keeps_old_key_until_explicit_prune(tmp_path, monkeypatc
     setup(tmp_path, monkeypatch)
     home = tmp_path / 'home'
     home.mkdir()
-    monkeypatch.setattr(remote.pwd, 'getpwnam', lambda _: SimpleNamespace(pw_dir=str(home), pw_uid=0, pw_gid=0))
+    monkeypatch.setattr(remote.pwd, 'getpwnam', lambda _: SimpleNamespace(pw_dir=str(home), pw_uid=remote.os.getuid(), pw_gid=remote.os.getgid()))
     monkeypatch.setattr(remote.os, 'chown', lambda *args: None)
     target = {'app': app(), 'repository': 'example/app', 'public_key': 'ssh-ed25519 b2xk comment'}
     request = {'deployment_id': 'test', 'user': 'ubuntu', 'source': '# synthetic', 'targets': [target]}
@@ -301,3 +301,103 @@ def test_once_deploy_failure_preserves_pending_and_stage(tmp_path, monkeypatch):
         remote.reconcile({'action': 'converge', 'deployment_id': 'test', 'applications': [app()]})
     assert remote.STAGE == 'application-deploy'
     assert len(list(tmp_path.glob('*.pending'))) == 1
+
+
+@pytest.mark.parametrize('legacy', [False, True])
+def test_release_digest_then_tag_converge_is_noop(tmp_path, monkeypatch, legacy):
+    setup(tmp_path, monkeypatch)
+    digest = 'example/app@sha256:' + 'a' * 64
+    desired = app()
+    if legacy:
+        previous = app()
+        previous['image'] = digest
+        remote.save(remote.MANIFEST, {'deployment_id': 'test', 'apps': {
+            desired['host']: {'desired': remote.normalized(previous), 'image_id': 'image-id'}}})
+    with patch.object(remote, 'containers', return_value={desired['host']: current()}), \
+         patch.object(remote, 'resolve_image', return_value=(digest, 'image-id')) as resolve, \
+         patch.object(remote, 'run') as run:
+        release = {**desired, 'deploy-image': digest}
+        if not legacy:
+            assert remote.reconcile({'action': 'converge', 'deployment_id': 'test', 'applications': [release]})['actions'] == []
+            resolve.assert_called_with(digest)
+        assert remote.reconcile({'action': 'converge', 'deployment_id': 'test', 'applications': [desired]})['actions'] == []
+        resolve.assert_called_with(desired['image'])
+        run.assert_not_called()
+    record = json.loads(remote.MANIFEST.read_text())['apps'][desired['host']]
+    assert record['desired']['image'] == desired['image']
+    assert record['image_digest'] == digest
+
+
+def test_legacy_digest_migration_preserves_settings_drift_detection():
+    previous = {'desired': remote.normalized(app()), 'image_id': 'image-id'}
+    previous['desired']['image'] = 'example/app@sha256:' + 'a' * 64
+    actual = current()
+    assert not remote.matching(app(), actual, previous)
+    assert not remote.matching(app(), actual, previous, ('digest', 'different-id'))
+    actual['settings']['env']['FOO'] = 'drift'
+    assert not remote.matching(app(), actual, previous, ('digest', 'image-id'))
+
+
+@pytest.mark.parametrize('attack', ['directory', 'authorized-symlink', 'authorized-hardlink', 'temporary-symlink', 'temporary-hardlink'])
+def test_authorized_keys_never_follows_links(tmp_path, attack):
+    from types import SimpleNamespace
+    account = SimpleNamespace(pw_dir=str(tmp_path), pw_uid=remote.os.getuid(), pw_gid=remote.os.getgid())
+    victim = tmp_path / 'victim'
+    victim.write_text('preserve me')
+    ssh = tmp_path / '.ssh'
+    if attack == 'directory':
+        target = tmp_path / 'other'
+        target.mkdir()
+        ssh.symlink_to(target, target_is_directory=True)
+    else:
+        ssh.mkdir()
+        name = 'authorized_keys' if attack.startswith('authorized') else 'authorized_keys.pocketdeploy.tmp'
+        path = ssh / name
+        if attack.endswith('symlink'):
+            path.symlink_to(victim)
+        else:
+            remote.os.link(victim, path)
+    if attack.startswith('temporary'):
+        remote.authorized_keys(account, ['ssh-ed25519 synthetic operator'])
+        assert (ssh / 'authorized_keys').read_text() == 'ssh-ed25519 synthetic operator\n'
+    else:
+        with pytest.raises((OSError, RuntimeError)):
+            remote.authorized_keys(account, ['ssh-ed25519 synthetic operator'])
+    assert victim.read_text() == 'preserve me'
+
+
+def test_authorized_keys_read_does_not_create_directory(tmp_path):
+    from types import SimpleNamespace
+    account = SimpleNamespace(pw_dir=str(tmp_path), pw_uid=remote.os.getuid(), pw_gid=remote.os.getgid())
+    assert remote.authorized_keys(account) == []
+    assert not (tmp_path / '.ssh').exists()
+
+
+def test_ci_release_keeps_configured_tag_after_replacement(tmp_path, monkeypatch):
+    setup(tmp_path, monkeypatch)
+    digest = 'example/app@sha256:' + 'b' * 64
+    desired = {**app(), 'deploy-image': digest}
+    old = current()
+    stopped = {**old, 'running': False, 'restart': 'no'}
+    new = {**old, 'id': 'replacement', 'image_id': 'new-image'}
+    with patch.object(remote, 'containers', side_effect=[{app()['host']: old}, {app()['host']: stopped},
+                                                       {app()['host']: new}, {app()['host']: new}]), \
+         patch.object(remote, 'resolve_image', return_value=(digest, 'new-image')), \
+         patch.object(remote, 'run') as run:
+        assert remote.reconcile({'action': 'converge', 'deployment_id': 'test', 'applications': [desired]})['actions'] == [
+            {'host': app()['host'], 'action': 'update'}]
+    record = json.loads(remote.MANIFEST.read_text())['apps'][app()['host']]
+    assert record['desired']['image'] == app()['image']
+    assert record['image_digest'] == digest
+    assert record['image_id'] == 'new-image'
+    assert any('--image' in call.args and digest in call.args for call in run.call_args_list)
+    with patch.object(remote, 'containers', return_value={app()['host']: new}), \
+         patch.object(remote, 'resolve_image', return_value=(digest, 'new-image')), patch.object(remote, 'run') as run:
+        assert remote.reconcile({'action': 'converge', 'deployment_id': 'test', 'applications': [app()]})['actions'] == []
+        run.assert_not_called()
+
+
+@pytest.mark.parametrize('image', ['registry.example:5000/team/app', 'registry.example:5000/team/app:latest',
+                                  'registry.example:5000/team/app@sha256:' + 'a' * 64])
+def test_image_repository_preserves_registry_port(image):
+    assert remote.image_repository(image) == 'registry.example:5000/team/app'

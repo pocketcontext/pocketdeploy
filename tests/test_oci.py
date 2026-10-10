@@ -512,3 +512,151 @@ def test_firewall_delete_polls_eventual_absence_without_repeating_mutation(adapt
     assert adapter.state.get_resource('firewall') is None
     assert adapter.state.get_meta('oci-delete-firewall') is None
     assert adapter.state.safe_status()['pending_steps'] == 0
+
+@pytest.mark.parametrize('failure', ['add-before', 'add-after', 'remove-after', None])
+def test_firewall_preserves_access_and_recovers_without_duplicate_add(adapter, monkeypatch, failure):
+    old = dict(adapter._rules()[1], source='198.51.100.0/24', id='old')
+    rules = [old]
+    calls = []
+    def call(*args, body=None, **kwargs):
+        if args[3] == 'list':
+            return list(rules)
+        calls.append(args[3])
+        if args[3] == 'add':
+            if failure == 'add-before':
+                raise DeployError('lost response')
+            rules.extend(dict(rule, id=str(i)) for i, rule in enumerate(body['securityRules']))
+            if failure == 'add-after':
+                raise DeployError('lost response')
+        else:
+            assert {adapter._normalized(r) for r in adapter._rules()} <= {adapter._normalized(r) for r in rules}
+            rules[:] = [r for r in rules if r['id'] not in body['securityRuleIds']]
+            if failure == 'remove-after':
+                raise DeployError('lost response')
+    monkeypatch.setattr(adapter, '_call', call)
+    operation = adapter.state.begin_operation('converge', 'hash')
+    if failure:
+        with pytest.raises(DeployError):
+            adapter._reconcile_rules('firewall-id', operation)
+        if failure == 'add-before':
+            assert rules == [old]
+            with pytest.raises(DeployError, match='uncertain'):
+                adapter._reconcile_rules('firewall-id', operation)
+            assert calls == ['add']
+            return
+    adapter._reconcile_rules('firewall-id', operation)
+    assert calls == ['add', 'remove']
+    assert adapter._rules_equal(rules)
+    assert adapter.state.get_meta('oci-pending-firewall-rules') is None
+    assert adapter.state.safe_status()['pending_steps'] == 0
+
+
+def test_adopt_rejects_recorded_conflict_before_provider_calls(adapter, monkeypatch):
+    adapter._remember('compute', resource(adapter))
+    monkeypatch.setattr(adapter, '_call', lambda *a, **kw: pytest.fail('provider call'))
+    with pytest.raises(DeployError, match='conflicts'):
+        adapter.adopt('another-instance', 'unused')
+
+
+def test_adopt_records_boot_volume_and_firewall(adapter, monkeypatch):
+    item = resource(adapter, **{'compartment-id': 'compartment'})
+    monkeypatch.setattr(adapter, '_call', lambda *a, **kw: item)
+    monkeypatch.setattr(adapter, '_find', lambda role: resource(adapter, role))
+    monkeypatch.setattr(adapter, '_storage_drift', lambda item: [])
+    monkeypatch.setattr(adapter, '_network_drift', lambda *args: [])
+    monkeypatch.setattr(adapter, '_read_boot_volume', lambda item: {
+        'id': 'boot', 'freeform-tags': adapter._tags('boot-volume')})
+    monkeypatch.setattr(adapter, 'connection', lambda: {'ip': '192.0.2.1'})
+    operation = adapter.state.begin_operation('adopt', 'hash')
+    adapter.adopt('compute-id', operation)
+    assert adapter.state.get_resource('compute')['provider_id'] == 'compute-id'
+    assert adapter.state.get_resource('firewall')['provider_id'] == 'firewall-id'
+    assert adapter.state.get_resource('boot-volume')['provider_id'] == 'boot'
+
+
+def test_null_creation_preserves_pending_intent(adapter):
+    operation = adapter.state.begin_operation('converge', 'hash')
+    with pytest.raises(DeployError, match='invalid creation'):
+        adapter._create('compute', operation, lambda: None)
+    assert adapter.state.get_meta('oci-pending-compute')
+
+
+def test_null_adoption_is_safe_error(adapter, monkeypatch):
+    monkeypatch.setattr(adapter, '_call', lambda *a, **kw: None)
+    with pytest.raises(DeployError, match='invalid instance'):
+        adapter.adopt('compute-id', 'unused')
+
+
+def test_adopt_reuses_pending_step_after_volume_failure(adapter, monkeypatch):
+    item = resource(adapter, **{'compartment-id': 'compartment'})
+    monkeypatch.setattr(adapter, '_call', lambda *a, **kw: item)
+    monkeypatch.setattr(adapter, '_find', lambda role: resource(adapter, role))
+    monkeypatch.setattr(adapter, '_storage_drift', lambda item: [])
+    monkeypatch.setattr(adapter, '_network_drift', lambda *args: [])
+    attempts = []
+    def boot(item):
+        attempts.append(item['id'])
+        if len(attempts) == 1:
+            raise DeployError('volume tagging response lost')
+    monkeypatch.setattr(adapter, '_boot_volume', boot)
+    monkeypatch.setattr(adapter, 'connection', lambda: {})
+    operation = adapter.state.begin_operation('adopt', 'hash')
+    with pytest.raises(DeployError, match='lost'):
+        adapter.adopt('compute-id', operation)
+    assert adapter.state.get_resource('compute') is None
+    assert adapter.state.safe_status()['pending_steps'] == 1
+    adapter.adopt('compute-id', adapter.state.begin_operation('adopt', 'hash'))
+    assert adapter.state.safe_status()['pending_steps'] == 0
+    assert adapter.state.get_meta('oci-pending-adopt') is None
+
+
+@pytest.mark.parametrize('desired_present', [True, False])
+def test_legacy_pending_firewall_step_requires_observed_resolution(adapter, monkeypatch, desired_present):
+    operation = adapter.state.begin_operation('converge', 'hash')
+    adapter.state.intent(operation, 'firewall-rules', {'id': 'firewall-id'})
+    monkeypatch.setattr(adapter, '_call', lambda *a, **kw: adapter._rules() if desired_present else [])
+    if desired_present:
+        adapter._reconcile_rules('firewall-id', operation)
+        assert adapter.state.safe_status()['pending_steps'] == 0
+    else:
+        with pytest.raises(DeployError, match='legacy.*uncertain'):
+            adapter._reconcile_rules('firewall-id', operation)
+        assert adapter.state.safe_status()['pending_steps'] == 1
+
+
+def test_verified_historical_firewall_deletion_resolves_only_matching_rules(adapter):
+    operation = adapter.state.begin_operation('converge', 'hash')
+    adapter.state.intent(operation, 'firewall-rules', {'id': 'deleted-firewall'})
+    adapter.state.intent(operation, 'firewall-rules', {'id': 'unknown-firewall'})
+    deletion = adapter.state.intent(operation, 'delete-firewall', {'id': 'deleted-firewall'})
+    adapter.state.complete(deletion, {'deleted': True})
+    adapter.state.set_meta('oci-pending-firewall-rules', {'id': 'deleted-firewall'})
+    adapter._recover_deleted_rule_steps()
+    assert adapter.state.safe_status()['pending_steps'] == 1
+    assert adapter._pending_rule_steps('unknown-firewall')
+    assert adapter.state.get_meta('oci-pending-firewall-rules') is None
+
+
+def test_delete_clears_pending_firewall_update_after_verified_absence(adapter, monkeypatch):
+    adapter.config['compute-prevent-destroy'] = False
+    adapter._remember('firewall', resource(adapter, 'firewall'))
+    operation = adapter.state.begin_operation('converge', 'hash')
+    step = adapter.state.intent(operation, 'firewall-rules', {'id': 'firewall-id'})
+    adapter.state.set_meta('oci-pending-firewall-rules', {'id': 'firewall-id', 'step': step})
+    monkeypatch.setattr(adapter, 'plan_delete', lambda: [])
+    monkeypatch.setattr(adapter, '_volumes_for_delete', lambda: [])
+    deleted = []
+    monkeypatch.setattr(adapter, '_find', lambda role, **kw: resource(adapter, 'firewall') if role == 'firewall' and not deleted else None)
+    monkeypatch.setattr(adapter, '_call', lambda *a, **kw: deleted.append(True))
+    adapter.delete(operation)
+    assert adapter.state.get_meta('oci-pending-firewall-rules') is None
+    assert adapter.state.safe_status()['pending_steps'] == 0
+
+
+def test_adopt_missing_firewall_refused_even_during_provisioning(adapter, monkeypatch):
+    item = resource(adapter, **{'compartment-id': 'compartment', 'lifecycle-state': 'PROVISIONING'})
+    monkeypatch.setattr(adapter, '_call', lambda *a, **kw: item)
+    monkeypatch.setattr(adapter, '_find', lambda role: None)
+    with pytest.raises(DeployError, match='running compute and its owned firewall'):
+        adapter.adopt('compute-id', 'unused')
+    assert adapter.state.resources() == []

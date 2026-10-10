@@ -9,12 +9,13 @@ from pocketdeploy.common import DeployError
 from pocketdeploy.state import State
 
 
-def setup_files(root):
+def setup_files(root, filename='colors.yml'):
     root.mkdir(exist_ok=True)
     config = {'profile': 'synthetic', 'vault-id': 'synthetic-vault',
-              '_root': str(root), '_file': str(root / 'colors.yml'),
+              '_root': str(root), '_file': str(root / filename),
               'oci-config-file-profile': 'test', 'oci-compartment-id': 'test', 'oci-subnet-id': 'test'}
-    (root / 'colors.yml').write_text('synthetic public configuration')
+    (root / filename).parent.mkdir(parents=True, exist_ok=True)
+    (root / filename).write_text('synthetic public configuration')
     for name in vault._files(config):
         path = root / name
         path.parent.mkdir(exist_ok=True)
@@ -26,9 +27,13 @@ def scope():
     return {'provider': 'oci', 'profile': 'test', 'region': '', 'compartment': 'test', 'subnet': 'test'}
 
 
-def test_versioned_roundtrip(tmp_path, monkeypatch):
+@pytest.mark.parametrize('filename', ['colors.yml', 'custom.yml', 'nested/custom.yml'])
+@pytest.mark.parametrize('relative', [False, True])
+def test_versioned_roundtrip(tmp_path, monkeypatch, filename, relative):
     root = tmp_path / 'source'
-    config = setup_files(root)
+    config = setup_files(root, filename)
+    if relative:
+        config['_file'] = filename
     storage = {}
     calls = []
 
@@ -47,6 +52,9 @@ def test_versioned_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setattr(vault, '_command', command)
     with State(root / '.colors.sqlite', 'synthetic', scope(), create=True) as state:
         state.set_meta('private', 'synthetic-secret')
+        rotation = {'instance_id': 'synthetic-instance', 'private': 'synthetic-rotated-private',
+                    'public': 'ssh-ed25519 synthetic-rotated-public', 'verified': True}
+        state.set_meta('ssh-host-trust', rotation)
         first = vault.save(config, state, root)
         second = vault.save(config, state, root)
         receipt = state.safe_status()['last_vault_backup']
@@ -60,16 +68,71 @@ def test_versioned_roundtrip(tmp_path, monkeypatch):
         vault._save_file(config, root / '.envrc.private', 'test', old_ref['document'])
     restored = tmp_path / 'restored'
     restored.mkdir()
-    shutil.copyfile(root / 'colors.yml', restored / 'colors.yml')
+    (restored / filename).parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(root / filename, restored / filename)
+    original_config = (restored / filename).stat().st_ino
     result = vault.restore(config, restored, second['state_document'], second['state_version'])
     assert result['reconciliation_required']
+    assert (restored / filename).stat().st_ino == original_config
     with State(restored / '.colors.sqlite', 'synthetic', scope()) as state:
         assert state.get_meta('private') == 'synthetic-secret'
+        assert state.get_meta('ssh-host-trust') == rotation
+        assert 'synthetic-rotated-private' not in json.dumps(state.safe_status())
         assert len(state.get_meta('vault-files')) == 6
     assert (restored / '.envrc.private').read_text() == 'synthetic private data'
     assert (restored / '.envrc.private').stat().st_mode & 0o777 == 0o600
     with pytest.raises(DeployError, match='overwrite'):
         vault.restore(config, restored, second['state_document'], second['state_version'])
+
+
+@pytest.mark.parametrize('explicit_public', [False, True])
+@pytest.mark.parametrize('default_decoys', [False, True])
+def test_custom_key_paths_roundtrip(tmp_path, monkeypatch, explicit_public, default_decoys):
+    root = tmp_path / 'source'
+    config = setup_files(root)
+    for name in ('.ssh/id_ed25519.pub', '.ssh/host_ed25519.pub'):
+        (root / name).unlink()
+        if default_decoys:
+            (root / name).write_bytes(b'unrelated default public key')
+    config.update({'ssh-private-key-file': '.keys/operator',
+                   'ssh-host-private-key-file': '.keys/server'})
+    operator_public = '.keys/operator.pub'
+    host_public = '.keys/server.pub'
+    if explicit_public:
+        operator_public = '.keys/operator-public'
+        host_public = '.keys/server-public'
+        config.update({'ssh-public-key-file': operator_public,
+                       'ssh-host-public-key-file': host_public})
+    expected = {name: name.encode() for name in (
+        '.envrc.private', '.keys/operator', operator_public,
+        '.ssh/known_hosts', '.keys/server', host_public)}
+    for name, content in expected.items():
+        path = root / name
+        path.parent.mkdir(exist_ok=True)
+        path.write_bytes(content)
+    storage = {}
+
+    def command(config, *args):
+        if args[0] == 'save':
+            document = 'document-' + str(len(storage))
+            storage[document] = Path(args[2]).read_bytes()
+            return {'id': document, 'version': 'v1'}
+        assert args[0] == 'restore'
+        Path(args[args.index('--to') + 1]).write_bytes(storage[args[1]])
+        return {}
+
+    monkeypatch.setattr(vault, '_command', command)
+    with State(root / '.colors.sqlite', 'synthetic', scope(), create=True) as state:
+        checkpoint = vault.save(config, state, root)
+        assert set(state.get_meta('vault-files')) == set(expected)
+    destination = tmp_path / 'restored'
+    destination.mkdir()
+    shutil.copyfile(root / 'colors.yml', destination / 'colors.yml')
+    vault.restore(config, destination, checkpoint['state_document'], checkpoint['state_version'])
+    for name, content in expected.items():
+        assert (destination / name).read_bytes() == content
+    assert not (destination / '.ssh/id_ed25519.pub').exists()
+    assert not (destination / '.ssh/host_ed25519.pub').exists()
 
 
 def test_manifest_cannot_restore_arbitrary_paths(tmp_path, monkeypatch):
@@ -260,3 +323,29 @@ def test_backup_paths_cannot_alias_excluded_files(tmp_path, name):
     config['ssh-private-key-file'] = name
     with pytest.raises(DeployError, match='must not include'):
         vault._files(config)
+
+
+@pytest.mark.parametrize('legacy', [False, True])
+@pytest.mark.parametrize('failure', ['missing', 'destination', 'caller', 'state-alias'])
+def test_custom_configuration_restore_safety(tmp_path, monkeypatch, legacy, failure):
+    config, destination, _, calls = stored_checkpoint(tmp_path, monkeypatch, legacy=legacy)
+    source_config = Path(config['_file'])
+    selected = source_config.with_name('custom.yml')
+    source_config.rename(selected)
+    config['_file'] = str(selected)
+    destination_config = destination / 'custom.yml'
+    # A matching default filename must not bypass verification of the selected one.
+    shutil.copyfile(destination / 'colors.yml', destination_config)
+    if failure == 'missing':
+        destination_config.unlink()
+    elif failure == 'destination':
+        destination_config.write_text('different destination configuration')
+    elif failure == 'caller':
+        selected.write_text('different caller configuration')
+    else:
+        config['state-file'] = 'custom.yml'
+    original_files = {p.name: p.read_bytes() for p in destination.iterdir()}
+    with pytest.raises(DeployError, match='Git|differs|distinct'):
+        vault.restore(config, destination, 'checkpoint', 'v1', overwrite=True)
+    assert calls == (['checkpoint', 'colors.yml'] if legacy else ['checkpoint'])
+    assert {p.name: p.read_bytes() for p in destination.iterdir()} == original_files

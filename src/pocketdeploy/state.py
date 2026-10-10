@@ -46,7 +46,7 @@ class State:
             raise DeployError('State paths must not contain symlinks.')
         exists = self.path.exists()
         if not exists and (not create or read_only):
-            raise DeployError('Deployment state is missing; restore or explicitly adopt it.')
+            raise DeployError('Deployment state is missing; restore it before continuing.')
         if exists:
             info = self.path.stat()
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
@@ -158,9 +158,15 @@ class State:
             raise DeployError('Invalid operation outcome.')
         with self.db:
             self.db.execute('UPDATE operations SET status=?,finished=CURRENT_TIMESTAMP WHERE id=?', (status, operation))
-            # Retain unfinished operations and the latest 100 completed operations.
-            self.db.execute('''DELETE FROM operations WHERE finished IS NOT NULL AND id NOT IN
-                (SELECT id FROM operations WHERE finished IS NOT NULL ORDER BY rowid DESC LIMIT 100)''')
+            # A finished workflow can still hold unresolved provider requests.
+            # Retain those alongside unfinished workflows and 100 resolved operations.
+            self.db.execute('''WITH resolved AS (
+                SELECT id, rowid AS sequence FROM operations
+                WHERE finished IS NOT NULL AND NOT EXISTS (
+                    SELECT 1 FROM steps WHERE operation_id=operations.id AND status='pending'
+                )
+            ) DELETE FROM operations WHERE id IN (SELECT id FROM resolved)
+                AND id NOT IN (SELECT id FROM resolved ORDER BY sequence DESC LIMIT 100)''')
 
     def intent(self, operation_id, step, payload):
         self._writable()

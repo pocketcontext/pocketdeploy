@@ -441,3 +441,88 @@ def test_real_verbose_init_reports_only_safe_local_progress(tmp_path, monkeypatc
     assert 'init: local preparation: started' in output.err
     assert 'init: local preparation: completed' in output.err
     assert len(output.out.splitlines()) == 1
+
+
+@pytest.mark.parametrize('command', [
+    'init', 'plan', 'converge', 'status', 'ssh', 'delete', 'smtp-test',
+    'adopt', 'vault-save', 'vault-restore',
+])
+def test_every_command_rejects_authority_overlap_before_local_or_external_work(tmp_path, monkeypatch, command):
+    (tmp_path / 'colors.yml').write_text(SYNTHETIC_CONFIG + '\nssh-known-hosts-file: .envrc.private\n')
+    bindings = tmp_path / '.envrc.private'
+    bindings.write_text('synthetic private binding')
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, 'deployment_lock', lambda *args: pytest.fail('Must reject before locking'))
+    monkeypatch.setattr(cli, 'OCI', lambda *args: pytest.fail('Must reject before provider access'))
+    with pytest.raises(DeployError, match='distinct paths'):
+        cli.execute(cli.parser().parse_args([command] + (['--to', 'test@example.com'] if command == 'smtp-test' else [])))
+    assert bindings.read_text() == 'synthetic private binding'
+    assert not (tmp_path / '.colors.sqlite').exists()
+
+
+def test_adopt_requires_existing_identity_without_creating_state(tmp_path, monkeypatch):
+    (tmp_path / 'colors.yml').write_text(SYNTHETIC_CONFIG)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, 'OCI', lambda *a, **kw: pytest.fail('provider created'))
+    with pytest.raises(DeployError, match='Existing deployment state is required'):
+        cli.execute(cli.parser().parse_args(['adopt', '--instance-id', 'synthetic-instance']))
+    assert not (tmp_path / '.colors.sqlite').exists()
+
+
+def test_rotate_host_key_requires_existing_state(tmp_path, monkeypatch):
+    (tmp_path / 'colors.yml').write_text(SYNTHETIC_CONFIG)
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(DeployError, match='Existing deployment state is required'):
+        cli.execute(cli.parser().parse_args(['rotate-host-key']))
+    assert not (tmp_path / '.colors.sqlite').exists()
+
+
+@pytest.mark.parametrize('recorded', [False, True])
+def test_rotate_host_key_dispatch_without_application_binding_or_convergence(tmp_path, monkeypatch, recorded):
+    from pocketdeploy.config import load, scope
+    (tmp_path / 'colors.yml').write_text(SYNTHETIC_CONFIG + '''once:
+  applications:
+    - host: synthetic.example.com
+      image: example/image:latest
+      env:
+        TOKEN: deliberately-absent-binding
+''')
+    monkeypatch.chdir(tmp_path)
+    config = load(tmp_path / 'colors.yml', env={}, resolve=False)
+    with cli.State(tmp_path / '.colors.sqlite', 'demo', scope(config), create=True) as state:
+        if recorded:
+            state.put_resource('compute', 'oci-compute', 'compute-id', {}, owned=True)
+    calls = []
+    class Host:
+        def __init__(self, *args): pass
+        def rotate_key(self, connection, operation):
+            calls.append('rotate')
+            assert connection == {'instance_id': 'compute-id'}
+            return {'verified': True}
+    class Cloud:
+        def __init__(self, *args): pass
+        def connection(self):
+            calls.append('connection')
+            return {'instance_id': 'compute-id'}
+    monkeypatch.setattr(cli, 'Host', Host)
+    monkeypatch.setattr(cli, 'OCI', Cloud)
+    monkeypatch.setattr(cli, 'converge', lambda *a, **kw: pytest.fail('converge called'))
+    args = cli.parser().parse_args(['rotate-host-key'])
+    if recorded:
+        assert cli.execute(args) == {'verified': True}
+        assert calls == ['connection', 'rotate']
+    else:
+        with pytest.raises(DeployError, match='recorded owned compute'):
+            cli.execute(args)
+        assert calls == []
+
+
+def test_rotate_host_key_rejects_dry_run_before_loading_config():
+    with pytest.raises(DeployError, match='dry-run'):
+        cli.execute(cli.parser().parse_args(['rotate-host-key', '--dry-run']))
+
+
+def test_rotate_host_key_readable_result_is_allowlisted():
+    from pocketdeploy.output import text_result
+    result = text_result('rotate-host-key', {'private': 'secret-sentinel', 'verified': True})
+    assert result == ['Host-key migration verified. Save a new Vault recovery checkpoint.']

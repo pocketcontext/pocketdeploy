@@ -4,6 +4,7 @@ import ipaddress
 import json
 import os
 import re
+import stat
 from pathlib import Path
 
 from blue.cli import load_yaml, read_pars, par_name
@@ -79,6 +80,9 @@ def validate(c):
     for key in ['oci-config-file-profile', 'oci-compartment-id', 'oci-subnet-id', 'oci-availability-domain']:
         if not isinstance(c.get(key), str) or not c[key].strip() or '<' in c[key]:
             raise DeployError('OCI profile, compartment, subnet and availability domain are required.')
+    user = c.get('ssh-user', 'ubuntu')
+    if not isinstance(user, str) or not re.fullmatch(r'[a-z_][a-z0-9_-]{0,31}', user):
+        raise DeployError('ssh-user must be a conventional lowercase Linux username of at most 32 characters.')
     for key in ['compute-prevent-destroy', 'compute-require-existing-state']:
         if key in c and type(c[key]) is not bool:
             raise DeployError('Protection and existing-state flags must be booleans.')
@@ -139,6 +143,44 @@ def validate(c):
             raise DeployError('Managed website DNS requires TLS enabled.')
         if app.get('manage-dns') and c['provider-dns'] != 'cloudflare':
             raise DeployError('manage-dns: true requires provider-dns: cloudflare.')
+
+    validate_local_paths(c)
+
+
+def validate_local_paths(c, root=None, *, state_path=None):
+    """Reject local authority collisions before locks, state or SSH writes."""
+    root = Path(root or c['_root']).resolve()
+    path = lambda name: local_path(root, name)
+    key = path(c.get('ssh-private-key-file', '.ssh/id_ed25519'))
+    hostkey = path(c.get('ssh-host-private-key-file', '.ssh/host_ed25519'))
+    authority = [key, path(c.get('ssh-public-key-file', str(key) + '.pub')),
+                 hostkey, path(c.get('ssh-host-public-key-file', str(hostkey) + '.pub')),
+                 path(c.get('ssh-known-hosts-file', '.ssh/known_hosts'))]
+    state = path(c.get('state-file', '.colors.sqlite'))
+    files = [*authority, path(os.path.abspath(c['_file']) if '_file' in c else 'colors.yml'), path('.envrc'),
+             path('.envrc.private'), state,
+             *(path(str(state) + suffix) for suffix in ('.lock', '-journal', '-wal', '-shm'))]
+    if state_path is not None:
+        actual_state = path(state_path)
+        if actual_state != state:
+            files.extend([actual_state, *(path(str(actual_state) + suffix)
+                           for suffix in ('.lock', '-journal', '-wal', '-shm'))])
+    workdir = path(c.get('workdir', '.colors'))
+    if (len(set(files)) != len(files) or workdir in files
+            or any(a in b.parents for a in files for b in [*files, workdir])):
+        raise DeployError('Deployment files must have distinct paths without overlaps.')
+    for target in [*files, workdir]:
+        # This namespace belongs to disposable GitHub keys, including keys for
+        # repositories removed from the current desired configuration.
+        if any(candidate.parent == root / '.ssh'
+               and re.fullmatch(r'github-[a-f0-9]{20}(?:\.pub)?', candidate.name)
+               for candidate in [target, *target.parents]):
+            raise DeployError('Deployment path overlaps reserved GitHub authority.')
+    for target in authority:
+        if target.exists():
+            info = target.stat()
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
+                raise DeployError('SSH files must be owned regular files without hardlinks.')
 
 
 def resolve_env(c, env):

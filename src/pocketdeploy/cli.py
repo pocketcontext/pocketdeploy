@@ -42,6 +42,7 @@ def parser():
   delete         Delete owned resources, subject to destruction protection
   smtp-test      Send one explicit SMTP test using --to
   adopt          Recover an existing instance with matching deployment UUID tags
+  rotate-host-key  Finish bootstrap host-key migration without application changes
 
 Vault commands (explicit checkpoints):
   vault-save     Save private bindings, recovery keys and SQLite to Vault
@@ -57,7 +58,7 @@ Examples:
 
 Configuration defaults to colors.yml in the current working directory.
 Use -f to select a deployment. Run without arguments to show this help.''')
-    p.add_argument('command', metavar='COMMAND', choices=['init', 'plan', 'converge', 'status', 'ssh', 'delete', 'adopt', 'smtp-test', 'vault-save', 'vault-restore'], help='Deployment or Vault command listed below')
+    p.add_argument('command', metavar='COMMAND', choices=['init', 'plan', 'converge', 'status', 'ssh', 'delete', 'adopt', 'smtp-test', 'rotate-host-key', 'vault-save', 'vault-restore'], help='Deployment or Vault command listed below')
     p.add_argument('-f', '--file', help='Configuration file (default: ./colors.yml in the current working directory)')
     p.add_argument('--json', action='store_true', help='Emit one versioned JSON result on stdout')
     p.add_argument('--verbose', action='store_true', help='Show safe request timings and waiting progress on stderr')
@@ -221,10 +222,11 @@ def execute(args, reporter=None):
     config_file = args.file if args.file is not None else 'colors.yml'
     if args.file is None and not Path(config_file).exists():
         raise DeployError('No colors.yml found in the current directory; use -f to select a configuration.')
-    config = load(config_file, resolve=args.command not in ('init', 'ssh', 'delete', 'vault-save', 'vault-restore', 'status', 'smtp-test'))
+    config = load(config_file, resolve=args.command not in ('init', 'ssh', 'delete', 'vault-save', 'vault-restore', 'status', 'smtp-test', 'rotate-host-key'))
     # Reject unsupported application behavior before any cloud mutation.
     from .host import validate_config
-    validate_config(config)
+    if args.command != 'rotate-host-key':
+        validate_config(config)
     root = Path(config['_root'])
     state_path = local_path(root, config['state-file'])
     if args.command == 'vault-restore':
@@ -234,10 +236,10 @@ def execute(args, reporter=None):
             with reporter.stage('vault-restore'):
                 return vault.restore(config, destination, args.document, args.version, args.overwrite)
     fresh = not state_path.exists()
-    if fresh and config['compute-require-existing-state']:
+    if fresh and (config['compute-require-existing-state'] or args.command in ('adopt', 'rotate-host-key')):
         raise DeployError('Existing deployment state is required; restore it before continuing.')
-    if fresh and args.command not in ('init', 'plan', 'converge', 'adopt'):
-        raise DeployError('Deployment state is missing; restore or explicitly adopt it.')
+    if fresh and args.command not in ('init', 'plan', 'converge'):
+        raise DeployError('Deployment state is missing; restore it before continuing.')
     with deployment_lock(state_path):
         manager = nullcontext(None) if fresh and read_only else State(state_path, config['profile'], scope(config), create=fresh, read_only=read_only)
         with manager as state:
@@ -245,7 +247,7 @@ def execute(args, reporter=None):
             if args.command == 'init':
                 with output_operation('init: local preparation'):
                     return initialize(config, state, host, root)
-            if state and config.get('provider-dns') != 'cloudflare' and any(r['kind'] == 'cloudflare-dns' and r['attributes'].get('type') == 'A' for r in state.resources()):
+            if args.command != 'rotate-host-key' and state and config.get('provider-dns') != 'cloudflare' and any(r['kind'] == 'cloudflare-dns' and r['attributes'].get('type') == 'A' for r in state.resources()):
                 raise DeployError('Restore the managed DNS configuration before operating its deployment.')
             cloud = OCI(config, state)
             if read_only:
@@ -291,6 +293,12 @@ def execute(args, reporter=None):
                 if args.command == 'converge':
                     state.set_meta('desired-config', {k: v for k, v in config.items() if not k.startswith('_')})
                     result = asyncio.run(converge(config, state, cloud, host, operation, reporter, rotate_github_keys=getattr(args, 'rotate_github_keys', False)))
+                elif args.command == 'rotate-host-key':
+                    recorded = state.get_resource('compute')
+                    if not recorded or not recorded['owned']:
+                        raise DeployError('Host-key migration requires recorded owned compute; restore matching state.')
+                    with reporter.stage('rotate-host-key'):
+                        result = host.rotate_key(cloud.connection(), operation)
                 elif args.command == 'delete':
                     from .deletion import Deletion
                     result = asyncio.run(Deletion(config, state, cloud, host, reporter).run(operation))

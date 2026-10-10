@@ -15,7 +15,8 @@ def fixture(tmp_path):
     state = State(tmp_path / '.state', 'test-profile', {}, create=True)
     hostpub = tmp_path / 'host.pub'
     hostpub.write_text('ssh-ed25519 c3ludGhldGlj test')
-    host = SimpleNamespace(install_github=Mock(), hostpub=hostpub)
+    host = SimpleNamespace(install_github=Mock(), hostpub=hostpub,
+                           trusted_public=Mock(return_value='ssh-ed25519 cm90YXRlZA=='))
     return GitHub(config, state, tmp_path, host), state
 
 
@@ -53,6 +54,9 @@ def test_converge_publishes_secret_only_on_stdin_and_reuses_authority(tmp_path):
         secret = next(c for c in calls if c.args[0][1] == 'secret')
         assert secret.kwargs['input'] == first.decode()
         assert first.decode() not in repr(secret.args)
+        known_hosts = next(c for c in calls if c.args[0][1:4] == ['variable', 'set', 'SSH_KNOWN_HOSTS'])
+        assert known_hosts.kwargs['input'] == '192.0.2.1 ssh-ed25519 cm90YXRlZA=='
+        github.host.trusted_public.assert_called_once_with({'ip': '192.0.2.1', 'user': 'ubuntu'})
         assert state.get_resource('github:example/site')['provider_id'] == '42'
         private.unlink()
         recovered, recovered_public = github._key(github.apps[0])
@@ -288,3 +292,30 @@ def test_legacy_pending_setup_without_resource_requires_absence(tmp_path):
         with patch.object(github, '_pages', return_value=[]):
             github.delete(op)
         assert state.get_meta('github-pending:example/site') is False
+
+
+@pytest.mark.parametrize('public', [False, True])
+@pytest.mark.parametrize('configured', [False, True])
+def test_key_preparation_preserves_colliding_state(tmp_path, public, configured):
+    github, original_state = fixture(tmp_path)
+    original_state.db.close()
+    target = github.key_paths(github.apps[0])[int(public)]
+    target.parent.mkdir()
+    with State(target, 'test-profile', {}, create=True) as state:
+        github.state = state
+        if configured:
+            github.config['state-file'] = str(target)
+        state.set_meta('synthetic-evidence', {'preserve': True})
+        before = target.read_bytes()
+        identity = state.deployment_id
+        with patch('pocketdeploy.github.run') as run:
+            with pytest.raises(DeployError, match='GitHub authority'):
+                github.prepare_keys()
+            run.assert_not_called()
+        assert target.read_bytes() == before
+        assert state.deployment_id == identity
+        assert state.get_meta('synthetic-evidence') == {'preserve': True}
+        assert state.get_meta('github-key-pending:example/site') is None
+    with State(target, 'test-profile', {}) as recovered:
+        assert recovered.deployment_id == identity
+        assert recovered.get_meta('synthetic-evidence') == {'preserve': True}

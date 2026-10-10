@@ -5,6 +5,17 @@ from unittest.mock import patch
 from pocketdeploy.host import Host
 
 
+def verified_state():
+    return SimpleNamespace(deployment_id='test',
+                           get_resource=lambda name: {'provider_id': 'test-instance'},
+                           get_meta=lambda key, default=None: {'verified': True, 'instance_id': 'test-instance', 'public': 'ssh-ed25519 c3ludGhldGlj'})
+
+
+def trust(host):
+    host.state = verified_state()
+
+
+
 def test_host_key_is_anchored_and_payload_not_in_args(tmp_path):
     host = Host({}, SimpleNamespace(deployment_id='test'), tmp_path)
     public = host.prepare_keys()
@@ -12,6 +23,7 @@ def test_host_key_is_anchored_and_payload_not_in_args(tmp_path):
     cloud = json.loads(host.cloud_init().split('\n', 1)[1])
     assert cloud['ssh_keys']['ed25519_public'] == host.hostpub.read_text().strip()
     assert host.hostkey.stat().st_mode & 0o777 == 0o600
+    trust(host)
     argv = host._argv({'ip': '192.0.2.1', 'user': 'ubuntu'})
     assert 'StrictHostKeyChecking=yes' in argv
     assert '192.0.2.1 ssh-ed25519 ' in host.known.read_text()
@@ -21,6 +33,7 @@ def test_secret_only_in_stdin(tmp_path):
     host = Host({'once': {'applications': [{'resolved-env': {'SECRET': 'synthetic-value'}}]}},
                 SimpleNamespace(deployment_id='test'), tmp_path)
     host.prepare_keys()
+    trust(host)
     with patch('pocketdeploy.host.subprocess.run', return_value=SimpleNamespace(returncode=0, stdout='{}')) as call:
         host._remote({'ip': '192.0.2.1'}, 'plan')
     assert 'synthetic-value' not in repr(call.call_args.args)
@@ -91,6 +104,7 @@ def test_verbose_remote_timing_never_emits_payload(tmp_path, capsys):
     host = Host({'once': {'applications': [{'resolved-env': {'SECRET': 'payload-sentinel'}}]}},
                 SimpleNamespace(deployment_id='test'), tmp_path)
     host.prepare_keys()
+    trust(host)
     with Reporter(verbose=True).activate():
         with patch('pocketdeploy.host.subprocess.run', return_value=SimpleNamespace(returncode=0, stdout='{}')):
             host._remote({'ip': '192.0.2.1'}, 'status')
@@ -108,6 +122,7 @@ def test_remote_timeout_has_safe_error_and_verbose_stage(tmp_path, capsys):
     from pocketdeploy.output import Reporter
     host = Host({}, SimpleNamespace(deployment_id='test'), tmp_path)
     host.prepare_keys()
+    trust(host)
     reporter = Reporter(verbose=True)
     with reporter.activate():
         with patch('pocketdeploy.host.subprocess.run', side_effect=subprocess.TimeoutExpired(
@@ -127,6 +142,7 @@ def test_application_failure_diagnostics_are_allowlisted(tmp_path):
     from pocketdeploy.host import APPLICATION_ERRORS
     host = Host({}, SimpleNamespace(deployment_id='test'), tmp_path)
     host.prepare_keys()
+    trust(host)
     for stage, message in APPLICATION_ERRORS.items():
         result = SimpleNamespace(returncode=1, stdout=json.dumps({
             'stage': stage, 'error': 'secret-value', 'command': 'secret-value'}), stderr='secret-value')
@@ -141,3 +157,18 @@ def test_application_failure_diagnostics_are_allowlisted(tmp_path):
         with pytest.raises(DeployError, match='output suppressed') as caught:
             host._remote({'ip': '192.0.2.1'}, 'converge')
     assert 'secret-value' not in str(caught.value)
+
+
+def test_ssh_rechecks_hardlinks_before_writing_known_hosts(tmp_path):
+    import os
+    import pytest
+    from pocketdeploy.common import DeployError
+    host = Host({}, SimpleNamespace(deployment_id='test'), tmp_path)
+    host.prepare_keys()
+    bindings = tmp_path / '.envrc.private'
+    bindings.write_text('synthetic private binding')
+    host.known.unlink()
+    os.link(bindings, host.known)
+    with pytest.raises(DeployError, match='hardlinks'):
+        host._argv({'ip': '192.0.2.1'})
+    assert bindings.read_text() == 'synthetic private binding'

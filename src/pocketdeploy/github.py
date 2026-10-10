@@ -10,6 +10,7 @@ from urllib.parse import quote
 
 from .common import DeployError, local_path, run
 from .output import operation
+from .config import validate_local_paths
 
 
 def validate_config(config):
@@ -66,6 +67,7 @@ class GitHub:
         return private, Path(str(private) + '.pub')
 
     def _key(self, app):
+        validate_local_paths(self.config, self.root, state_path=self.state.path)
         private, public = self.key_paths(app)
         # Missing or partial local credentials are disposable. Validate every
         # surviving file before replacement; never follow a symlink.
@@ -169,6 +171,7 @@ class GitHub:
         return sorted(set(repositories))
 
     def _cleanup_paths(self):
+        validate_local_paths(self.config, self.root, state_path=self.state.path)
         paths = []
         operator = local_path(self.root, self.config.get('ssh-private-key-file', '.ssh/id_ed25519'))
         server = local_path(self.root, self.config.get('ssh-host-private-key-file', '.ssh/host_ed25519'))
@@ -297,7 +300,7 @@ class GitHub:
                 raise DeployError('GitHub environment has unexpected branch policies; review them explicitly.')
             if not policies:
                 self._api(base + '/deployment-branch-policies', 'POST', {'name': 'main', 'type': 'branch'})
-            public_host = self.host.hostpub.read_text().split()
+            public_host = self.host.trusted_public(connection).split()
             values = {'POCKETDEPLOY_DEPLOYMENT_ID': self.state.deployment_id,
                       'POCKETDEPLOY_PROFILE': self.environment, 'SERVER_IP': connection['ip'],
                       'SERVER_USER': connection.get('user', 'ubuntu'),

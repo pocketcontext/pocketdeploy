@@ -171,6 +171,14 @@ output remains suppressed. Exit codes are 0 for success, 1 for operation failure
 `ssh` passes through remote stdout/stderr and exit status without a result
 footer. It rejects `--json`; capture remote command output directly if needed.
 
+`rotate-host-key` upgrades an existing instance from its metadata bootstrap key
+without reconciling applications, services or desired compute settings. It
+requires existing deployment state and owned compute. The command is idempotent:
+repeating it finishes an interrupted rotation or keeps the verified replacement.
+Use it before inspecting or retiring a deployment created by an older release,
+then run `vault-save` to checkpoint the new trust material. It makes no cloud
+mutations. Normal convergence includes this same rotation step.
+
 ## Configuration
 
 The flat Colors format and `COLORS_PAR_*` parameter namespace are preserved.
@@ -223,8 +231,9 @@ from the Ubuntu distribution package repository; its package version is not pinn
 
 The local database may contain secrets and is plaintext. Database, journals,
 keys and snapshots stay ignored and private; SQLite uses full synchronous
-rollback journaling. Schema/profile/provider scope are checked on open. Completed
-operation history is bounded. CLI output is independently allowlisted.
+rollback journaling. Schema/profile/provider scope are checked on open. Resolved
+operation history is bounded; operations with pending steps remain until
+reconciled. CLI output is independently allowlisted.
 
 Cloud calls are not database transactions. A lost create response leaves a
 pending operation. The next run discovers a uniquely tagged resource and records
@@ -233,9 +242,22 @@ Operators must establish the prior request's outcome before recovery. Deletion
 similarly records intent and can resume after the resource has disappeared.
 
 `adopt --instance-id OCID` recovers an existing, matching, already UUID-tagged
-instance into state. It deliberately does not take over an arbitrary production
+instance into existing state with the same deployment UUID. Restore the local
+state checkpoint first; adoption never creates a replacement deployment identity.
+It verifies and records the instance, firewall and boot volume, rejects a
+conflicting recorded instance, and resumes interrupted adoption. It deliberately does not take over an arbitrary production
 server, rewrite another manager's tags or migrate Terraform state. Full production
 ownership transfer remains a separate operation.
+
+Firewall updates add and verify missing rules before removing stale rules.
+An interrupted update retains its intent. If an attempted addition has an
+uncertain outcome and the desired rules are not visible, automatic retries stop
+until the operator establishes the outcome. Existing rules are preserved during
+addition failures; obsolete permissions can remain until recovery completes.
+Inspection alone does not clear a pending addition. After confirming the original
+request has settled, an authorized operator can restore the pending desired rules
+on that same owned NSG through OCI and rerun convergence. Do not clear the local
+intent to force another request while its outcome remains unknown.
 
 One active operator per deployment is supported. A local advisory lock prevents
 overlap on one filesystem; Vault snapshots do not coordinate different machines.
@@ -245,9 +267,33 @@ cloud reality before mutations. Do not use a shared network filesystem for state
 ## Application delivery
 
 SSH client and server Ed25519 keys are generated inside the deployment's `.ssh/`
-directory. Cloud-init receives the server key through private OCI stdin metadata;
-SSH pins that public key, including the first connection. Missing keys for an
+directory. Cloud-init receives a bootstrap server key through OCI metadata;
+the OCI CLI request body travels over stdin, but instance metadata is not secret
+storage. SSH pins the bootstrap public key on first contact. Before sending
+application configuration or SMTP credentials, convergence installs a replacement
+server key and verifies it through a new SSH connection. The replacement key,
+its instance binding and rotation checkpoint live in the private SQLite state
+and are included in Vault snapshots. GitHub receives the replacement public key.
+Interrupted rotation reuses its recorded key; ordinary commands refuse to use
+unverified bootstrap trust and require `rotate-host-key` or convergence to finish
+first. The `.ssh/` server key files retain bootstrap authority only. A checkpoint
+saved before rotation cannot recover the replacement key; save a new Vault
+checkpoint after rotation and preserve local state until it succeeds.
+
+The bootstrap connection still relies on the initial key: an attacker who can
+read metadata and intercept that first connection could impersonate the host.
+Rotation removes enduring reliance on the metadata key; it does not independently
+authenticate first contact against that attacker. Container metadata filtering is
+defense in depth, not a substitute for protecting bootstrap access. Full host
+bootstrap installs a Docker pre-start hook blocking forwarded traffic to IMDS,
+including after Docker restarts. This does not restrict root or host-network
+processes. The standalone rotation command changes SSH trust only.
+Missing keys for an
 existing instance require restoration; they are not silently regenerated.
+When a private key path is customized, its public key defaults to that path plus
+`.pub`, including in Vault recovery sets. An explicit public key path overrides
+this default. The `.ssh/github-<repository-hash>` key paths are reserved for
+disposable GitHub authority and cannot be used for other deployment files.
 
 Application environment and configuration updates are reconciled, including
 changes to an existing hostname. Secrets travel to the host over SSH stdin; ONCE's
@@ -377,6 +423,8 @@ excluded from Vault; convergence recreates missing keys using the recovered
 operator SSH authority and GitHub administrator access.
 
 Before restoring, check out matching `colors.yml` in the destination directory.
+If `-f` selects a different configuration filename, use that same filename in
+the destination directory.
 Both the selected configuration and destination configuration must match the
 checkpoint hash. Restore never replaces configuration, even with `--overwrite`.
 Older snapshots containing configuration and GitHub keys remain readable: their

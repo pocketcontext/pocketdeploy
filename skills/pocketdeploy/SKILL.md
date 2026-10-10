@@ -79,9 +79,24 @@ Set `compute-require-existing-state: true` for an established deployment. Missin
 state or keys must be restored. A missing recorded instance is not permission
 to create another. Uncertain create outcomes require reconciliation of the
 recorded operation and tagged resources before retrying; do not clear state to
-bypass protection. `adopt --instance-id OCID` only recovers an already matching
-UUID-tagged instance; it does not transfer production ownership from another
+bypass protection. `adopt --instance-id OCID` requires existing local state with
+the matching deployment UUID and records the owned instance, firewall and boot
+volume. Restore state first; adoption cannot reconstruct a lost identity and
+does not transfer production ownership from another
 manager. Instance replacement/resizing and storage drift are unsupported in v1.
+
+Before ordinary SSH operations, the controller requires a verified replacement
+for the host key distributed in OCI metadata. Convergence performs the rotation.
+For an older deployment needing inspection or retirement without application
+changes, run `pocketdeploy rotate-host-key`, then `pocketdeploy vault-save`.
+Rotation changes SSH trust only and resumes with the same pending key after an
+interruption. The replacement key and checkpoint live in private SQLite state;
+a pre-rotation backup alone cannot recover them. Keep local state until the new
+checkpoint is saved. Initial bootstrap still relies on the metadata key and is
+not independently authenticated against an attacker who can both read metadata
+and intercept first contact. Full convergence also installs persistent Docker
+forwarding rules to block container access to IMDS; host-network/root processes
+remain outside that restriction.
 
 For SQLite/stateful apps, use `stop-first` and an adequate stop timeout. A durable
 host pending marker blocks blind retries after uncertain delivery. Inspect the

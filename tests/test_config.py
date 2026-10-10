@@ -16,6 +16,22 @@ once:
 '''
 
 
+@pytest.mark.parametrize('user', ['-oProxyCommand=bad', 'ubuntu@host', 'a b', '', 'a' * 33, 42, None])
+def test_ssh_user_rejects_options_and_invalid_identity(tmp_path, user):
+    import json
+    path = tmp_path / 'colors.yml'
+    path.write_text(BASE + '\nssh-user: ' + json.dumps(user) + '\n')
+    with pytest.raises(DeployError, match='ssh-user'):
+        load(path, env={}, resolve=False)
+
+
+@pytest.mark.parametrize('user', ['ubuntu', 'deploy-user', '_service', 'deploy_01'])
+def test_ssh_user_accepts_conventional_accounts(tmp_path, user):
+    path = tmp_path / 'colors.yml'
+    path.write_text(BASE + '\nssh-user: ' + user + '\n')
+    assert load(path, env={}, resolve=False)['ssh-user'] == user
+
+
 def test_references_preserve_strings_and_do_not_mutate_source(tmp_path):
     p = tmp_path / 'colors.yml'; p.write_text(BASE)
     c = load(p, env={'COLORS_PAR_APP_TEST_TOKEN':'001=false=secret'})
@@ -101,3 +117,55 @@ def test_retired_boot_retention_rejected(tmp_path, environment, extra):
     path.write_text(BASE + extra)
     with pytest.raises(DeployError, match='retired'):
         load(path, env=environment, resolve=False)
+
+
+@pytest.mark.parametrize('extra', [
+    'ssh-known-hosts-file: .ssh/id_ed25519',
+    'ssh-known-hosts-file: .ssh/host_ed25519.pub',
+    'ssh-known-hosts-file: custom.yml',
+    'ssh-known-hosts-file: .envrc',
+    'ssh-known-hosts-file: .colors',
+    'ssh-known-hosts-file: .colors.sqlite',
+    'ssh-known-hosts-file: .colors.sqlite.lock',
+    'ssh-known-hosts-file: .colors.sqlite-journal',
+    'ssh-known-hosts-file: .colors.sqlite-wal',
+    'ssh-known-hosts-file: .colors.sqlite-shm',
+    'ssh-private-key-file: .ssh',
+    'state-file: .envrc.private',
+    'state-file: custom.yml',
+    'state-file: .ssh/id_ed25519',
+    'workdir: .envrc.private/nested',
+])
+def test_local_file_collisions_are_rejected_at_load(tmp_path, extra):
+    path = tmp_path / 'custom.yml'
+    path.write_text(BASE + '\n' + extra + '\n')
+    with pytest.raises(DeployError, match='distinct paths'):
+        load(path, env={}, resolve=False)
+
+
+def test_ssh_paths_cannot_use_disposable_github_namespace(tmp_path):
+    path = tmp_path / 'colors.yml'
+    path.write_text(BASE + '\nssh-known-hosts-file: .ssh/github-' + 'a' * 20 + '.pub\n')
+    with pytest.raises(DeployError, match='GitHub authority'):
+        load(path, env={}, resolve=False)
+
+
+@pytest.mark.parametrize('field', ['state-file', 'workdir', '_file'])
+@pytest.mark.parametrize('suffix', ['', '.pub', '/nested'])
+def test_deployment_paths_cannot_use_disposable_github_namespace(tmp_path, field, suffix):
+    from pocketdeploy.config import validate_local_paths
+    target = '.ssh/github-' + 'a' * 20 + suffix
+    config = {'_root': str(tmp_path), field: str(tmp_path / target)}
+    with pytest.raises(DeployError, match='GitHub authority'):
+        validate_local_paths(config)
+    assert not (tmp_path / '.ssh').exists()
+
+
+@pytest.mark.parametrize('field', ['state-file', 'workdir'])
+@pytest.mark.parametrize('suffix', ['', '.pub'])
+def test_reserved_github_paths_are_rejected_when_loading_configuration(tmp_path, field, suffix):
+    path = tmp_path / 'colors.yml'
+    path.write_text(BASE + '\n' + field + ': .ssh/github-' + 'a' * 20 + suffix + '\n')
+    with pytest.raises(DeployError, match='GitHub authority'):
+        load(path, env={}, resolve=False)
+    assert not (tmp_path / '.ssh').exists()

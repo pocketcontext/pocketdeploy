@@ -80,6 +80,8 @@ def text_result(command, result):
             lines.append('No application changes.')
         lines.extend(_health(result.get('status', {})))
         return lines
+    if command == 'rotate-host-key':
+        return ['Host-key migration verified. Save a new Vault recovery checkpoint.']
     if command == 'smtp-test':
         return ['SMTP accepted the test message; inbox delivery is not confirmed.']
     if command == 'delete':

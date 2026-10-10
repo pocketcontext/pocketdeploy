@@ -8,9 +8,12 @@ import shlex
 import subprocess
 import time
 import tempfile
+import ipaddress
+import re
 
 from .common import DeployError, local_path
 from .output import operation
+from .config import validate_local_paths
 
 
 class Host:
@@ -24,6 +27,7 @@ class Host:
         self.known = local_path(self.root, config.get('ssh-known-hosts-file', '.ssh/known_hosts'))
 
     def prepare_keys(self):
+        validate_local_paths(self.config, self.root)
         existing = getattr(self.state, 'get_resource', lambda name: None)('compute')
         if existing and any(not path.exists() for path in (self.key, self.pub, self.hostkey, self.hostpub)):
             raise DeployError('Existing compute SSH identity is missing; restore it from Vault.')
@@ -123,6 +127,7 @@ class Host:
         for path in paths:
             path.unlink(missing_ok=True)
         self.state.set_meta('ssh-generated-files', {})
+        self.state.set_meta('ssh-host-trust', {})
         return {'deleted_key_files': existing}
 
     def cloud_init(self):
@@ -130,16 +135,32 @@ class Host:
             'ed25519_private': self.hostkey.read_text(),
             'ed25519_public': self.hostpub.read_text().strip()}})
 
-    def _argv(self, connection):
-        public = self.hostpub.read_text().split()
+    def trusted_public(self, connection=None):
+        from .host_trust import trusted_public
+        public = trusted_public(self)
+        if connection and connection.get('instance_id') and connection['instance_id'] != self.state.get_resource('compute')['provider_id']:
+            raise DeployError('SSH connection belongs to another instance.')
+        return public
+
+    def _argv(self, connection, *, public=None):
+        validate_local_paths(self.config, self.root)
+        user = connection.get('user', 'ubuntu')
+        if not isinstance(user, str) or not re.fullmatch(r'[a-z_][a-z0-9_-]{0,31}', user):
+            raise DeployError('SSH username is invalid.')
+        try:
+            ipaddress.ip_address(connection['ip'])
+        except (ValueError, TypeError, KeyError):
+            raise DeployError('SSH destination must be an IP address.') from None
+        public = (public if public is not None else self.trusted_public(connection)).split()
         self.known.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.known.write_text(f"{connection['ip']} {public[0]} {public[1]}\n")
         os.chmod(self.known, 0o600)
-        return ['ssh', '-i', str(self.key), '-o', 'IdentitiesOnly=yes', '-o', 'BatchMode=yes',
+        return ['ssh', '-F', '/dev/null', '-i', str(self.key), '-o', 'IdentitiesOnly=yes', '-o', 'BatchMode=yes',
+                '-o', 'ControlMaster=no', '-o', 'ControlPath=none', '-o', 'HostKeyAlgorithms=ssh-ed25519',
                 '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=10',
                 '-o', 'UserKnownHostsFile=' + str(self.known),
                 '-o', 'GlobalKnownHostsFile=/dev/null',
-                connection.get('user', 'ubuntu') + '@' + connection['ip']]
+                '-l', user, '--', connection['ip']]
 
     def _remote(self, connection, action):
         labels = {'bootstrap': 'SSH: host setup', 'plan': 'SSH: application plan',
@@ -150,9 +171,14 @@ class Host:
 
     def _remote_request(self, connection, action, extra=None, timeout=1200):
         source = Path(__file__).with_name('remote.py').read_text()
+        applications = self.config.get('once', {}).get('applications', [])
+        if action == 'bootstrap':
+            applications = [{'smtp': any(app.get('smtp') for app in applications)}]
+        elif action in ('plan', 'converge'):
+            applications = [self.resolved_app(app) for app in applications]
         request = {'action': action, 'deployment_id': self.state.deployment_id,
                    'user': connection.get('user', 'ubuntu'),
-                   'applications': [self.resolved_app(app) if action in ('plan', 'converge') else app for app in self.config.get('once', {}).get('applications', [])]}
+                   'applications': applications}
         if extra:
             request.update(extra)
         # Only non-secret program text is sent as the SSH command. Data uses stdin.
@@ -205,17 +231,44 @@ class Host:
             return self._remote_request(connection, 'github-install', {
                 'targets': [{**target, 'app': self.resolved_app(target['app'])} for target in targets], 'user': connection.get('user', 'ubuntu'), 'source': source})
 
-    def bootstrap(self, connection, operation_id):
-        step = self.state.intent(operation_id, 'host-bootstrap', {})
+    def rotate_key(self, connection, operation_id):
+        compute = self.state.get_resource('compute')
+        if not compute:
+            raise DeployError('Host key rotation requires recorded compute identity.')
+        if connection.get('instance_id') and connection['instance_id'] != compute['provider_id']:
+            raise DeployError('SSH connection belongs to another instance.')
+        payload = {'instance_id': compute['provider_id']}
+        step = self.state.intent(operation_id, 'host-key-rotation', payload)
         with operation('SSH: readiness'):
             deadline = time.monotonic() + 360
             while True:
-                result = subprocess.run(self._argv(connection) + ['true'], capture_output=True)
+                trust = self.state.get_meta('ssh-host-trust', {})
+                public = trust.get('public', self.hostpub.read_text())
+                try:
+                    result = subprocess.run(self._argv(connection, public=public) + ['true'], capture_output=True, timeout=20)
+                    if result.returncode and trust and not trust.get('verified'):
+                        result = subprocess.run(self._argv(connection, public=self.hostpub.read_text()) + ['true'], capture_output=True, timeout=20)
+                except subprocess.TimeoutExpired:
+                    result = subprocess.CompletedProcess([], 1)
+                except OSError:
+                    raise DeployError('SSH could not be started; output suppressed.') from None
                 if result.returncode == 0:
                     break
                 if time.monotonic() >= deadline:
                     raise DeployError('SSH readiness timed out; check network and pinned host key', code='command_timeout')
                 time.sleep(5)
+        from .host_trust import rotate
+        rotate(self, connection)
+        result = {'verified': True}
+        self.state.complete(step, result)
+        for row in self.state.db.execute("SELECT id,payload FROM steps WHERE step='host-key-rotation' AND status='pending'").fetchall():
+            if json.loads(row['payload']) == payload:
+                self.state.complete(row['id'], result)
+        return result
+
+    def bootstrap(self, connection, operation_id):
+        step = self.state.intent(operation_id, 'host-bootstrap', {})
+        self.rotate_key(connection, operation_id)
         result = self._remote(connection, 'bootstrap')
         self.state.complete(step, result)
         return result

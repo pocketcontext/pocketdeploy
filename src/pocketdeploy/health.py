@@ -16,7 +16,7 @@ def verify(config):
             for attempt in range(6):
                 try:
                     with urllib.request.urlopen(url, timeout=10) as response:
-                        if response.status == 200 and response.url.startswith('https://' + app['host'] + '/'):
+                        if 200 <= response.status < 300 and response.url.startswith('https://' + app['host'] + '/'):
                             break
                 except Exception:
                     pass

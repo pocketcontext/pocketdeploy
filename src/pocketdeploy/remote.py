@@ -11,6 +11,7 @@ import re
 import shutil
 import socket
 import ssl
+import stat
 import subprocess
 import sys
 import time
@@ -50,6 +51,26 @@ def save(path, data):
         os.close(fd)
 
 
+def metadata_firewall():
+    # A Docker pre-start hook recreates these rules on every daemon start and
+    # reboot. DOCKER-USER is evaluated before Docker's container accept rules.
+    script = Path('/usr/local/sbin/pocketdeploy-metadata-firewall')
+    script.write_text("""#!/bin/sh
+set -eu
+iptables -N DOCKER-USER 2>/dev/null || iptables -S DOCKER-USER >/dev/null
+for chain in DOCKER-USER FORWARD; do
+  iptables -C "$chain" -d 169.254.169.254/32 -j DROP 2>/dev/null || iptables -I "$chain" 1 -d 169.254.169.254/32 -j DROP
+done
+""")
+    script.chmod(0o755)
+    drop = Path('/etc/systemd/system/docker.service.d')
+    drop.mkdir(parents=True, exist_ok=True)
+    (drop / 'pocketdeploy-metadata.conf').write_text(
+           '[Service]\nExecStartPre=/usr/local/sbin/pocketdeploy-metadata-firewall\n')
+    run(str(script))
+    run('systemctl', 'daemon-reload')
+
+
 def bootstrap(request=None):
     global STAGE
     STAGE = 'cloud-init'
@@ -62,6 +83,8 @@ def bootstrap(request=None):
     if request and any(app.get('smtp') for app in request.get('applications', [])) and not shutil.which('s-nail'):
         run('apt-get', 'update', '-qq')
         run('apt-get', 'install', '-y', '-qq', 's-nail')
+    STAGE = 'host-firewall'
+    metadata_firewall()
     STAGE = 'docker-service'
     run('systemctl', 'enable', '--now', 'docker')
     STAGE = 'host-firewall'
@@ -126,9 +149,23 @@ def normalized(app):
             'memory': app.get('memory', 0), 'health-path': app.get('health-path', '/'), 'strategy': app.get('deploy-strategy', 'rolling'), 'timeout': app.get('deploy-stop-timeout', 300)}
 
 
-def matching(app, current, previous):
+def image_repository(image):
+    repository = image.split('@', 1)[0]
+    # A colon in the registry authority is a port, not an image tag.
+    slash = repository.rfind('/')
+    colon = repository.rfind(':')
+    return repository[:colon] if colon > slash else repository
+
+
+def matching(app, current, previous, resolved=None):
     target = normalized(app)
-    if not previous or {**previous['desired'], 'smtp': previous['desired'].get('smtp', {})} != target or not current or not current['running'] or current.get('restart') != 'always':
+    prior = dict(previous['desired']) if previous else {}
+    # Old dispatchers persisted their release digest as desired configuration.
+    # Migrate only after resolving the configured image to the running image.
+    if (resolved and current and image_repository(prior.get('image', '')) == image_repository(target['image'])
+            and '@sha256:' in prior.get('image', '') and resolved[1] == current['image_id']):
+        prior['image'] = target['image']
+    if not previous or {**prior, 'smtp': prior.get('smtp', {})} != target or not current or not current['running'] or current.get('restart') != 'always':
         return False
     actual = current['settings']
     if {k: v for k, v in actual.get('smtp', {}).items() if v} != target['smtp']:
@@ -265,13 +302,17 @@ def reconcile(request):
             raise RuntimeError('unfinished deployment; operator recovery required')
         STAGE = 'application-inventory'
         old = current.get(host)
-        resolved = resolve_image(app['image']) if request['action'] == 'converge' else None
+        resolved = resolve_image(app.get('deploy-image', app['image'])) if request['action'] == 'converge' else None
         STAGE = 'application-inventory'
-        if matching(app, old, manifest['apps'].get(host)):
+        if matching(app, old, manifest['apps'].get(host), resolved):
             if resolved is not None and resolved[1] == old['image_id']:
                 STAGE = 'application-health'
                 if not health(app)['healthy']:
                     raise RuntimeError('application HTTP health check failed')
+                completed = {'desired': normalized(app), 'image_id': resolved[1], 'image_digest': resolved[0]}
+                if manifest['apps'][host] != completed:
+                    manifest['apps'][host] = completed
+                    save(MANIFEST, manifest)
                 continue
             if resolved is None:
                 if '@sha256:' not in app['image']:
@@ -305,7 +346,7 @@ def reconcile(request):
             raise RuntimeError('application verification failed')
         if old and (new['id'] == old['id'] or new['volumes'] != old['volumes']):
             raise RuntimeError('application volume continuity failed')
-        completed = {'desired': normalized(app), 'image_id': image_id}
+        completed = {'desired': normalized(app), 'image_id': image_id, 'image_digest': digest}
         if not matching(app, new, completed):
             raise RuntimeError('application settings verification failed')
         STAGE = 'application-health'
@@ -321,8 +362,59 @@ def reconcile(request):
     return {'actions': actions, 'applications': [{'host': h, 'running': c['running'], **probes.get(h, {})} for h, c in current.items()]}
 
 
+def authorized_keys(account, lines=None):
+    """Use anchored directories and exclusive files for privileged key updates."""
+    home = os.open(account.pw_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    directory = None
+    try:
+        if lines is not None:
+            try:
+                os.mkdir('.ssh', mode=0o700, dir_fd=home)
+            except FileExistsError:
+                pass
+        try:
+            directory = os.open('.ssh', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=home)
+        except FileNotFoundError:
+            return []
+        if lines is not None:
+            os.fchown(directory, account.pw_uid, account.pw_gid)
+        try:
+            fd = os.open('authorized_keys', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        except FileNotFoundError:
+            existing = []
+        else:
+            with os.fdopen(fd) as source:
+                metadata = os.fstat(source.fileno())
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                    raise RuntimeError('unsafe authorized keys file')
+                existing = source.read().splitlines()
+        if lines is None:
+            return existing
+        temporary = '.pocketdeploy-' + os.urandom(16).hex()
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
+        try:
+            with os.fdopen(fd, 'w') as output:
+                output.write('\n'.join(lines) + ('\n' if lines else ''))
+                output.flush()
+                os.fsync(output.fileno())
+                os.fchown(output.fileno(), account.pw_uid, account.pw_gid)
+            os.replace(temporary, 'authorized_keys', src_dir_fd=directory, dst_dir_fd=directory)
+            os.fsync(directory)
+        finally:
+            try:
+                os.unlink(temporary, dir_fd=directory)
+            except FileNotFoundError:
+                pass
+    finally:
+        if directory is not None:
+            os.close(directory)
+        os.close(home)
+
+
 def retire(request, mutate=False):
     """Retirement is permanent on this host; retries only finish clean stops."""
+    global STAGE
+    STAGE = 'application-inventory'
     deployment = request['deployment_id']
     manifest = json.loads(MANIFEST.read_text()) if MANIFEST.exists() else {'deployment_id': deployment, 'apps': {}}
     if manifest.get('deployment_id') != deployment:
@@ -359,10 +451,7 @@ def retire(request, mutate=False):
             raise RuntimeError('application did not stop cleanly')
         actions.append({'host': host, 'action': 'stop-retain-data', 'timeout': timeout})
     account = pwd.getpwnam(request.get('user', 'ubuntu'))
-    authorized = Path(account.pw_dir) / '.ssh' / 'authorized_keys'
-    if authorized.is_symlink() or (authorized.exists() and authorized.stat().st_nlink != 1):
-        raise RuntimeError('host retirement ownership verification failed')
-    lines = authorized.read_text().splitlines() if authorized.exists() else []
+    lines = authorized_keys(account)
     directory = BASE / 'github'
     retired_directory = BASE / 'retired-github'
     if directory.exists() and retired_directory.exists():
@@ -401,15 +490,8 @@ def retire(request, mutate=False):
     for host in apps:
         pending = BASE / (hashlib.sha256(host.encode()).hexdigest() + '.pending')
         save(pending, {'deployment_id': deployment, 'host': host, 'action': 'retire'})
-    if authorized.exists():
-        temporary = authorized.with_name('authorized_keys.pocketdeploy.tmp')
-        with open(temporary, 'w') as output:
-            os.chmod(temporary, 0o600)
-            os.chown(temporary, account.pw_uid, account.pw_gid)
-            output.write('\n'.join(remaining) + ('\n' if remaining else ''))
-            output.flush()
-            os.fsync(output.fileno())
-        os.replace(temporary, authorized)
+    authorized_keys(account, remaining)
+    STAGE = 'application-stop'
     for action in actions:
         host = action['host']
         actual = current.get(host)
@@ -445,11 +527,7 @@ def install_github(request):
     source_temp.write_text(request['source'])
     source_temp.chmod(0o600)
     os.replace(source_temp, source)
-    ssh = Path(account.pw_dir) / '.ssh'
-    ssh.mkdir(mode=0o700, exist_ok=True)
-    os.chown(ssh, account.pw_uid, account.pw_gid)
-    authorized = ssh / 'authorized_keys'
-    lines = authorized.read_text().splitlines() if authorized.exists() else []
+    lines = authorized_keys(account)
     for target in request['targets']:
         app = target['app']
         if app['host'] not in manifest['apps']:
@@ -473,9 +551,9 @@ def install_github(request):
             + "  request=json.load(open(" + repr(str(config)) + "))\n"
             + "  command=os.environ.get('SSH_ORIGINAL_COMMAND','')\n"
             + "  if command:\n"
-            + "   image=request['applications'][0]['image']; repo=image.split('@')[0].rsplit(':',1)[0]\n"
+            + "   image=request['applications'][0]['image']; repo=m.image_repository(image)\n"
             + "   if not re.fullmatch('deploy '+re.escape(repo)+'@sha256:[0-9a-f]{64}',command): raise RuntimeError()\n"
-            + "   request['applications'][0]['image']=command[7:]\n"
+            + "   request['applications'][0]['deploy-image']=command[7:]\n"
             + "  result=m.reconcile(request)\n"
             + " print(json.dumps({'ok':True}))\n"
             + "except Exception:\n print('Deployment failed; output suppressed',file=sys.stderr); sys.exit(1)\n")
@@ -490,11 +568,7 @@ def install_github(request):
                  and (' ' + public[0] + ' ' + public[1] + ' ') in line)]
         lines.append('restrict,command="sudo -n --preserve-env=SSH_ORIGINAL_COMMAND /usr/bin/python3 '
                      + str(dispatcher) + '" ' + public[0] + ' ' + public[1] + ' ' + marker)
-    temporary = ssh / 'authorized_keys.pocketdeploy.tmp'
-    temporary.write_text('\n'.join(lines) + '\n')
-    temporary.chmod(0o600)
-    os.chown(temporary, account.pw_uid, account.pw_gid)
-    os.replace(temporary, authorized)
+    authorized_keys(account, lines)
     return {'installed': len(request['targets'])}
 
 

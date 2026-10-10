@@ -261,6 +261,70 @@ class OCI:
     def _rules_equal(self, current):
         return {self._normalized(r) for r in current} == {self._normalized(r) for r in self._rules()}
 
+    def _pending_rule_steps(self, firewall_id):
+        rows = self.state.db.execute(
+            "SELECT id,payload FROM steps WHERE step='firewall-rules' AND status='pending'").fetchall()
+        return [row['id'] for row in rows if json.loads(row['payload']).get('id') == firewall_id]
+
+    def _complete_rule_steps(self, firewall_id, **result):
+        for step in self._pending_rule_steps(firewall_id):
+            self.state.complete(step, {'id': firewall_id, **result})
+        pending = self.state.get_meta('oci-pending-firewall-rules')
+        if pending and pending['id'] == firewall_id:
+            self.state.set_meta('oci-pending-firewall-rules', None)
+
+    def _recover_deleted_rule_steps(self):
+        # Older versions could finish deleting an NSG while leaving its rule
+        # operation pending. A verified deletion receipt resolves only that ID.
+        rows = self.state.db.execute(
+            "SELECT payload,result FROM steps WHERE step='delete-firewall' AND status='complete'").fetchall()
+        for row in rows:
+            payload, result = json.loads(row['payload']), json.loads(row['result'])
+            if result.get('deleted') is True and payload.get('id'):
+                self._complete_rule_steps(payload['id'], deleted=True, recovered=True)
+
+    def _reconcile_rules(self, firewall_id, operation_id):
+        self._recover_deleted_rule_steps()
+        desired = {self._normalized(rule): rule for rule in self._rules()}
+        key = 'oci-pending-firewall-rules'
+        pending = self.state.get_meta(key)
+        if pending and (pending['id'] != firewall_id or pending['desired'] != sorted(desired)):
+            raise DeployError('Pending firewall update differs from desired configuration; restore its configuration before recovery.')
+        def read():
+            return self._list('network', 'nsg', 'rules', 'list', '--nsg-id', firewall_id, '--all')
+        current = read()
+        present = {self._normalized(rule) for rule in current}
+        missing = desired.keys() - present
+        legacy_steps = self._pending_rule_steps(firewall_id) if not pending else []
+        if legacy_steps and missing:
+            raise DeployError('A legacy OCI firewall update has an uncertain outcome; inspect rules before retrying.')
+        if not pending and present == desired.keys():
+            self._complete_rule_steps(firewall_id, recovered=True)
+            return
+        if not pending:
+            step = self.state.intent(operation_id, 'firewall-rules', {'id': firewall_id})
+            pending = {'id': firewall_id, 'step': step, 'desired': sorted(desired), 'adding': False}
+            self.state.set_meta(key, pending)
+        if missing:
+            if pending['adding']:
+                raise DeployError('An OCI firewall add has an uncertain outcome; inspect rules before retrying.')
+            pending['adding'] = True
+            self.state.set_meta(key, pending)
+            self._call('network', 'nsg', 'rules', 'add', body={
+                'nsgId': firewall_id, 'securityRules': [desired[value] for value in sorted(missing)]})
+            current = read()
+            if not desired.keys() <= {self._normalized(rule) for rule in current}:
+                raise DeployError('OCI firewall additions were not verified; existing rules were preserved.')
+        # Only remove stale rules after all desired access is observed. On retry,
+        # re-read IDs so a successful remove with a lost response is not repeated.
+        stale = [rule['id'] for rule in current if self._normalized(rule) not in desired]
+        if stale:
+            self._call('network', 'nsg', 'rules', 'remove', body={
+                'nsgId': firewall_id, 'securityRuleIds': stale})
+        if not self._rules_equal(read()):
+            raise DeployError('OCI firewall verification failed; retry to reconcile.')
+        self._complete_rule_steps(firewall_id, recovered=True)
+
     def _remember(self, role, item):
         attrs = {'desired': {k: v for k, v in self.config.items() if k in ('oci-subnet-id', 'oci-boot-volume-size-in-gbs', 'oci-boot-volume-vpus-per-gb')}}
         self.state.put_resource(role, 'oci-' + role, item['id'], attrs, owned=True)
@@ -272,6 +336,8 @@ class OCI:
         step = self.state.intent(operation, 'create-' + role, {'role': role})
         self.state.set_meta('oci-pending-' + role, {'operation': operation, 'step': step})
         item = function()
+        if not isinstance(item, dict) or not item.get('id'):
+            raise DeployError('OCI returned invalid creation details; pending intent has been preserved.')
         self._remember(role, item)
         self.state.complete(step, {'id': item['id']})
         self.state.set_meta('oci-pending-' + role, None)
@@ -363,16 +429,7 @@ class OCI:
         if not firewall:
             firewall = self._create('firewall', operation_id, lambda: self._call('network', 'nsg', 'create', body={'compartmentId': self.config['oci-compartment-id'], 'vcnId': subnet['vcn-id'], 'displayName': self.config['profile'] + '-once-firewall', 'freeformTags': self._tags('firewall', operation_id)}))
         self._recovered('firewall', firewall)
-        rules = self._list('network', 'nsg', 'rules', 'list', '--nsg-id', firewall['id'], '--all')
-        if not self._rules_equal(rules):
-            step = self.state.intent(operation_id, 'firewall-rules', {'id': firewall['id']})
-            if rules:
-                self._call('network', 'nsg', 'rules', 'remove', body={'nsgId': firewall['id'], 'securityRuleIds': [r['id'] for r in rules]})
-            self._call('network', 'nsg', 'rules', 'add', body={'nsgId': firewall['id'], 'securityRules': self._rules()})
-            verified = self._list('network', 'nsg', 'rules', 'list', '--nsg-id', firewall['id'], '--all')
-            if not self._rules_equal(verified):
-                raise DeployError('OCI firewall verification failed.')
-            self.state.complete(step, {'id': firewall['id']})
+        self._reconcile_rules(firewall['id'], operation_id)
         if not instance:
             metadata = {'ssh_authorized_keys': public_key}
             if self.config.get('_cloud_init'):
@@ -382,6 +439,8 @@ class OCI:
         self._recovered('compute', instance)
         for _ in range(120):
             live = self._call('compute', 'instance', 'get', '--instance-id', instance['id'])
+            if not isinstance(live, dict) or live.get('id') != instance['id']:
+                raise DeployError('OCI returned invalid instance details; state has been preserved.')
             if live.get('lifecycle-state') == 'RUNNING':
                 self._boot_volume(live)
                 return self.connection()
@@ -488,6 +547,8 @@ class OCI:
             item = self._find(role, allow_missing=bool(pending))
             if not item:
                 if pending:
+                    if role == 'firewall':
+                        self._complete_rule_steps(pending['id'], deleted=True, recovered=True)
                     self.state.remove_resource(role)
                     self.state.complete(pending['step'], {'deleted': True, 'recovered': True})
                     self.state.set_meta('oci-delete-' + role, None)
@@ -513,6 +574,8 @@ class OCI:
                 if attempt + 1 == attempts:
                     raise DeployError('OCI deletion is not complete; retry delete to reconcile.', code='deletion_pending')
                 time.sleep(2)
+            if role == 'firewall':
+                self._complete_rule_steps(item['id'], deleted=True)
             self.state.remove_resource(role)
             self.state.complete(step, {'deleted': True})
             self.state.set_meta('oci-delete-' + role, None)
@@ -538,13 +601,27 @@ class OCI:
         return {'deleted': True}
 
     def adopt(self, instance_id, operation_id):
+        recorded = self.state.get_resource('compute')
+        if recorded and (recorded['provider_id'] != instance_id or not recorded['owned']):
+            raise DeployError('Adoption conflicts with recorded compute ownership.')
         item = self._call('compute', 'instance', 'get', '--instance-id', instance_id)
+        if not isinstance(item, dict) or item.get('id') != instance_id:
+            raise DeployError('OCI returned invalid instance details.')
         if item.get('compartment-id') != self.config['oci-compartment-id'] or not self._owned(item, 'compute'):
             raise DeployError('Adoption requires matching compartment and deployment ownership tags.')
         firewall = self._find('firewall')
+        if firewall is None or item.get('lifecycle-state') != 'RUNNING':
+            raise DeployError('Adoption requires running compute and its owned firewall.')
         if self._drift(item) or self._storage_drift(item) or self._network_drift(item, firewall):
             raise DeployError('Existing instance does not match desired compute settings.')
-        step = self.state.intent(operation_id, 'adopt-compute', {'id': instance_id})
+        pending = self.state.get_meta('oci-pending-adopt')
+        if pending and pending['id'] != instance_id:
+            raise DeployError('Another instance adoption is pending; reconcile it first.')
+        step = pending['step'] if pending else self.state.intent(operation_id, 'adopt-compute', {'id': instance_id})
+        self.state.set_meta('oci-pending-adopt', {'step': step, 'id': instance_id})
+        self._boot_volume(item)
+        self._remember('firewall', firewall)
         self._remember('compute', item)
         self.state.complete(step, {'id': instance_id})
+        self.state.set_meta('oci-pending-adopt', None)
         return self.connection()
