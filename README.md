@@ -57,6 +57,9 @@ It supplies the pinned `cf` and `resend` executables from `tools/cloud-clis/`.
 Consumers pin this repository by commit in `devenv.yaml`, follow their existing
 `nixpkgs` input, and use `inputs.pocketdeploy.packages.${pkgs.stdenv.hostPlatform.system}.cloud-clis`.
 The shared package definition also builds this repository's development tools.
+Exports cover Linux amd64/arm64 and Apple Silicon macOS. Validate builds on each
+native platform; the patched nixpkgs input requires a matching builder even for
+foreign-system evaluation. Intel macOS is excluded by the pinned nixpkgs.
 
 The portable launcher `./pocketdeploy` is a symlink to the executable bundled in
 `skills/pocketdeploy/`. Copy that executable into a deployment repository or onto
