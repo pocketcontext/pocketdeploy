@@ -82,6 +82,14 @@ def main():
                 assert not removed.stdout and 'Invalid command arguments' in removed.stderr
             assert not list(empty.iterdir()), 'Removed command created deployment files.'
         assert 'smtp-test' in bare.stdout
+        assert '--smtp-verification-timeout' in bare.stdout
+        for arguments in (['status', '--smtp-verification-timeout', '600'],
+                          ['converge', '--smtp-verification-timeout', '-1'],
+                          ['converge', '--dry-run', '--smtp-verification-timeout', '600']):
+            invalid_wait = invoke(empty, *arguments, '--json', '--quiet', expected='')
+            assert invalid_wait.returncode == 2
+            assert json.loads(invalid_wait.stdout)['error']['code'] == 'invalid_usage'
+            assert not list(empty.iterdir()), 'Invalid verification wait created files.'
         for flags in ([], ['--json']):
             missing_recipient = invoke(empty, 'smtp-test', *flags, expected='')
             assert missing_recipient.returncode == 2
@@ -108,6 +116,7 @@ def main():
         # Explicit -f must win over an invalid configuration in the current directory.
         (nested / 'colors.yml').write_text('unknown-field: true\n')
         invoke(nested, 'plan', '-f', '../../colors.yml', expected=STATE_REQUIRED)
+        invoke(nested, 'converge', '-f', '../../colors.yml', '--smtp-verification-timeout', '0', expected=STATE_REQUIRED)
         missing = invoke(nested, 'plan', '-f', 'missing.yml', expected='pocketdeploy:')
         assert STATE_REQUIRED not in missing.stdout + missing.stderr, 'Missing explicit config fell back to another file.'
         assert not list(root.rglob('.colors.sqlite*')), 'Checks unexpectedly wrote deployment state.'
@@ -200,7 +209,7 @@ def main():
         assert token.read_text() not in expired_run.stdout + expired_run.stderr
         print(f'Expired synthetic OCI token rejected locally in {elapsed:.2f}s; OCI was not invoked.')
 
-    print('Portable launcher: 23 checks passed (no cloud access).')
+    print('Portable launcher: 27 checks passed (no cloud access).')
 
 
 if __name__ == '__main__':
