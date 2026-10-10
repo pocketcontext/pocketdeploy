@@ -93,6 +93,16 @@ volume. Restore state first; adoption cannot reconstruct a lost identity and
 does not transfer production ownership from another
 manager. Instance replacement/resizing and storage drift are unsupported in v1.
 
+Application ownership transfer uses the source command `adopt-app`; it is distinct
+from compute `adopt` and is pending a new portable launcher release. Read the
+repository README's application adoption procedure before transfer. Disable and
+drain prior delivery first, use safe `status --json` container/image/volume/settings
+fingerprint evidence, and provide `--previous-delivery-disabled`. Never edit host
+manifest state to bypass adoption. Adoption takes the shared host lock, preserves
+the running container and actual settings, and leaves desired replacement to a
+subsequent convergence. `deploy-ready-timeout` (1–3600 seconds, default 60) bounds
+HTTP readiness independently of graceful shutdown. Preserve failed pending markers.
+
 Before ordinary SSH operations, the controller requires a verified replacement
 for the host key distributed in provider metadata/user data. Convergence performs the rotation.
 For an older deployment needing inspection or retirement without application

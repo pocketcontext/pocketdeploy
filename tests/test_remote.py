@@ -166,7 +166,9 @@ def test_status_needs_no_resolved_secrets_and_reports_pending(tmp_path, monkeypa
     assert result['pending_operations'] == 1
     assert result['applications'][0] == {'host': app()['host'], 'running': True, 'managed': True,
                                         'pending': True, 'healthy': True, 'http_status': 200,
-                                        'container_id': 'old', 'image_id': 'image-id'}
+                                        'container_id': 'old', 'image_id': 'image-id',
+                                            'volumes': current()['volumes'],
+                                            'settings_sha256': remote.settings_hash(current())}
     image.assert_not_called()
     run.assert_not_called()
 

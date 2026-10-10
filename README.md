@@ -267,6 +267,7 @@ once:
       image: ghcr.io/example/wiki@sha256:REPLACE_WITH_DIGEST
       deploy-strategy: stop-first
       deploy-stop-timeout: 300
+      deploy-ready-timeout: 60
       auto_update: false
       auto_backup: false
       smtp: false
@@ -274,6 +275,16 @@ once:
       env:
         LITESTREAM_ENDPOINT: app-wikicontext-production-litestream-endpoint
 ```
+
+`deploy-ready-timeout` is the application HTTP readiness budget after replacement,
+from 1 to 3600 seconds (default 60). `deploy-stop-timeout` independently bounds
+container graceful shutdown, from 1 to 3600 seconds (default 300). The SSH
+operation budget includes all configured applications' shutdown and readiness
+budgets. Readiness failure retains the pending marker; it does not automatically
+roll back a container that may have written data. Configure `health-path` to
+succeed only when the application is usable. These readiness and application
+adoption features are source changes pending publication; the portable launcher
+continues to run its explicit published commit.
 
 The mapping references
 `COLORS_PAR_APP_WIKICONTEXT_PRODUCTION_LITESTREAM_ENDPOINT`. Missing bindings
@@ -302,6 +313,57 @@ storage drift fail explicitly in v1. Initial image discovery selects a compatibl
 Canonical Ubuntu 24.04 image and pins its OCID in state; `oci-image-id` can pin it
 before creation. ONCE v0.3.3 is checksum-pinned for amd64 and arm64. Docker comes
 from the Ubuntu distribution package repository; its package version is not pinned.
+
+## Adopting an existing application
+
+`adopt-app` transfers an existing ONCE application's ownership explicitly. It does
+not replace the container, initialize data, pull a newer image, change DNS, or
+install GitHub delivery. First disable and drain the previous deployment
+controller, including queued CI jobs. The required `--previous-delivery-disabled`
+flag records your assertion that this has happened; PocketDeploy cannot verify an
+external controller's lock or queue. Keep that authority disabled permanently
+after transfer.
+
+Declare the desired application in a reviewed configuration, preserve the existing
+compute state and SSH authority, then obtain comparison evidence using
+`status --json`. The application entry includes full `container_id`, `image_id`,
+`volumes` (name/destination pairs), and `settings_sha256`. This fingerprint permits
+exact comparison without printing private ONCE settings. Never collect raw Docker
+inspection or ONCE labels in a transcript.
+
+Activate the reviewed configuration before adopting, and use that same desired
+state for subsequent commands. After adoption, convergence with an older
+configuration that omits the application removes it. Suspend routine commands
+during transfer and never revert to an empty application list as a recovery step.
+
+```sh
+pocketdeploy -f candidate.yml status --json
+pocketdeploy -f candidate.yml adopt-app \
+  --app-host app.example.com \
+  --container-id FULL_CONTAINER_ID \
+  --image-id sha256:FULL_IMAGE_ID \
+  --volume EXISTING_VOLUME:/storage \
+  --settings-sha256 SETTINGS_FINGERPRINT \
+  --previous-delivery-disabled
+```
+
+Repeat `--volume` for every named volume; both names and destinations must match.
+The operation requires a running container with automatic updates/backups disabled,
+no bind mounts, a matching repository digest on its locally inspected immutable
+image, and successful HTTP health. The configured health path must work on the
+existing image during adoption; change it afterward if the replacement introduces
+a new endpoint. A retired host, pending application operation, conflicting retained
+or managed ownership, changed settings/image/volumes, or failed health blocks
+transfer.
+
+Adoption uses the same host lock as convergence and restricted GitHub delivery.
+It durably journals exact evidence before committing ownership, records the current
+settings as its baseline, and leaves application data in place. Repeating identical
+evidence after interruption is safe while the container and configuration remain
+unchanged. Conflicting evidence requires investigation; never manufacture ownership
+by editing the manifest. Next, converge with the active reviewed configuration
+to apply the new image and bindings, install generic GitHub delivery, and
+save an encrypted deployment checkpoint. Application data recovery remains separate.
 
 ## State, interruption and ownership
 

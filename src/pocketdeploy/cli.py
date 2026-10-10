@@ -42,6 +42,7 @@ def parser():
   ssh            Open SSH or run --ssh-command; preserve remote output and exit
   delete         Delete owned resources, subject to destruction protection
   smtp-test      Send one explicit SMTP test using --to
+  adopt-app      Transfer a verified existing application after draining prior delivery
   adopt          Recover an existing instance with matching deployment UUID tags
   rotate-host-key  Finish bootstrap host-key migration without application changes
 
@@ -59,13 +60,19 @@ Examples:
 
 Configuration defaults to colors.yml in the current working directory.
 Use -f to select a deployment. Run without arguments to show this help.''')
-    p.add_argument('command', metavar='COMMAND', choices=['init', 'plan', 'converge', 'status', 'ssh', 'delete', 'adopt', 'smtp-test', 'rotate-host-key', 'vault-save', 'vault-restore'], help='Deployment or Vault command listed below')
+    p.add_argument('command', metavar='COMMAND', choices=['init', 'plan', 'converge', 'status', 'ssh', 'delete', 'adopt', 'adopt-app', 'smtp-test', 'rotate-host-key', 'vault-save', 'vault-restore'], help='Deployment or Vault command listed below')
     p.add_argument('-f', '--file', help='Configuration file (default: ./colors.yml in the current working directory)')
     p.add_argument('--json', action='store_true', help='Emit one versioned JSON result on stdout')
     p.add_argument('--verbose', action='store_true', help='Show safe request timings and waiting progress on stderr')
     p.add_argument('--quiet', action='store_true', help='Suppress progress on stderr')
     p.add_argument('--dry-run', action='store_true', help='Plan converge/delete without applying changes')
     p.add_argument('--instance-id', help='Exact owned provider instance identity for explicit recovery/adoption')
+    p.add_argument('--app-host', help='Exact configured host for explicit application adoption')
+    p.add_argument('--container-id', help='Full existing Docker container ID from status')
+    p.add_argument('--image-id', help='Existing immutable Docker image ID from status')
+    p.add_argument('--volume', action='append', help='Exact existing named volume and mount destination, NAME:/PATH (repeatable)')
+    p.add_argument('--settings-sha256', help='Existing ONCE settings fingerprint from status')
+    p.add_argument('--previous-delivery-disabled', action='store_true', help='Assert previous delivery authority is disabled and drained')
     p.add_argument('--document', help='Vault state document to restore')
     p.add_argument('--version', help='Exact Vault state version to restore')
     p.add_argument('--destination', help='Recovery directory containing matching Git configuration')
@@ -233,6 +240,18 @@ def execute(args, reporter=None):
 
 def _execute(args, reporter=None):
     reporter = reporter or Reporter(quiet=getattr(args, "quiet", False), command=args.command)
+    adoption_options = ('app_host', 'container_id', 'image_id', 'volume', 'settings_sha256', 'previous_delivery_disabled')
+    if args.command != 'adopt-app' and any(getattr(args, key, None) for key in adoption_options):
+        raise DeployError('Application adoption options require adopt-app.', code='invalid_usage')
+    if args.command == 'adopt-app':
+        import re
+        if (not all(getattr(args, key, None) for key in adoption_options)
+                or not re.fullmatch(r'[0-9a-f]{64}', args.container_id)
+                or not re.fullmatch(r'sha256:[0-9a-f]{64}', args.image_id)
+                or not re.fullmatch(r'[0-9a-f]{64}', args.settings_sha256)
+                or any(not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*:/[^\x00-\x20]*', v) for v in args.volume)
+                or len(set(args.volume)) != len(args.volume)):
+            raise DeployError('adopt-app requires exact host, container/image IDs, volumes, settings fingerprint and drained previous delivery.', code='invalid_usage')
     if getattr(args, 'verbose', False) and getattr(args, 'quiet', False):
         raise DeployError('--verbose and --quiet cannot be combined.', code='invalid_usage')
     os.umask(0o077)
@@ -259,6 +278,9 @@ def _execute(args, reporter=None):
     from .host import validate_config
     if args.command != 'rotate-host-key':
         validate_config(config)
+    if args.command == 'adopt-app' and sum(
+            app['host'] == args.app_host for app in config.get('once', {}).get('applications', [])) != 1:
+        raise DeployError('Application adoption requires exactly one configured matching host.')
     root = Path(config['_root'])
     state_path = local_path(root, config['state-file'])
     if args.command == 'vault-restore':
@@ -342,6 +364,17 @@ def _execute(args, reporter=None):
                     if config.get('provider-smtp') != 'resend':
                         raise DeployError('smtp-test requires provider-smtp: resend.')
                     result = host.smtp_test(cloud.connection(), Services(config, state).smtp_settings(), args.to)
+                elif args.command == 'adopt-app':
+                    recorded = state.get_resource('compute')
+                    if not recorded or not recorded['owned']:
+                        raise DeployError('Application adoption requires recorded owned compute.')
+                    if any(a.get('smtp') for a in config.get('once', {}).get('applications', [])):
+                        from .services import Services
+                        host.smtp_settings = Services(config, state).smtp_settings()
+                    result = host.adopt_app(cloud.connection(), operation, {
+                        'host': args.app_host, 'container_id': args.container_id, 'image_id': args.image_id,
+                        'volumes': [v.split(':', 1) for v in args.volume],
+                        'settings_sha256': args.settings_sha256, 'previous_delivery_disabled': True})
                 elif args.command == 'adopt':
                     if not args.instance_id:
                         raise DeployError('Adoption requires --instance-id and matching ownership tags.')

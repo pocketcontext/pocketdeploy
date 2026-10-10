@@ -167,14 +167,16 @@ class Host:
                   'converge': 'SSH: application convergence', 'status': 'SSH: application status',
                   'delete-plan': 'SSH: retirement readiness'}
         with operation(labels.get(action, 'SSH: host operation')):
-            return self._remote_request(connection, action)
+            budget = 1200 + sum(app.get('deploy-stop-timeout', 300) + app.get('deploy-ready-timeout', 60)
+                                for app in self.config.get('once', {}).get('applications', []))
+            return self._remote_request(connection, action, timeout=budget)
 
     def _remote_request(self, connection, action, extra=None, timeout=1200):
         source = Path(__file__).with_name('remote.py').read_text()
         applications = self.config.get('once', {}).get('applications', [])
         if action == 'bootstrap':
             applications = [{'smtp': any(app.get('smtp') for app in applications)}]
-        elif action in ('plan', 'converge'):
+        elif action in ('plan', 'converge', 'adopt-app'):
             applications = [self.resolved_app(app) for app in applications]
         request = {'action': action, 'deployment_id': self.state.deployment_id,
                    'user': connection.get('user', 'ubuntu'),
@@ -282,6 +284,15 @@ class Host:
         self.state.complete(step, result)
         return result
 
+    def adopt_app(self, connection, operation_id, evidence):
+        step = self.state.intent(operation_id, 'application-adoption', evidence)
+        result = self._remote_request(connection, 'adopt-app', {'adoption': evidence})
+        self.state.complete(step, result)
+        for row in self.state.db.execute("SELECT id,payload FROM steps WHERE step='application-adoption' AND status='pending'").fetchall():
+            if json.loads(row['payload']) == evidence:
+                self.state.complete(row['id'], result)
+        return result
+
     def plan_delete(self, connection):
         return self._remote(connection, 'delete-plan')
 
@@ -315,7 +326,8 @@ SAFE_ERRORS = {'unfinished deployment; operator recovery required',
                'cannot clear final environment binding with pinned ONCE CLI',
                'host is retired; convergence is disabled',
                'application did not stop cleanly',
-               'host retirement ownership verification failed'}
+               'host retirement ownership verification failed', 'application adoption evidence does not match',
+               'application already has managed ownership'}
 
 
 def validate_config(config):
@@ -324,7 +336,7 @@ def validate_config(config):
     once = config.get('once', {})
     if once.get('namespace', 'once') != 'once':
         raise DeployError('V1 supports the once namespace only.')
-    allowed = {'host', 'image', 'env', 'resolved-env', 'deploy-strategy', 'deploy-stop-timeout',
+    allowed = {'host', 'image', 'env', 'resolved-env', 'deploy-strategy', 'deploy-stop-timeout', 'deploy-ready-timeout',
                'auto_update', 'auto_backup', 'disable_tls', 'health-path', 'cpus', 'memory', 'smtp', 'manage-dns', 'github', 'github-environment'}
     for app in once.get('applications', []):
         health_path = app.get('health-path', '/')
@@ -341,6 +353,8 @@ def validate_config(config):
                 raise DeployError('Application resource limits must be nonnegative integers.')
         if type(app.get('deploy-stop-timeout', 300)) is not int or not 1 <= app.get('deploy-stop-timeout', 300) <= 3600:
             raise DeployError('Stop timeout must be between 1 and 3600 seconds.')
+        if type(app.get('deploy-ready-timeout', 60)) is not int or not 1 <= app.get('deploy-ready-timeout', 60) <= 3600:
+            raise DeployError('Ready timeout must be between 1 and 3600 seconds.')
         for key in ('disable_tls', 'auto_update', 'auto_backup', 'smtp', 'manage-dns'):
             if key in app and type(app[key]) is not bool:
                 raise DeployError('Application flags must be booleans.')
@@ -348,6 +362,7 @@ def validate_config(config):
 
 # Fixed messages only: a remote response is never trusted as display text.
 APPLICATION_ERRORS = {
+    'application-adoption': 'Application adoption failed; verify ownership evidence and drain previous delivery authority.',
     'application-inventory': 'Application inventory failed; inspect Docker service health on the VPS.',
     'application-recovery': 'Unfinished application deployment; inspect host state before recovering its pending marker.',
     'application-image-pull': 'Application image pull failed; check registry access and the configured image reference.',

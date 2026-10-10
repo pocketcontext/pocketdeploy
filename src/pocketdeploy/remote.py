@@ -146,7 +146,8 @@ def containers():
 def normalized(app):
     return {'image': app['image'], 'env': app.get('resolved-env', {}),
             'smtp': app.get('resolved-smtp', {}), 'disable_tls': app.get('disable_tls', False), 'cpus': app.get('cpus', 0),
-            'memory': app.get('memory', 0), 'health-path': app.get('health-path', '/'), 'strategy': app.get('deploy-strategy', 'rolling'), 'timeout': app.get('deploy-stop-timeout', 300)}
+            'memory': app.get('memory', 0), 'health-path': app.get('health-path', '/'), 'strategy': app.get('deploy-strategy', 'rolling'), 'timeout': app.get('deploy-stop-timeout', 300),
+            'ready_timeout': app.get('deploy-ready-timeout', 60)}
 
 
 def image_repository(image):
@@ -165,7 +166,7 @@ def matching(app, current, previous, resolved=None):
     if (resolved and current and image_repository(prior.get('image', '')) == image_repository(target['image'])
             and '@sha256:' in prior.get('image', '') and resolved[1] == current['image_id']):
         prior['image'] = target['image']
-    if not previous or {**prior, 'smtp': prior.get('smtp', {})} != target or not current or not current['running'] or current.get('restart') != 'always':
+    if not previous or {**prior, 'smtp': prior.get('smtp', {}), 'ready_timeout': prior.get('ready_timeout', 60)} != target or not current or not current['running'] or current.get('restart') != 'always':
         return False
     actual = current['settings']
     if {k: v for k, v in actual.get('smtp', {}).items() if v} != target['smtp']:
@@ -223,9 +224,9 @@ def health(app, timeout=15):
             connection.close()
 
 
-def wait_healthy(app, budget=60):
+def wait_healthy(app, budget=None):
     """Allow proxy startup and certificate issuance; never clear pending on failure."""
-    deadline = time.monotonic() + budget
+    deadline = time.monotonic() + (app.get('deploy-ready-timeout', 60) if budget is None else budget)
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -262,7 +263,9 @@ def reconcile(request):
             summary = {'host': host, 'running': bool(actual and actual['running']),
                        'managed': host in manifest['apps'], 'pending': pending.exists(),
                        'container_id': actual['id'] if actual else None,
-                       'image_id': actual['image_id'] if actual else None}
+                       'image_id': actual['image_id'] if actual else None,
+                       'volumes': actual['volumes'] if actual else [],
+                       'settings_sha256': settings_hash(actual) if actual else None}
             summary.update(health(probe) if actual and actual['running'] else {'healthy': False, 'http_status': None})
             summaries.append(summary)
         return {'applications': summaries, 'pending_operations': len(list(BASE.glob('*.pending')))}
@@ -360,6 +363,78 @@ def reconcile(request):
         current = containers()
     probes = {app['host']: health(app) for app in apps} if request['action'] != 'plan' else {}
     return {'actions': actions, 'applications': [{'host': h, 'running': c['running'], **probes.get(h, {})} for h, c in current.items()]}
+
+
+def settings_hash(current):
+    """A comparison token; never disclose secret-bearing ONCE configuration."""
+    return hashlib.sha256(json.dumps(current['settings'], sort_keys=True,
+                                    separators=(',', ':')).encode()).hexdigest()
+
+
+def adopt_app(request):
+    """Transfer only verified existing ownership, without replacing or stopping."""
+    global STAGE
+    STAGE = 'application-adoption'
+    deployment = request['deployment_id']
+    if (BASE / 'retirement.json').exists():
+        raise RuntimeError('host is retired; convergence is disabled')
+    manifest = json.loads(MANIFEST.read_text()) if MANIFEST.exists() else {'deployment_id': deployment, 'apps': {}}
+    if manifest['deployment_id'] != deployment:
+        raise RuntimeError('host belongs to another deployment')
+    evidence = request['adoption']
+    host = evidence['host']
+    targets = [app for app in request['applications'] if app['host'] == host]
+    if len(targets) != 1 or evidence.get('previous_delivery_disabled') is not True:
+        raise RuntimeError('application adoption evidence does not match')
+    app = targets[0]
+    pending = BASE / (hashlib.sha256(host.encode()).hexdigest() + '.pending')
+    if pending.exists():
+        raise RuntimeError('unfinished deployment; operator recovery required')
+    journal = BASE / (hashlib.sha256(host.encode()).hexdigest() + '.adoption')
+    intent = {'deployment_id': deployment, 'evidence': evidence}
+    if journal.exists() and json.loads(journal.read_text()) != intent:
+        raise RuntimeError('application adoption evidence does not match')
+    if list(BASE.glob('*.pending')) or host in manifest.get('retained', {}):
+        raise RuntimeError('unfinished deployment; operator recovery required')
+    current = containers().get(host)
+    if (not current or current['id'] != evidence['container_id']
+            or current['image_id'] != evidence['image_id']
+            or sorted(current['volumes']) != sorted(tuple(v) for v in evidence['volumes'])
+            or settings_hash(current) != evidence['settings_sha256']
+            or not current['running'] or current['binds'] or current['oom']
+            or current.get('restart') != 'always' or not current['volumes']):
+        raise RuntimeError('application adoption evidence does not match')
+    actual = current['settings']
+    if actual.get('autoUpdate') is not False or actual.get('backup', {}).get('autoBackup', False) is not False:
+        raise RuntimeError('application adoption evidence does not match')
+    # Inspect the already-running immutable image; never pull a mutable tag here.
+    metadata = json.loads(run('docker', 'image', 'inspect', current['image_id']))[0]
+    digests = [digest for digest in metadata.get('RepoDigests', [])
+               if image_repository(digest) == image_repository(app['image'])
+               and re.fullmatch(r'.+@sha256:[0-9a-f]{64}', digest)]
+    if metadata.get('Id') != current['image_id'] or not digests:
+        raise RuntimeError('application adoption evidence does not match')
+    baseline = {**app, 'image': sorted(digests)[0],
+                'resolved-env': actual.get('env') or {},
+                'resolved-smtp': {k: v for k, v in actual.get('smtp', {}).items() if v},
+                'disable_tls': actual.get('disableTLS', False),
+                'cpus': actual.get('resources', {}).get('cpus', 0),
+                'memory': actual.get('resources', {}).get('memoryMB', 0)}
+    record = {'desired': normalized(baseline), 'image_id': current['image_id'], 'image_digest': baseline['image']}
+    if host in manifest['apps'] and (not journal.exists() or manifest['apps'][host] != record):
+        raise RuntimeError('application already has managed ownership')
+    if not health(app)['healthy']:
+        raise RuntimeError('application HTTP health check failed')
+    save(journal, intent)
+    # Recheck after image inspection and the health probe, before ownership commits.
+    if containers().get(host) != current:
+        raise RuntimeError('application adoption evidence does not match')
+    manifest['apps'][host] = record
+    save(MANIFEST, manifest)
+    # Retain the journal as immutable provenance and to allow an interrupted client
+    # to repeat exactly the same transfer after the manifest commit.
+    return {'host': host, 'adopted': True, 'container_id': current['id'],
+            'image_id': current['image_id'], 'volumes': current['volumes']}
 
 
 def authorized_keys(account, lines=None):
@@ -592,6 +667,8 @@ def main():
             return bootstrap(request)
         if request['action'] == 'converge':
             return reconcile(request)
+        if request['action'] == 'adopt-app':
+            return adopt_app(request)
         if request['action'] == 'github-install':
             return install_github(request)
         raise RuntimeError('unknown action')
@@ -605,6 +682,7 @@ if __name__ == '__main__':
                 'host belongs to another deployment', 'unmanaged application requires explicit adoption',
                 'cannot clear final environment binding with pinned ONCE CLI',
                 'host is retired; convergence is disabled', 'application did not stop cleanly',
-                'host retirement ownership verification failed'}
+                'host retirement ownership verification failed', 'application adoption evidence does not match',
+                'application already has managed ownership'}
         print(json.dumps({'error': str(exc) if str(exc) in safe else 'operation failed; output suppressed', 'stage': STAGE}))
         sys.exit(1)
