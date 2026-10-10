@@ -476,7 +476,6 @@ once:
     - host: www.bigconfig.online
       image: ghcr.io/pocketcontext/pocketcontext-website:latest
       github: pocketcontext/pocketcontext-website
-      manage-dns: true
       auto_update: false
       deploy-strategy: rolling
       smtp: true
@@ -507,8 +506,22 @@ privately in SQLite and transmitted to the host via SSH stdin.
 The first implementation supports one Cloudflare zone and one sending domain per
 deployment. Existing unowned DNS records, Resend domains and GitHub environments
 require explicit recovery/ownership resolution; matching names never authorize
-adoption. Website records are DNS-only to allow origin TLS verification. Domain
-verification has its own DAG stage. For a domain that is not yet verified, it
+adoption. With Cloudflare enabled, every application host defaults to a managed
+proxied A record (Auto TTL, `1`); explicit `manage-dns: false` excludes a host.
+The A record targets the deployment's verified public IPv4. SMTP records remain
+DNS-only with TTL `300`. With `provider-dns: no-infra`, application DNS remains
+externally managed; an explicit `manage-dns: true` requires Cloudflare.
+
+After applications are ready, HTTPS verification connects to the recorded origin
+IP while retaining the application hostname for SNI and certificate validation.
+It then checks public HTTPS through Cloudflare with a unique query and
+`Cache-Control: no-cache, no-store`. Both checks require a successful response;
+origin redirects stay on the same HTTPS hostname. Configure health endpoints to
+bypass custom cache rules. PocketDeploy does not change zone-wide TLS settings,
+WAF rules or cache rules; preserve Full (strict) for the origin connection.
+GitHub applications with externally managed DNS also receive both checks.
+
+Domain verification has its own DAG stage. For a domain that is not yet verified, it
 triggers verification once, then polls the recorded domain every ten seconds
 until verified. Already verified domains skip the trigger and polling. Convergence continues
 automatically without repeating compute, host setup or DNS reconciliation.
@@ -675,3 +688,34 @@ local token expiry before invoking OCI. An expired token fails with a safe
 renewal instruction instead of waiting for a provider request. This local check
 does not prove a token is otherwise valid; OCI may still reject revoked or
 invalid credentials. `init` and Vault workflows do not require OCI credentials.
+
+### Explicit DNS ownership transfer
+
+`adopt-dns` transfers one existing application A record to this deployment.
+Configure Cloudflare and the managed application first. Disable and drain the
+previous DNS manager, checkpoint its state, and obtain the exact zone ID, record
+ID and current IPv4. The address must match this deployment's recorded owned
+compute. Multiple A records or AAAA/CNAME conflicts are refused.
+
+Use `pocketdeploy dns-evidence --dns-host app.example.com --json` to obtain
+the allowlisted current record evidence without changing state or providers.
+
+The `--dns-settings-sha256` fingerprint is computed from the current record's allowlisted fields
+`type`, `name`, `content`, `proxied`, `ttl`, and `comment` (missing comment is null):
+SHA-256 of UTF-8 JSON with sorted keys and separators `(',', ':')`. Filter provider
+responses inside the inspecting process; never print raw provider metadata.
+
+```sh
+pocketdeploy adopt-dns --dns-host app.example.com \
+  --dns-zone-id EXACT_ZONE_ID --dns-record-id EXACT_RECORD_ID \
+  --dns-ipv4 CURRENT_OWNED_IPV4 --dns-settings-sha256 EXACT_FINGERPRINT \
+  --previous-dns-manager-disabled
+```
+
+The command journals exact evidence before changing only the record's ownership
+comment. It preserves record identity, address, proxy setting and TTL. Retry an
+interrupted transfer with the original evidence; do not clear its journal or
+manually edit SQLite. Ordinary convergence and deletion refuse an incomplete
+transfer. After adoption, `plan` and `converge` apply the normal proxied-A policy.
+Keep the previous manager disabled and save a new Vault checkpoint before
+removing its obsolete local state.

@@ -169,3 +169,15 @@ def test_reserved_github_paths_are_rejected_when_loading_configuration(tmp_path,
     with pytest.raises(DeployError, match='GitHub authority'):
         load(path, env={}, resolve=False)
     assert not (tmp_path / '.ssh').exists()
+
+
+@pytest.mark.parametrize('flag,allowed', [('', False), ('      manage-dns: false\n', True)])
+def test_implicit_cloudflare_dns_requires_tls(tmp_path, flag, allowed):
+    path = tmp_path / 'colors.yml'
+    path.write_text(BASE.replace('      env:', '      disable_tls: true\n' + flag + '      env:') +
+                    '\nprovider-dns: cloudflare\ncloudflare-zone-id: ' + 'a' * 32 + '\n')
+    if allowed:
+        load(path, env={}, resolve=False)
+    else:
+        with pytest.raises(DeployError, match='requires TLS'):
+            load(path, env={}, resolve=False)

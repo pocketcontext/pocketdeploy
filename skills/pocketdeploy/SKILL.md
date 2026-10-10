@@ -282,3 +282,19 @@ ownership failures. Inspect the failing stage and rerun `delete` to reconcile an
 resume. Recreation starts with fresh keys and application storage. No automatic
 backup or restoration is performed. Successful output lists removed and retained
 resources.
+
+## Existing application DNS ownership
+
+Use `adopt-dns` for an exact existing A record after disabling and draining its
+previous DNS manager. Read the README's explicit DNS transfer procedure. Obtain safe evidence using
+`dns-evidence --dns-host HOST --json`. Supply
+`--dns-host`, `--dns-zone-id`, `--dns-record-id`, `--dns-ipv4`,
+`--dns-settings-sha256`, and `--previous-dns-manager-disabled`. The IPv4 must match
+recorded owned compute. The settings fingerprint covers only type/name/content/
+proxied/ttl/comment; filter provider metadata before any output. Adoption changes
+only the ownership comment and durably journals before mutation. Retry interrupted
+adoption with the original exact evidence; never clear journals or edit SQLite.
+Then converge to the default proxied A record and Auto TTL. Cloudflare manages
+every configured application host unless explicitly excluded by `manage-dns: false`.
+Origin TLS verification preserves hostname/SNI; public checks bypass caches. Save
+recovery evidence before retiring the prior manager's private state.

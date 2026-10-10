@@ -43,7 +43,7 @@ def main():
         # A regression must fail locally before it can invoke deployment tools.
         marker = root / 'unexpected-external-command'
         guard = f'#!/bin/sh\nprintf blocked > "{marker}"\nexit 99\n'
-        for command in ('oci', 'ssh', 'scp', 'vaultcontext'):
+        for command in ('oci', 'ssh', 'scp', 'vaultcontext', 'cf', 'resend', 'gh'):
             stub = launcher.parent / command
             stub.write_text(guard)
             stub.chmod(0o700)
@@ -148,6 +148,13 @@ def main():
                '--volume', 'data:/storage', '--settings-sha256', 'c' * 64,
                '--previous-delivery-disabled', expected=STATE_REQUIRED)
         assert not list(application.glob('.colors.sqlite*')), 'Application adoption created identity.'
+        # An omitted DNS flag stays local with no-infra, and Cloudflare's default
+        # host selection must still respect the missing-state guard before reads.
+        invoke(application, 'plan', expected=STATE_REQUIRED)
+        application_config.write_text(application_config.read_text() +
+                                      '\nprovider-dns: cloudflare\ncloudflare-zone-id: ' + 'a' * 32 + '\n')
+        invoke(application, 'plan', expected=STATE_REQUIRED)
+        assert not list(application.glob('.colors.sqlite*')), 'DNS defaults created identity.'
         application_config.write_text(application_config.read_text().replace('deploy-ready-timeout: 900',
                                                                             'deploy-ready-timeout: 0'))
         invoke(application, 'status', expected='Ready timeout must be between 1 and 3600 seconds.')
@@ -241,7 +248,7 @@ def main():
         assert token.read_text() not in expired_run.stdout + expired_run.stderr
         print(f'Expired synthetic OCI token rejected locally in {elapsed:.2f}s; OCI was not invoked.')
 
-    print('Portable launcher: 34 checks passed (no cloud access).')
+    print('Portable launcher: 36 checks passed (no cloud access).')
 
 
 if __name__ == '__main__':

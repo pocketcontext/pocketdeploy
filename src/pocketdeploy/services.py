@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
 from .common import DeployError, run
+from .config import manages_dns
 from .output import operation
 from .retry import run_read
 from .smtp import smtp_transport
@@ -191,7 +192,7 @@ class Services:
                 raise DeployError('Cloudflare zone identity does not match.')
             zone_name = zone.get('name')
             self.zone_name = zone_name
-            hosts = [a['host'] for a in self.c.get('once', {}).get('applications', []) if a.get('manage-dns')]
+            hosts = [a['host'] for a in self.c.get('once', {}).get('applications', []) if manages_dns(self.c, a)]
             if self.c.get('provider-smtp') == 'resend':
                 hosts.append(self.c['smtp-domain'])
             if not isinstance(zone_name, str) or any(h != zone_name and not h.endswith('.' + zone_name) for h in hosts):
@@ -203,8 +204,8 @@ class Services:
             if domain is None and self.state.get_meta('pending:smtp-domain'):
                 raise DeployError('Previous SMTP domain creation requires outcome reconciliation before convergence.', code='provider_recovery_required')
         for app in self.c.get('once', {}).get('applications', []):
-            if app.get('manage-dns'):
-                self._dns({'type': 'A', 'name': app['host'], 'content': '0.0.0.0'})
+            if manages_dns(self.c, app):
+                self._dns({'type': 'A', 'name': app['host'], 'content': '0.0.0.0', 'proxied': True, 'ttl': 1})
 
     def _resend_inventory(self, kind):
         rows, after = [], None
@@ -254,6 +255,10 @@ class Services:
         return sorted((r for r in self.state.resources() if r['kind'] in order), key=lambda r: (order[r['kind']], r['name']))
 
     def plan_delete(self):
+        for row in self.state.db.execute("SELECT value FROM meta WHERE key LIKE 'dns-adoption:dns:%'").fetchall():
+            adoption = json.loads(row['value'])
+            if adoption and not adoption.get('completed'):
+                raise DeployError('Resume explicit DNS adoption before deletion.', code='provider_recovery_required')
         resources = self._delete_resources()
         if any(r['kind'] == 'cloudflare-dns' for r in resources) and not os.environ.get('CLOUDFLARE_API_TOKEN'):
             raise DeployError('Set CLOUDFLARE_API_TOKEN with zone DNS edit permission.', code='credentials_missing')
@@ -318,6 +323,9 @@ class Services:
 
     def _dns(self, desired, op=None):
         name = 'dns:' + desired['type'] + ':' + desired['name']
+        adoption = self.state.get_meta('dns-adoption:' + name)
+        if adoption and not adoption.get('completed'):
+            raise DeployError('Resume explicit DNS adoption before ordinary reconciliation.', code='provider_recovery_required')
         saved = self.state.get_resource(name)
         if saved and saved['attributes'].get('zone') != self.c['cloudflare-zone-id']:
             raise DeployError('Recorded DNS zone differs from configuration.')
@@ -334,7 +342,7 @@ class Services:
             raise DeployError('DNS record exists outside this deployment; refusing adoption.')
         if saved and not current:
             raise DeployError('Recorded DNS record disappeared; reconcile before recreating it.')
-        body = {**desired, 'ttl': 300, 'proxied': False, 'comment': self.marker}
+        body = {'ttl': 300, 'proxied': False, **desired, 'comment': self.marker}
         equal = current and all(current.get(k) == v for k, v in body.items())
         action = 'noop' if equal else ('update' if current else 'create')
         result = {'name': desired['name'], 'type': desired['type'], 'action': action}
@@ -433,11 +441,11 @@ class Services:
     def plan(self, connection=None):
         actions = []
         for app in self.c.get('once', {}).get('applications', []):
-            if app.get('manage-dns'):
+            if manages_dns(self.c, app):
                 if connection:
-                    actions.append(self._dns({'type': 'A', 'name': app['host'], 'content': self._ip(connection)}))
+                    actions.append(self._dns({'type': 'A', 'name': app['host'], 'content': self._ip(connection), 'proxied': True, 'ttl': 1}))
                 else:
-                    self._dns({'type': 'A', 'name': app['host'], 'content': '0.0.0.0'})
+                    self._dns({'type': 'A', 'name': app['host'], 'content': '0.0.0.0', 'proxied': True, 'ttl': 1})
                     actions.append({'name': app['host'], 'type': 'A', 'action': 'after-compute'})
         if self.c.get('provider-smtp') == 'resend':
             domain = self._domain()
@@ -460,8 +468,8 @@ class Services:
         self._verified_domain = None
         actions = []
         for app in self.c.get('once', {}).get('applications', []):
-            if app.get('manage-dns'):
-                actions.append(self._dns({'type': 'A', 'name': app['host'], 'content': self._ip(connection)}, operation_id))
+            if manages_dns(self.c, app):
+                actions.append(self._dns({'type': 'A', 'name': app['host'], 'content': self._ip(connection), 'proxied': True, 'ttl': 1}, operation_id))
         if self.c.get('provider-smtp') == 'resend':
             domain = self._domain(operation_id)
             actions.extend(self._dns(row, operation_id) for row in self._email_dns(domain))

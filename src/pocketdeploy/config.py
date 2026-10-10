@@ -11,6 +11,11 @@ from blue.cli import load_yaml, read_pars, par_name
 from .common import DeployError, local_path
 from .smtp import smtp_transport
 
+def manages_dns(config, app):
+    """Cloudflare manages declared application hosts unless explicitly excluded."""
+    return app.get('manage-dns', config.get('provider-dns') == 'cloudflare')
+
+
 DEFAULTS = {
     'schema-version': 1, 'provider-compute': 'oci', 'workdir': '.colors',
     'state-file': '.colors.sqlite', 'oci-auth': 'security_token',
@@ -203,7 +208,7 @@ def validate(c):
                 raise DeployError('Application smtp and manage-dns flags must be booleans.')
         if app.get('smtp') and c['provider-smtp'] != 'resend':
             raise DeployError('smtp: true requires provider-smtp: resend.')
-        if app.get('manage-dns') and app.get('disable_tls'):
+        if manages_dns(c, app) and app.get('disable_tls'):
             raise DeployError('Managed website DNS requires TLS enabled.')
         if app.get('manage-dns') and c['provider-dns'] != 'cloudflare':
             raise DeployError('manage-dns: true requires provider-dns: cloudflare.')

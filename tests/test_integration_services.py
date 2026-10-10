@@ -264,7 +264,7 @@ def test_github_external_dns_still_requires_public_https():
     from contextlib import nullcontext
     with patch('pocketdeploy.health.urllib.request.urlopen', return_value=nullcontext(response)) as request:
         verify({'once': {'applications': [{'host': 'www.example.test', 'health-path': '/up', 'github': 'example/site', 'manage-dns': False}]}})
-    assert request.call_args.args[0] == 'https://www.example.test/up'
+    assert request.call_args.args[0].full_url.startswith('https://www.example.test/up?_pocketdeploy_health=')
 
 
 def test_transient_service_read_recovers_without_restarting_converge(tmp_path, monkeypatch):

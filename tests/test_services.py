@@ -660,3 +660,53 @@ def test_cloudflare_colored_box_uses_final_footer_only():
     error = _provider_error('cf', stderr)
     assert error.status == 401
     assert not error.retryable
+
+
+@pytest.mark.parametrize('flag,managed', [(None, True), (True, True), (False, False)])
+def test_cloudflare_manages_application_hosts_by_default(service, monkeypatch, flag, managed):
+    service.c['provider-dns'] = 'cloudflare'
+    app = {'host': 'www.example.com'}
+    if flag is not None:
+        app['manage-dns'] = flag
+    service.c['once']['applications'] = [app]
+    desired = []
+    monkeypatch.setattr(service, '_dns', lambda row, op=None: desired.append(row) or {'action': 'create'})
+    service.prepare_dns({'public_ip': '192.0.2.1'}, 'op')
+    assert desired == ([{'type': 'A', 'name': app['host'], 'content': '192.0.2.1',
+                         'proxied': True, 'ttl': 1}] if managed else [])
+
+
+def test_no_infra_does_not_implicitly_manage_hosts(service, monkeypatch):
+    service.c['provider-dns'] = 'no-infra'
+    service.c['once']['applications'] = [{'host': 'www.example.com'}]
+    monkeypatch.setattr(service, '_cf', lambda args: pytest.fail('cloud access'))
+    assert service.prepare_dns({}, 'op') == {'actions': []}
+
+
+@pytest.mark.parametrize('desired,proxied,ttl', [
+    ({'type': 'A', 'name': 'www.example.com', 'content': '192.0.2.1', 'proxied': True, 'ttl': 1}, True, 1),
+    ({'type': 'MX', 'name': 'send.example.com', 'content': 'smtp.example.net', 'priority': 10}, False, 300),
+    ({'type': 'TXT', 'name': 'send.example.com', 'content': 'public'}, False, 300),
+])
+def test_application_proxy_and_smtp_dns_settings(service, monkeypatch, desired, proxied, ttl):
+    records = []
+    monkeypatch.setattr(service, '_records', lambda name: records)
+    def cf(args):
+        body = json.loads(args[args.index('--body') + 1])
+        assert body['proxied'] is proxied
+        assert body['ttl'] == ttl
+        records.append({'id': 'dns-id', **body})
+        return records[0]
+    monkeypatch.setattr(service, '_cf', cf)
+    op = service.state.begin_operation('converge', 'hash')
+    assert service._dns(desired, op)['action'] == 'create'
+    assert service._dns(desired, op)['action'] == 'noop'
+
+
+def test_incomplete_dns_adoption_blocks_ordinary_reconciliation_and_deletion(service, monkeypatch):
+    service.state.set_meta('dns-adoption:dns:A:www.example.com', {'step': 'pending'})
+    monkeypatch.setattr(service, '_records', lambda name: pytest.fail('provider before adoption guard'))
+    with pytest.raises(DeployError, match='Resume explicit DNS adoption'):
+        service._dns({'type': 'A', 'name': 'www.example.com', 'content': '192.0.2.1'})
+    with pytest.raises(DeployError, match='Resume explicit DNS adoption'):
+        service.plan_delete()

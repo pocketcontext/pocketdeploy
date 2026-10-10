@@ -187,8 +187,16 @@ support and use the selected mode. Fizzy defaults to STARTTLS; implicit TLS
 requires its documented `SMTP_TLS=true` environment setting. Certificate checks
 stay enabled. A host probe does not verify application mail configuration.
 
-Applications opt into `manage-dns: true`, `smtp: true` and
-`github: owner/repository`. GitHub images must belong to that repository on GHCR;
+With `provider-dns: cloudflare`, every application host defaults to managed DNS;
+`manage-dns: false` explicitly excludes a host. Application A records use proxy
+enabled and Auto TTL (`1`), targeting the verified deployment IPv4; SMTP records
+remain unproxied with TTL `300`. With `provider-dns: no-infra`, DNS remains
+externally managed unless explicitly requested, which fails validation.
+Convergence checks direct-origin HTTPS with hostname/SNI certificate validation,
+then public HTTPS with a unique query and cache-control headers. Keep health
+endpoints outside custom cache rules. Shared zone TLS/WAF/cache settings remain
+externally managed; preserve Full (strict). Applications opt into
+`smtp: true` and `github: owner/repository`. GitHub images must belong to that repository on GHCR;
 one app per repository is supported. The environment equals `profile`, and an
 explicit `github-environment` may only repeat that exact profile. TLS must remain
 enabled for GitHub and managed website DNS. The profile is durable, not a tool

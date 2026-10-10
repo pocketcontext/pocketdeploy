@@ -42,6 +42,8 @@ def parser():
   ssh            Open SSH or run --ssh-command; preserve remote output and exit
   delete         Delete owned resources, subject to destruction protection
   smtp-test      Send one explicit SMTP test using --to
+  dns-evidence   Inspect safe exact application DNS adoption evidence
+  adopt-dns      Transfer one exact existing application A record
   adopt-app      Transfer a verified existing application after draining prior delivery
   adopt          Recover an existing instance with matching deployment UUID tags
   rotate-host-key  Finish bootstrap host-key migration without application changes
@@ -60,7 +62,7 @@ Examples:
 
 Configuration defaults to colors.yml in the current working directory.
 Use -f to select a deployment. Run without arguments to show this help.''')
-    p.add_argument('command', metavar='COMMAND', choices=['init', 'plan', 'converge', 'status', 'ssh', 'delete', 'adopt', 'adopt-app', 'smtp-test', 'rotate-host-key', 'vault-save', 'vault-restore'], help='Deployment or Vault command listed below')
+    p.add_argument('command', metavar='COMMAND', choices=['init', 'plan', 'converge', 'status', 'ssh', 'delete', 'adopt', 'adopt-app', 'adopt-dns', 'dns-evidence', 'smtp-test', 'rotate-host-key', 'vault-save', 'vault-restore'], help='Deployment or Vault command listed below')
     p.add_argument('-f', '--file', help='Configuration file (default: ./colors.yml in the current working directory)')
     p.add_argument('--json', action='store_true', help='Emit one versioned JSON result on stdout')
     p.add_argument('--verbose', action='store_true', help='Show safe request timings and waiting progress on stderr')
@@ -73,6 +75,9 @@ Use -f to select a deployment. Run without arguments to show this help.''')
     p.add_argument('--volume', action='append', help='Exact existing named volume and mount destination, NAME:/PATH (repeatable)')
     p.add_argument('--settings-sha256', help='Existing ONCE settings fingerprint from status')
     p.add_argument('--previous-delivery-disabled', action='store_true', help='Assert previous delivery authority is disabled and drained')
+    for flag in ('dns-host', 'dns-zone-id', 'dns-record-id', 'dns-ipv4', 'dns-settings-sha256'):
+        p.add_argument('--' + flag, help='Exact existing DNS evidence for adopt-dns')
+    p.add_argument('--previous-dns-manager-disabled', action='store_true', help='Assert previous DNS authority is disabled and drained')
     p.add_argument('--document', help='Vault state document to restore')
     p.add_argument('--version', help='Exact Vault state version to restore')
     p.add_argument('--destination', help='Recovery directory containing matching Git configuration')
@@ -190,7 +195,7 @@ async def converge(config, state, cloud, host, operation, reporter=None, rotate_
     def verify(opts):
         results['status'] = host.status(results['connection'])
         from .health import verify as verify_https
-        verify_https(config)
+        verify_https(config, results['connection'])
         return dict(opts)
 
     steps = {'preflight': [preflight, 'keys'], 'keys': [keys, 'compute'], 'compute': [compute, 'host'],
@@ -240,6 +245,23 @@ def execute(args, reporter=None):
 
 def _execute(args, reporter=None):
     reporter = reporter or Reporter(quiet=getattr(args, "quiet", False), command=args.command)
+    dns_options = ('dns_host', 'dns_zone_id', 'dns_record_id', 'dns_ipv4', 'dns_settings_sha256', 'previous_dns_manager_disabled')
+    if args.command == 'dns-evidence' and (not getattr(args, 'dns_host', None) or any(getattr(args, key, None) for key in dns_options[1:])):
+        raise DeployError('dns-evidence requires only --dns-host.', code='invalid_usage')
+    if args.command not in ('adopt-dns', 'dns-evidence') and any(getattr(args, key, None) for key in dns_options):
+        raise DeployError('DNS adoption options require adopt-dns.', code='invalid_usage')
+    if args.command == 'adopt-dns':
+        import re
+        import ipaddress
+        try:
+            valid_ip = bool(ipaddress.IPv4Address(args.dns_ipv4))
+        except (ValueError, TypeError):
+            valid_ip = False
+        if (not all(getattr(args, key, None) for key in dns_options) or not valid_ip
+                or not re.fullmatch(r'[0-9a-f]{32}', args.dns_zone_id or '')
+                or not re.fullmatch(r'[0-9a-f]{32}', args.dns_record_id or '')
+                or not re.fullmatch(r'[0-9a-f]{64}', args.dns_settings_sha256 or '')):
+            raise DeployError('adopt-dns requires exact host, zone/record IDs, IPv4, settings fingerprint and disabled previous DNS manager.', code='invalid_usage')
     adoption_options = ('app_host', 'container_id', 'image_id', 'volume', 'settings_sha256', 'previous_delivery_disabled')
     if args.command != 'adopt-app' and any(getattr(args, key, None) for key in adoption_options):
         raise DeployError('Application adoption options require adopt-app.', code='invalid_usage')
@@ -269,7 +291,7 @@ def _execute(args, reporter=None):
     if smtp_timeout is not None and (args.command != 'converge' or args.dry_run
                                     or not 0 <= smtp_timeout <= 3600):
         raise DeployError('--smtp-verification-timeout requires converge without --dry-run and 0–3600 seconds.', code='invalid_usage')
-    read_only = args.command in ('plan', 'status') or args.dry_run
+    read_only = args.command in ('plan', 'status', 'dns-evidence') or args.dry_run
     config_file = args.file if args.file is not None else 'colors.yml'
     if args.file is None and not Path(config_file).exists():
         raise DeployError('No colors.yml found in the current directory; use -f to select a configuration.')
@@ -306,6 +328,9 @@ def _execute(args, reporter=None):
             cloud_type = OCI if config['provider-compute'] == 'oci' else provider_class(config['provider-compute'])
             cloud = cloud_type(config, state)
             if read_only:
+                if args.command == 'dns-evidence':
+                    from .dns_adoption import inspect
+                    return inspect(config, state, cloud.connection(), args.dns_host)
                 if args.command == 'status':
                     observed = cloud.inspect()
                     result = {'profile': config['profile'], 'state': state.safe_status(), 'resources': observed}
@@ -364,6 +389,12 @@ def _execute(args, reporter=None):
                     if config.get('provider-smtp') != 'resend':
                         raise DeployError('smtp-test requires provider-smtp: resend.')
                     result = host.smtp_test(cloud.connection(), Services(config, state).smtp_settings(), args.to)
+                elif args.command == 'adopt-dns':
+                    from .dns_adoption import adopt
+                    result = adopt(config, state, cloud.connection(), operation, {
+                        'host': args.dns_host, 'zone': args.dns_zone_id, 'record_id': args.dns_record_id,
+                        'ipv4': args.dns_ipv4, 'settings_sha256': args.dns_settings_sha256,
+                        'previous_dns_manager_disabled': True})
                 elif args.command == 'adopt-app':
                     recorded = state.get_resource('compute')
                     if not recorded or not recorded['owned']:
