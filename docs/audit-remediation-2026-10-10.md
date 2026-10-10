@@ -58,3 +58,7 @@ outside the checkout, then tests and pins the published portable launcher.
 Local source and isolated installed-wheel validation each passed 441 tests.
 Both the wheel and source archive built successfully. These results do not
 include live cloud provisioning, host reboot or packet-filter verification.
+The published package at `b97677684a02ee776052be485557a032af440499` also passed
+441 tests outside the checkout and its CI passed. The copied launcher passed
+23 isolated checks, including missing-state adoption/rotation and unsafe paths
+and SSH usernames, before being pinned to that package commit.

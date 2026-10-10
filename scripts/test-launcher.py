@@ -115,6 +115,24 @@ def main():
         fresh.mkdir()
         (fresh / 'colors.yml').write_text(CONFIG.replace('compute-require-existing-state: true',
                                                        'compute-require-existing-state: false'))
+        adoption = invoke(fresh, 'adopt', '--instance-id', 'synthetic-instance',
+                          '--json', '--quiet', expected='')
+        assert json.loads(adoption.stdout)['error']['message'] == STATE_REQUIRED
+        assert not list(fresh.glob('.colors.sqlite*')), 'Adoption created a new deployment identity.'
+        rotation = invoke(fresh, 'rotate-host-key', '--json', '--quiet', expected='')
+        assert json.loads(rotation.stdout)['error']['message'] == STATE_REQUIRED
+        assert not list(fresh.glob('.colors.sqlite*')), 'Rotation created a new deployment identity.'
+        unsafe = root / 'unsafe'
+        unsafe.mkdir()
+        unsafe_config = unsafe / 'colors.yml'
+        unsafe_config.write_text((fresh / 'colors.yml').read_text() + '\nssh-private-key-file: colors.yml\n')
+        original = unsafe_config.read_bytes()
+        invoke(unsafe, 'init', '--json', '--quiet', expected='distinct paths')
+        assert unsafe_config.read_bytes() == original
+        assert not list(unsafe.glob('.colors.sqlite*')), 'Unsafe paths initialized state.'
+        unsafe_config.write_text((fresh / 'colors.yml').read_text() + '\nssh-user: -oProxyCommand=invalid\n')
+        invoke(unsafe, 'init', '--json', '--quiet', expected='ssh-user')
+        assert not list(unsafe.glob('.colors.sqlite*')), 'Unsafe SSH user initialized state.'
         conflicting = invoke(fresh, 'init', '--json', '--verbose', '--quiet', expected='')
         conflict_envelope = json.loads(conflicting.stdout)
         assert conflicting.returncode == 2 and conflict_envelope['ok'] is False
@@ -182,7 +200,7 @@ def main():
         assert token.read_text() not in expired_run.stdout + expired_run.stderr
         print(f'Expired synthetic OCI token rejected locally in {elapsed:.2f}s; OCI was not invoked.')
 
-    print('Portable launcher: 19 checks passed (no cloud access).')
+    print('Portable launcher: 23 checks passed (no cloud access).')
 
 
 if __name__ == '__main__':
