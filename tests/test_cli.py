@@ -70,6 +70,38 @@ oci-availability-domain: ad
 '''
 
 
+@pytest.mark.parametrize('arguments', [
+    ['converge', '--smtp-verification-timeout', '-1'],
+    ['converge', '--smtp-verification-timeout', '3601'],
+    ['converge', '--smtp-verification-timeout', '1.5'],
+    ['status', '--smtp-verification-timeout', '600'],
+    ['converge', '--dry-run', '--smtp-verification-timeout', '600'],
+])
+def test_smtp_timeout_invalid_usage_has_no_side_effects(tmp_path, monkeypatch, arguments):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, 'load', lambda *a, **kw: pytest.fail('Loaded configuration'))
+    with pytest.raises(DeployError) as error:
+        cli.execute(cli.parser().parse_args(arguments))
+    assert error.value.code == 'invalid_usage'
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize('value, expected', [(None, 600), ('0', 0), ('900', 900), ('3600', 3600)])
+def test_smtp_timeout_forwarded_to_workflow(tmp_path, monkeypatch, value, expected):
+    (tmp_path / 'colors.yml').write_text(SYNTHETIC_CONFIG)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, 'Host', lambda *a: object())
+    monkeypatch.setattr(cli, 'OCI', lambda *a: object())
+    calls = []
+    async def workflow(*args, **kwargs):
+        calls.append(kwargs['smtp_verification_timeout'])
+        return {'profile': 'demo'}
+    monkeypatch.setattr(cli, 'converge', workflow)
+    arguments = ['converge'] + (['--smtp-verification-timeout', value] if value is not None else [])
+    assert cli.execute(cli.parser().parse_args(arguments)) == {'profile': 'demo'}
+    assert calls == [expected]
+
+
 def init_offline(tmp_path, monkeypatch, extra=''):
     from pocketdeploy.config import load, scope
     (tmp_path / 'colors.yml').write_text(SYNTHETIC_CONFIG + extra)

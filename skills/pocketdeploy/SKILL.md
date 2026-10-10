@@ -68,8 +68,9 @@ acknowledged Vault document/version/save time, or null; older receipts may lack 
 time. It makes no Vault call and does not establish freshness. A restored
 snapshot may contain a prior receipt. A plan is not proof of completed convergence.
 
-`converge` runs the DAG: preflight → keys → OCI → host → DNS/SMTP → applications →
-HTTPS verification → GitHub. `create` is removed; there is no compatibility alias. Cloud/app mutations must stay within the user's authorized scope;
+`converge` runs the DAG: preflight → keys → OCI → host → service DNS →
+SMTP verification → SMTP credentials → applications → HTTPS verification → GitHub.
+SMTP stages are skipped when Resend is disabled. `create` is removed; there is no compatibility alias. Cloud/app mutations must stay within the user's authorized scope;
 existing authorization applies without repeated permission requests. Expired
 provider authentication requires renewal through the configured CLI identity,
 not a different account or operator credentials. Report the failing stage and
@@ -205,8 +206,23 @@ Unknown commands and a lone `--json` remain usage errors (exit 2).
 Read the managed-services configuration reference before Cloudflare, Resend or
 GitHub operations. Use only the supplied management credentials; never copy them
 into CI. Missing or conflicting ownership requires reconciliation. SMTP verification
-may need a later convergence after DNS propagation; uncertain credential creation
-requires operator recovery without blind retry.
+is a separate DAG stage. For a domain that is not yet verified, it triggers
+verification once and polls the recorded domain every ten seconds, then
+automatically continues within the same convergence. Already verified domains
+skip the trigger and polling.
+Compute, host setup and DNS reconciliation are not repeated while waiting. SMTP
+credentials and applications wait for verification.
+
+`converge --smtp-verification-timeout SECONDS` sets the verification wait budget
+(integer seconds from 0 to 3600, default 600). `0` makes one immediate check
+without polling. The option requires `converge` without `--dry-run` and belongs
+on the command line, not in `colors.yml`. Stage start and completion, including
+elapsed duration, go to stderr unless `--quiet` is set. Use `--verbose` for
+periodic waiting updates. Authentication or domain identity
+errors stop immediately. Timeout reports `smtp_verification_pending`; timeout and
+interruption preserve resources and recovery state. Resolve the cause before
+resuming convergence against the existing resources. Uncertain credential
+creation requires operator recovery without blind retry.
 
 GitHub environments default to the exact deployment profile. All repository
 environments are active CD targets, so retire stale environments before enabling

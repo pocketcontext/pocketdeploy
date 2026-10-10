@@ -90,7 +90,9 @@ instance still requires recovery. Use `init → vault-save → converge → vaul
 when encrypted recovery is configured. The first snapshot preserves authority
 before provisioning; the second records the resulting resource identities.
 
-`converge` runs a DAG: preflight → keys → OCI → host → DNS/SMTP → applications → HTTPS verification → GitHub.
+`converge` runs a DAG: preflight → keys → OCI → host → service DNS →
+SMTP verification → SMTP credentials → applications → HTTPS verification → GitHub.
+SMTP stages are skipped when Resend is disabled.
 Each external mutation records intent first and the verified result afterward.
 An unchanged converge makes no OCI mutations and no application replacement.
 Host setup still verifies/enables services, and mutable image tags are pulled to
@@ -350,7 +352,22 @@ The first implementation supports one Cloudflare zone and one sending domain per
 deployment. Existing unowned DNS records, Resend domains and GitHub environments
 require explicit recovery/ownership resolution; matching names never authorize
 adoption. Website records are DNS-only to allow origin TLS verification. Domain
-verification can be pending after DNS changes: rerun convergence after propagation.
+verification has its own DAG stage. For a domain that is not yet verified, it
+triggers verification once, then polls the recorded domain every ten seconds
+until verified. Already verified domains skip the trigger and polling. Convergence continues
+automatically without repeating compute, host setup or DNS reconciliation.
+SMTP credentials and applications wait for successful verification.
+
+Use `pocketdeploy converge --smtp-verification-timeout 900` to allow up to
+15 minutes for verification. The timeout accepts integer seconds from 0 to 3600,
+defaulting to 600; `0` performs one immediate check without polling. The option
+requires `converge` without `--dry-run` and is not a `colors.yml` setting. Stage
+start and completion, including elapsed duration, appear on stderr unless
+`--quiet` is set. Add `--verbose` for periodic waiting updates. Authentication
+or domain identity errors stop
+immediately. Timeout returns `smtp_verification_pending` and preserves provisioned
+resources and recovery state; interruption also preserves them. After resolving
+the cause, a later convergence reconciles the existing resources.
 A lost Resend domain/key creation response requires operator reconciliation, not
 blind retries. Keys are reused; rotation is a separate operation.
 

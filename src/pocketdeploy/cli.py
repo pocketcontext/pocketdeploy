@@ -71,6 +71,8 @@ Use -f to select a deployment. Run without arguments to show this help.''')
     p.add_argument('--overwrite', action='store_true', help='Explicitly replace recovery destinations')
     p.add_argument('--ssh-command', help='Explicit remote command; otherwise open an interactive shell')
     p.add_argument('--rotate-github-keys', action='store_true', help='Rotate disposable GitHub deployment keys during converge')
+    p.add_argument('--smtp-verification-timeout', type=int, metavar='SECONDS',
+                   help='Wait for SMTP verification during converge (0–3600 seconds; default: 600; 0 checks once)')
     p.add_argument('--to', help='Recipient for the explicit smtp-test command')
     return p
 
@@ -114,7 +116,8 @@ def initialize(config, state, host, root):
     return {'profile': config['profile'], 'initialized': True, 'deployment_id': state.deployment_id}
 
 
-async def converge(config, state, cloud, host, operation, reporter=None, rotate_github_keys=False):
+async def converge(config, state, cloud, host, operation, reporter=None, rotate_github_keys=False,
+                   smtp_verification_timeout=600):
     """Blue schedules named steps; mutable secrets/state stay in closure objects."""
     results = {}
     reporter = reporter or Reporter()
@@ -138,9 +141,17 @@ async def converge(config, state, cloud, host, operation, reporter=None, rotate_
 
     def infrastructure_services(opts):
         if services:
-            results['services'] = services.converge(results['connection'], operation)
-            if config.get('provider-smtp') == 'resend':
-                host.smtp_settings = services.smtp_settings()
+            results['services'] = services.prepare_dns(results['connection'], operation)
+        return dict(opts)
+
+    def smtp_verification(opts):
+        services.verify_smtp(timeout=smtp_verification_timeout)
+        return dict(opts)
+
+    def smtp_credentials(opts):
+        credentials = services.ensure_smtp_credentials(operation)
+        results['services']['actions'].extend(credentials['actions'])
+        host.smtp_settings = services.smtp_settings()
         return dict(opts)
 
     def publish_github(opts):
@@ -175,6 +186,10 @@ async def converge(config, state, cloud, host, operation, reporter=None, rotate_
     steps = {'preflight': [preflight, 'keys'], 'keys': [keys, 'compute'], 'compute': [compute, 'host'],
              'host': [bootstrap, 'services'], 'services': [infrastructure_services, 'applications'],
              'applications': [applications, 'verify'], 'verify': [verify, 'github'], 'github': [publish_github]}
+    if config.get('provider-smtp') == 'resend':
+        steps['services'] = [infrastructure_services, 'smtp-verification']
+        steps['smtp-verification'] = [smtp_verification, 'smtp-credentials']
+        steps['smtp-credentials'] = [smtp_credentials, 'applications']
     # Functions catch at the boundary so Blue never captures a secret-bearing traceback.
     def wire(name, _opts):
         fn, *successors = steps[name]
@@ -218,6 +233,10 @@ def execute(args, reporter=None):
         raise DeployError('smtp-test requires --to; --to is only supported for smtp-test.', code='invalid_usage')
     if getattr(args, 'rotate_github_keys', False) and (args.command != 'converge' or args.dry_run):
         raise DeployError('--rotate-github-keys requires converge without --dry-run.', code='invalid_usage')
+    smtp_timeout = getattr(args, 'smtp_verification_timeout', None)
+    if smtp_timeout is not None and (args.command != 'converge' or args.dry_run
+                                    or not 0 <= smtp_timeout <= 3600):
+        raise DeployError('--smtp-verification-timeout requires converge without --dry-run and 0–3600 seconds.', code='invalid_usage')
     read_only = args.command in ('plan', 'status') or args.dry_run
     config_file = args.file if args.file is not None else 'colors.yml'
     if args.file is None and not Path(config_file).exists():
@@ -292,7 +311,9 @@ def execute(args, reporter=None):
             try:
                 if args.command == 'converge':
                     state.set_meta('desired-config', {k: v for k, v in config.items() if not k.startswith('_')})
-                    result = asyncio.run(converge(config, state, cloud, host, operation, reporter, rotate_github_keys=getattr(args, 'rotate_github_keys', False)))
+                    result = asyncio.run(converge(config, state, cloud, host, operation, reporter,
+                                                 rotate_github_keys=getattr(args, 'rotate_github_keys', False),
+                                                 smtp_verification_timeout=600 if smtp_timeout is None else smtp_timeout))
                 elif args.command == 'rotate-host-key':
                     recorded = state.get_resource('compute')
                     if not recorded or not recorded['owned']:

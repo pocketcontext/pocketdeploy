@@ -29,7 +29,6 @@ oci-memory-in-gbs: 6
 oci-boot-volume-size-in-gbs: 50
 compute-prevent-destroy: true
 compute-require-existing-state: false
-compute-retain-boot-volume: true
 compute-ssh-sources: [203.0.113.10/32]
 compute-http-sources: [0.0.0.0/0]
 provider-dns: no-infra
@@ -187,7 +186,30 @@ are excluded from Vault and recreated during convergence when missing. Use
 `converge --rotate-github-keys` for explicit rotation; normal runs reuse keys.
 `plan` and `status` never rotate them.
 
-`converge` verifies DNS/SMTP, applications and HTTPS before publishing CI access.
-Use explicit `smtp-test --to ADDRESS` for a single authorized test email. Deletion
-retains SMTP domains, keys and email DNS while removing owned website records and
-GitHub environments. Retire queued CI runs before deleting environments.
+`converge` reconciles service DNS, waits for SMTP verification in a separate DAG
+stage, then provisions SMTP credentials, applications and HTTPS before publishing
+CI access. With Resend enabled, a domain that is not yet verified receives one
+verification trigger, then its recorded identity is polled every ten seconds.
+Already verified domains skip the trigger and polling. Verified status lets the same convergence
+continue without repeating compute, host setup or DNS reconciliation.
+
+`converge --smtp-verification-timeout SECONDS` sets the verification wait budget
+as integer seconds from 0 to 3600 (default 600). `0` performs one immediate check
+without polling. The option requires `converge` without `--dry-run` and is not a
+`colors.yml` field. Stage start and completion, including elapsed duration,
+appear on stderr unless `--quiet` is set. Add `--verbose` for periodic waiting
+updates. Authentication or
+domain identity errors stop immediately. Timeout returns
+`smtp_verification_pending`; timeout and interruption preserve resources and
+recovery state. SMTP stages are skipped when Resend is disabled.
+
+Use explicit `smtp-test --to ADDRESS` for a single authorized test email.
+Deletion removes the owned SMTP sending key and domain, email and website DNS,
+GitHub environments, compute, firewall, all owned boot volumes and generated SSH
+keys. It preserves external networking, management credentials, private bindings,
+Git configuration, SQLite receipts and Vault history. The retired
+`compute-retain-boot-volume` field and `COLORS_PAR_COMPUTE_RETAIN_BOOT_VOLUME`
+override are rejected; remove them from existing deployments. Review
+`delete --dry-run` before an authorized deletion with
+`compute-prevent-destroy: false`. Host retirement fences queued CI and gracefully
+stops applications before removing services and compute.

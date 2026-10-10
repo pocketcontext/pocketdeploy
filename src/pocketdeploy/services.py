@@ -5,6 +5,7 @@ Provider responses and API keys remain private. No mail is sent by convergence.
 import ipaddress
 import json
 import os
+import time
 
 from .common import DeployError, run
 from .output import operation
@@ -68,9 +69,9 @@ def _provider_error(tool, stderr):
     return DeployError(label + ' request failed; provider output suppressed. Reconcile uncertain writes before retrying.', code='provider_request_failed')
 
 
-def _call(tool, args):
+def _call(tool, args, *, timeout=90):
     with operation('Cloudflare request' if tool == 'cf' else 'Resend request'):
-        raw = run([tool, *args], timeout=90, error_classifier=lambda stderr: _provider_error(tool, stderr))
+        raw = run([tool, *args], timeout=timeout, error_classifier=lambda stderr: _provider_error(tool, stderr))
     if not raw.strip() and 'delete' in args:
         return {}
     try:
@@ -221,8 +222,8 @@ class Services:
     def _cf(self, args):
         return _call('cf', ['dns', 'records', *args, '--zone', self.c['cloudflare-zone-id']])
 
-    def _resend(self, args):
-        return _call('resend', [*args, '--json'])
+    def _resend(self, args, *, timeout=90):
+        return _call('resend', [*args, '--json'], timeout=timeout)
 
     def _records(self, name):
         found = []
@@ -373,7 +374,10 @@ class Services:
         except (ValueError, TypeError):
             raise DeployError('Website DNS requires a verified public IPv4 address.') from None
 
-    def converge(self, connection, operation_id):
+    def prepare_dns(self, connection, operation_id):
+        """Reconcile DNS once, before the DAG waits for sending authority."""
+        self._prepared_domain = None
+        self._verified_domain = None
         actions = []
         for app in self.c.get('once', {}).get('applications', []):
             if app.get('manage-dns'):
@@ -381,44 +385,110 @@ class Services:
         if self.c.get('provider-smtp') == 'resend':
             domain = self._domain(operation_id)
             actions.extend(self._dns(row, operation_id) for row in self._email_dns(domain))
-            if domain.get('status') != 'verified':
-                self._resend(['domains', 'verify', domain['id']])
-                domain = self._resend(['domains', 'get', domain['id']])
-                if domain.get('status') != 'verified':
-                    raise DeployError('SMTP DNS verification is pending; rerun converge after DNS propagation.', code='smtp_verification_pending')
-            key = self.state.get_resource('smtp-key')
-            if key:
-                if key['attributes'].get('domain_id') != domain['id'] or not key['attributes'].get('token'):
-                    raise DeployError('SMTP credential does not match the recorded domain.')
-                after, found = None, False
-                for _ in range(100):
-                    args = ['api-keys', 'list', '--limit', '100'] + (['--after', after] if after else [])
-                    page = self._resend(args)
-                    if not isinstance(page, dict) or not isinstance(page.get('data'), list):
-                        raise DeployError('Resend returned an invalid key list.')
-                    if any(k.get('id') == key['provider_id'] for k in page['data']):
-                        found = True
-                        break
-                    if not page.get('has_more') or not page['data']:
-                        break
-                    after = _identifier(page['data'][-1])
-                if not found:
-                    raise DeployError('Recorded SMTP credential is absent; explicit rotation is required.')
-            else:
-                if self.state.get_meta('pending:smtp-key'):
-                    raise DeployError('SMTP key creation is uncertain; revoke the orphan key and explicitly recover before retrying.')
-                step = self.state.intent(operation_id, 'smtp-key', {'action': 'create'})
-                self.state.set_meta('pending:smtp-key', True)
-                key = self._resend(['api-keys', 'create', '--name', self.c['profile'] + '-smtp-send',
-                                    '--permission', 'sending_access', '--domain-id', domain['id']])
-                if not isinstance(key.get('token'), str) or not key['token']:
-                    raise DeployError('SMTP key response is incomplete; explicit recovery is required.')
-                self.state.put_resource('smtp-key', 'resend-api-key', _identifier(key),
-                                        {'domain_id': domain['id'], 'name': self.c['profile'] + '-smtp-send', 'token': key['token']})
-                self.state.complete(step, {'id': key['id']})
-                self.state.set_meta('pending:smtp-key', False)
-            actions.append({'name': self.c['smtp-domain'], 'type': 'smtp', 'action': 'verified'})
+            self._prepared_domain = domain
         return {'actions': actions}
+
+    def _checked_domain(self, domain, expected_id):
+        if not isinstance(domain, dict) or domain.get('id') != expected_id or domain.get('name') != self.c['smtp-domain']:
+            raise DeployError('Recorded SMTP domain identity does not match.')
+        if domain.get('region') and domain['region'] != self.c.get('resend-region', 'eu-west-1'):
+            raise DeployError('SMTP region changed; explicit migration is required.')
+        if domain.get('status') not in ('verified', 'not_started', 'pending', 'failed', 'temporary_failure', 'partially_verified', 'partially_failed'):
+            raise DeployError('Resend returned an invalid domain verification status.')
+        return domain
+
+    def verify_smtp(self, timeout=600):
+        """Trigger verification once and poll only this domain within a deadline."""
+        if type(timeout) is not int or not 0 <= timeout <= 3600:
+            raise DeployError('SMTP verification timeout must be an integer from 0 to 3600 seconds.')
+        self._verified_domain = None
+        if self.c.get('provider-smtp') != 'resend':
+            return None
+        domain = getattr(self, '_prepared_domain', None)
+        if domain is None:
+            raise DeployError('Prepare service DNS before SMTP verification.')
+        domain_id = _identifier(domain)
+        self._checked_domain(domain, domain_id)
+        if domain.get('status') == 'verified':
+            self._verified_domain = domain
+            return domain
+        deadline = time.monotonic() + timeout
+
+        def pending():
+            return DeployError('SMTP DNS verification is still pending after the configured wait; inspect DNS or increase --smtp-verification-timeout.', code='smtp_verification_pending')
+
+        def request(args):
+            remaining = deadline - time.monotonic()
+            if timeout and remaining <= 0:
+                raise pending()
+            try:
+                return self._resend(args, timeout=min(90, remaining) if timeout else 90)
+            except DeployError as error:
+                if timeout and error.code == 'command_timeout' and time.monotonic() >= deadline:
+                    raise pending() from None
+                raise
+
+        with operation('SMTP DNS verification'):
+            request(['domains', 'verify', domain_id])
+            while True:
+                domain = self._checked_domain(request(['domains', 'get', domain_id]), domain_id)
+                if timeout and time.monotonic() > deadline:
+                    raise pending()
+                if domain.get('status') == 'verified':
+                    self._verified_domain = domain
+                    return domain
+                remaining = deadline - time.monotonic()
+                if not timeout or remaining <= 0:
+                    raise pending()
+                time.sleep(min(10, remaining))
+
+    def ensure_smtp_credentials(self, operation_id):
+        """Issue sending authority only after the verification DAG node succeeds."""
+        actions = []
+        if self.c.get('provider-smtp') != 'resend':
+            return {'actions': actions}
+        domain = getattr(self, '_verified_domain', None)
+        if domain is None or domain.get('status') != 'verified':
+            raise DeployError('SMTP domain verification must complete before credentials are reconciled.')
+        key = self.state.get_resource('smtp-key')
+        if key:
+            if key['attributes'].get('domain_id') != domain['id'] or not key['attributes'].get('token'):
+                raise DeployError('SMTP credential does not match the recorded domain.')
+            after, found = None, False
+            for _ in range(100):
+                args = ['api-keys', 'list', '--limit', '100'] + (['--after', after] if after else [])
+                page = self._resend(args)
+                if not isinstance(page, dict) or not isinstance(page.get('data'), list):
+                    raise DeployError('Resend returned an invalid key list.')
+                if any(k.get('id') == key['provider_id'] for k in page['data']):
+                    found = True
+                    break
+                if not page.get('has_more') or not page['data']:
+                    break
+                after = _identifier(page['data'][-1])
+            if not found:
+                raise DeployError('Recorded SMTP credential is absent; explicit rotation is required.')
+        else:
+            if self.state.get_meta('pending:smtp-key'):
+                raise DeployError('SMTP key creation is uncertain; revoke the orphan key and explicitly recover before retrying.')
+            step = self.state.intent(operation_id, 'smtp-key', {'action': 'create'})
+            self.state.set_meta('pending:smtp-key', True)
+            key = self._resend(['api-keys', 'create', '--name', self.c['profile'] + '-smtp-send',
+                                '--permission', 'sending_access', '--domain-id', domain['id']])
+            if not isinstance(key.get('token'), str) or not key['token']:
+                raise DeployError('SMTP key response is incomplete; explicit recovery is required.')
+            self.state.put_resource('smtp-key', 'resend-api-key', _identifier(key),
+                                    {'domain_id': domain['id'], 'name': self.c['profile'] + '-smtp-send', 'token': key['token']})
+            self.state.complete(step, {'id': key['id']})
+            self.state.set_meta('pending:smtp-key', False)
+        actions.append({'name': self.c['smtp-domain'], 'type': 'smtp', 'action': 'verified'})
+        return {'actions': actions}
+
+    def converge(self, connection, operation_id, smtp_verification_timeout=600):
+        result = self.prepare_dns(connection, operation_id)
+        self.verify_smtp(smtp_verification_timeout)
+        result['actions'].extend(self.ensure_smtp_credentials(operation_id)['actions'])
+        return result
 
     def smtp_settings(self):
         """Private payload for SSH stdin only; never return as a CLI result."""

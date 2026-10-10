@@ -25,7 +25,10 @@ def dependencies(tmp_path, events):
                            bootstrap=event('host', {}), converge=event('apps', {'actions': []}),
                            status=event('status', {'applications': []}), smtp_settings=None)
     services = SimpleNamespace(preflight=event('service-preflight'), plan=event('service-plan', {'actions': []}),
-                               converge=event('services', {'actions': []}), smtp_settings=event('smtp-settings', {
+                               prepare_dns=event('services', {'actions': []}),
+                               verify_smtp=event('smtp-verification', {'status': 'verified'}),
+                               ensure_smtp_credentials=event('smtp-credentials', {'actions': []}),
+                               smtp_settings=event('smtp-settings', {
                                    'server': 'smtp.resend.com', 'password': 'synthetic-secret'}))
     github = SimpleNamespace(preflight=event('github-preflight'), converge=event('github', {'environments': []}))
     return config, cloud, host, services, github, event
@@ -37,12 +40,96 @@ def test_services_order_and_secret_exclusion(tmp_path, capsys):
     with patch('pocketdeploy.services.Services', return_value=services), patch('pocketdeploy.github.GitHub', return_value=github), patch('pocketdeploy.health.verify', side_effect=event('https')):
         result = asyncio.run(converge(config, object(), cloud, host, 'operation', Reporter()))
     assert events == ['service-preflight', 'service-plan', 'github-preflight', 'keys', 'cloud-init',
-                      'compute', 'host', 'services', 'smtp-settings', 'apps', 'status', 'https', 'github']
+                      'compute', 'host', 'services', 'smtp-verification', 'smtp-credentials',
+                      'smtp-settings', 'apps', 'status', 'https', 'github']
     assert host.smtp_settings['password'] == 'synthetic-secret'
     output = capsys.readouterr()
     assert 'synthetic-secret' not in json.dumps(result) + output.out + output.err
     assert 'synthetic-private-cloud-init' not in json.dumps(result) + output.out + output.err
     assert '_cloud_init' not in config
+
+
+def test_smtp_verification_failure_blocks_credentials_and_deployment(tmp_path):
+    events = []
+    config, cloud, host, services, github, event = dependencies(tmp_path, events)
+    def pending(*args, **kwargs):
+        events.append('smtp-verification')
+        raise DeployError('SMTP DNS verification timed out.', code='smtp_verification_pending')
+    services.verify_smtp = pending
+    with patch('pocketdeploy.services.Services', return_value=services), patch('pocketdeploy.github.GitHub', return_value=github):
+        with pytest.raises(DeployError) as error:
+            asyncio.run(converge(config, object(), cloud, host, 'operation', Reporter(quiet=True)))
+    assert error.value.code == 'smtp_verification_pending'
+    assert error.value.stage == 'smtp-verification'
+    assert events == ['service-preflight', 'service-plan', 'github-preflight', 'keys', 'cloud-init',
+                      'compute', 'host', 'services', 'smtp-verification']
+    assert host.smtp_settings is None
+    assert '_cloud_init' not in config
+
+
+def test_dns_only_configuration_skips_smtp_stages(tmp_path):
+    events = []
+    config, cloud, host, services, github, event = dependencies(tmp_path, events)
+    config.pop('provider-smtp')
+    config['once']['applications'][0]['smtp'] = False
+    with patch('pocketdeploy.services.Services', return_value=services), patch('pocketdeploy.github.GitHub', return_value=github), patch('pocketdeploy.health.verify', side_effect=event('https')):
+        asyncio.run(converge(config, object(), cloud, host, 'operation', Reporter(quiet=True)))
+    assert events == ['service-preflight', 'service-plan', 'github-preflight', 'keys', 'cloud-init',
+                      'compute', 'host', 'services', 'apps', 'status', 'https', 'github']
+    assert host.smtp_settings is None
+
+
+def test_smtp_pending_then_verified_continues_same_dag(tmp_path, monkeypatch, capsys):
+    from pocketdeploy import services as services_module
+    from pocketdeploy.services import Services
+    from pocketdeploy.state import State
+
+    events = []
+    config, cloud, host, _, github, event = dependencies(tmp_path, events)
+    config.update({'smtp-domain': 'notifications.example.test',
+                   'smtp-from': 'mail@notifications.example.test'})
+    config['once']['applications'][0]['manage-dns'] = True
+    domain = {'id': 'domain-id', 'name': config['smtp-domain'], 'status': 'pending',
+              'records': [{'type': 'TXT', 'name': config['smtp-domain'], 'value': 'synthetic-dns'}]}
+    clock = [0]
+    polls = []
+    def sleep(seconds):
+        assert 'apps' not in events and 'github' not in events
+        assert 'smtp-key' not in events
+        events.append('wait')
+        clock[0] += seconds
+    monkeypatch.setattr(services_module, 'time', SimpleNamespace(monotonic=lambda: clock[0], sleep=sleep))
+    with State(tmp_path / 'smtp-state', 'test', {}, create=True) as state:
+        service = Services(config, state)
+        operation = state.begin_operation('converge', 'synthetic-config-hash')
+        monkeypatch.setattr(service, 'preflight', event('service-preflight'))
+        monkeypatch.setattr(service, 'plan', event('service-plan', {'actions': []}))
+        monkeypatch.setattr(service, '_domain', event('domain', domain))
+        monkeypatch.setattr(service, '_dns', event('dns', {'action': 'noop'}))
+        def resend(args, **kwargs):
+            if args[:2] == ['domains', 'verify']:
+                events.append('trigger-verification')
+                return {}
+            if args[:2] == ['domains', 'get']:
+                polls.append(clock[0])
+                events.append('poll')
+                return {**domain, 'status': 'verified' if len(polls) == 3 else 'pending'}
+            assert args[:2] == ['api-keys', 'create']
+            assert len(polls) == 3
+            events.append('smtp-key')
+            return {'id': 'key-id', 'token': 'synthetic-smtp-secret'}
+        monkeypatch.setattr(service, '_resend', resend)
+        with patch('pocketdeploy.services.Services', return_value=service), patch('pocketdeploy.github.GitHub', return_value=github), patch('pocketdeploy.health.verify', side_effect=event('https')):
+            result = asyncio.run(converge(config, state, cloud, host, operation, Reporter(quiet=True), smtp_verification_timeout=30))
+        assert state.get_resource('smtp-key')['provider_id'] == 'key-id'
+    assert polls == [0, 10, 20]
+    assert events == ['service-preflight', 'service-plan', 'github-preflight', 'keys', 'cloud-init',
+                      'compute', 'host', 'dns', 'domain', 'dns', 'trigger-verification', 'poll', 'wait',
+                      'poll', 'wait', 'poll', 'smtp-key', 'apps', 'status', 'https', 'github']
+    assert host.smtp_settings['password'] == 'synthetic-smtp-secret'
+    assert result['services']['actions'][-1]['action'] == 'verified'
+    output = capsys.readouterr()
+    assert 'synthetic-smtp-secret' not in json.dumps(result) + output.out + output.err
 
 
 def test_preflight_failure_blocks_keys_compute_and_all_mutations(tmp_path):

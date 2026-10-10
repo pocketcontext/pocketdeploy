@@ -189,23 +189,23 @@ def test_smtp_test_secret_transport_and_cleanup(monkeypatch):
 
 def test_smtp_pending_verification_does_not_create_key(service, monkeypatch):
     service.c['provider-smtp'] = 'resend'
-    domain = {'id': 'd', 'status': 'pending', 'records': [{'type': 'TXT', 'name': 'send', 'value': 'public'}]}
+    domain = {'id': 'd', 'name': service.c['smtp-domain'], 'status': 'pending', 'records': [{'type': 'TXT', 'name': 'send', 'value': 'public'}]}
     monkeypatch.setattr(service, '_domain', lambda op: domain)
     monkeypatch.setattr(service, '_dns', lambda *a: {})
     calls = []
-    def resend(args):
+    def resend(args, **kwargs):
         calls.append(args)
         return domain
     monkeypatch.setattr(service, '_resend', resend)
     with pytest.raises(DeployError) as error:
-        service.converge({}, 'op')
+        service.converge({}, 'op', smtp_verification_timeout=0)
     assert error.value.code == 'smtp_verification_pending'
     assert all(a[0] == 'domains' for a in calls)
 
 
 def test_lost_key_response_does_not_reissue(service, monkeypatch):
     service.c['provider-smtp'] = 'resend'
-    domain = {'id': 'd', 'status': 'verified', 'records': [{'type': 'TXT', 'name': 'send', 'value': 'public'}]}
+    domain = {'id': 'd', 'name': service.c['smtp-domain'], 'status': 'verified', 'records': [{'type': 'TXT', 'name': 'send', 'value': 'public'}]}
     monkeypatch.setattr(service, '_domain', lambda op: domain)
     monkeypatch.setattr(service, '_dns', lambda *a: {})
     def fail(args):
@@ -392,3 +392,133 @@ def test_delete_unknown_dns_creation_blocks_before_mutations(service, monkeypatc
     assert error.value.code == 'provider_recovery_required'
     service.state.set_meta('pending:dns:TXT:send.notifications.example.com', False)
     assert service.plan_delete() == []
+
+
+@pytest.fixture
+def verification(service, monkeypatch):
+    service.c['provider-smtp'] = 'resend'
+    domain = {'id': 'd', 'name': service.c['smtp-domain'], 'status': 'pending',
+              'records': [{'type': 'TXT', 'name': 'send', 'value': 'public'}]}
+    service.state.put_resource('smtp-domain', 'resend-domain', 'd', {'name': domain['name']})
+    monkeypatch.setattr(service, '_domain', lambda op: domain)
+    monkeypatch.setattr(service, '_dns', lambda *a: {'action': 'noop'})
+    clock = [0.0]
+    sleeps = []
+    monkeypatch.setattr('pocketdeploy.services.time.monotonic', lambda: clock[0])
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+    monkeypatch.setattr('pocketdeploy.services.time.sleep', sleep)
+    service.prepare_dns({}, 'op')
+    return domain, clock, sleeps
+
+
+def test_verification_waits_once_then_allows_credentials(service, verification, monkeypatch):
+    domain, clock, sleeps = verification
+    calls = []
+    def resend(args, **kwargs):
+        calls.append((args, kwargs))
+        if args[:2] == ['api-keys', 'create']:
+            return {'id': 'k', 'token': 'PRIVATE_TOKEN'}
+        return {**domain, 'status': 'verified' if clock[0] >= 20 else 'pending'}
+    monkeypatch.setattr(service, '_resend', resend)
+    with pytest.raises(DeployError, match='verification must complete'):
+        service.ensure_smtp_credentials('op')
+    assert service.verify_smtp(25)['status'] == 'verified'
+    op = service.state.begin_operation('converge', 'hash')
+    result = service.ensure_smtp_credentials(op)
+    assert result == {'actions': [{'name': domain['name'], 'type': 'smtp', 'action': 'verified'}]}
+    assert sleeps == [10, 10]
+    assert [a[1] for a, _ in calls] == ['verify', 'get', 'get', 'get', 'create']
+    assert [k['timeout'] for _, k in calls[:-1]] == [25, 25, 15, 5]
+    assert 'PRIVATE_TOKEN' not in json.dumps(result)
+
+
+def test_verification_deadline_includes_requests_and_clamps_sleep(service, verification, monkeypatch):
+    domain, clock, sleeps = verification
+    calls = []
+    def resend(args, **kwargs):
+        calls.append(args)
+        clock[0] += 3
+        return domain
+    monkeypatch.setattr(service, '_resend', resend)
+    with pytest.raises(DeployError) as error:
+        service.verify_smtp(8)
+    assert error.value.code == 'smtp_verification_pending'
+    assert clock[0] == 8
+    assert sleeps == [2]
+    assert len(calls) == 2
+    assert service.state.get_resource('smtp-domain')['provider_id'] == 'd'
+    assert service.state.get_resource('smtp-key') is None
+
+
+@pytest.mark.parametrize('changed', [{'id': 'other'}, {'name': 'other.example.com'}, {'region': 'us-east-1'}])
+def test_verification_rejects_identity_change(service, verification, monkeypatch, changed):
+    domain, clock, sleeps = verification
+    monkeypatch.setattr(service, '_resend', lambda *a, **k: {**domain, **changed, 'status': 'verified'})
+    with pytest.raises(DeployError):
+        service.verify_smtp()
+    assert sleeps == []
+    assert service._verified_domain is None
+
+
+def test_verification_auth_error_is_immediate(service, verification, monkeypatch):
+    def resend(*args, **kwargs):
+        raise DeployError('Authentication failed.', code='provider_authentication_failed')
+    monkeypatch.setattr(service, '_resend', resend)
+    with pytest.raises(DeployError) as error:
+        service.verify_smtp()
+    assert error.value.code == 'provider_authentication_failed'
+    assert verification[2] == []
+
+
+def test_verification_deadline_request_timeout_is_pending(service, verification, monkeypatch):
+    domain, clock, sleeps = verification
+    def resend(*args, **kwargs):
+        clock[0] += kwargs['timeout']
+        raise DeployError('Command timed out.', code='command_timeout')
+    monkeypatch.setattr(service, '_resend', resend)
+    with pytest.raises(DeployError) as error:
+        service.verify_smtp(5)
+    assert error.value.code == 'smtp_verification_pending'
+    assert clock[0] == 5
+
+
+def test_verified_domain_skips_polling(service, verification, monkeypatch):
+    verification[0]['status'] = 'verified'
+    monkeypatch.setattr(service, '_resend', lambda *a, **k: pytest.fail('unneeded request'))
+    assert service.verify_smtp()['status'] == 'verified'
+    assert verification[2] == []
+
+
+def test_verification_interruption_never_unlocks_credentials(service, verification, monkeypatch):
+    monkeypatch.setattr(service, '_resend', lambda *a, **k: verification[0])
+    def interrupt(seconds):
+        raise KeyboardInterrupt()
+    monkeypatch.setattr('pocketdeploy.services.time.sleep', interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        service.verify_smtp()
+    with pytest.raises(DeployError, match='verification must complete'):
+        service.ensure_smtp_credentials('op')
+
+
+@pytest.mark.parametrize('status', [None, {}, 'PRIVATE_UNKNOWN_STATUS'])
+def test_verification_invalid_status_is_safely_rejected(service, verification, monkeypatch, status):
+    monkeypatch.setattr(service, '_resend', lambda *a, **k: {**verification[0], 'status': status})
+    with pytest.raises(DeployError, match='invalid domain verification status') as error:
+        service.verify_smtp()
+    assert 'PRIVATE_UNKNOWN_STATUS' not in str(error.value)
+    assert verification[2] == []
+
+
+def test_late_verified_response_does_not_unlock_credentials(service, verification, monkeypatch):
+    domain, clock, sleeps = verification
+    def resend(args, **kwargs):
+        if args[1] == 'get':
+            clock[0] = 11
+        return {**domain, 'status': 'verified'}
+    monkeypatch.setattr(service, '_resend', resend)
+    with pytest.raises(DeployError) as error:
+        service.verify_smtp(10)
+    assert error.value.code == 'smtp_verification_pending'
+    assert service._verified_domain is None
