@@ -25,6 +25,8 @@ compute-http-sources:
   - 0.0.0.0/0
 provider-dns: no-infra
 provider-smtp: no-infra
+smtp-port: 2587
+smtp-security: starttls
 once-version: v0.3.3
 ssh-private-key-file: .ssh/id_ed25519
 ssh-public-key-file: .ssh/id_ed25519.pub

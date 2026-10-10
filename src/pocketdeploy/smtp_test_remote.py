@@ -26,16 +26,23 @@ def submit(request):
     address = r'[A-Za-z0-9._+%-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
     if not re.fullmatch(address, recipient) or not re.fullmatch(address, smtp['from']):
         raise ValueError('invalid address')
-    if (smtp.get('server') != 'smtp.resend.com' or smtp.get('port') != 465
+    port = smtp.get('port')
+    modes = {465: 'implicit-tls', 2465: 'implicit-tls', 587: 'starttls', 2587: 'starttls'}
+    if type(port) is not int or port not in modes:
+        raise ValueError('invalid SMTP port')
+    security = smtp.get('security', modes[port])
+    if (smtp.get('server') != 'smtp.resend.com' or security != modes[port]
             or smtp.get('username') != 'resend'
             or not re.fullmatch(r'[A-Za-z0-9_-]+', smtp['password'])):
         raise ValueError('invalid SMTP settings')
     os.umask(0o077)
+    scheme = 'smtp' if security == 'starttls' else 'smtps'
     with tempfile.TemporaryDirectory(prefix='pocketdeploy-smtp-') as directory:
         config = Path(directory) / 'mailrc'
         config.write_text('\n'.join([
             'set v15-compat', 'set sendwait', 'set tls-verify=strict',
-            'set mta=smtps://resend:' + smtp['password'] + '@smtp.resend.com:465',
+            'set mta=' + scheme + '://resend:' + smtp['password'] + '@smtp.resend.com:' + str(port),
+            'set smtp-use-starttls' if security == 'starttls' else 'unset smtp-use-starttls',
             'set smtp-auth=login', 'set from=' + smtp['from'],
             'unset record', 'unset save', '',
         ]))

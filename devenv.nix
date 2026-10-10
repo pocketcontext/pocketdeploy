@@ -19,7 +19,7 @@ let
   };
 in
 {
-  packages = with pkgs; [ python312 uv oci-cli openssh git gh curl jq sqlite cloudClis ];
+  packages = with pkgs; [ python312 uv oci-cli google-cloud-sdk openssh git gh curl jq sqlite cloudClis ];
   scripts.vaultcontext.exec = ''
     uv tool run --from 'vaultcontext-client @ git+https://github.com/pocketcontext/vaultcontext.git@5157597a4ea9f33cb9806b1485bb84f01b5cf276' vaultcontext "$@"
   '';

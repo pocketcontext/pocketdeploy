@@ -13,6 +13,7 @@ from .common import DeployError, local_path
 from .config import load, scope
 from .state import State, deployment_lock
 from .oci import OCI
+from .compute import provider_class
 from .host import Host
 from . import vault
 from .output import Reporter, operation as output_operation
@@ -31,7 +32,7 @@ class ArgumentParser(argparse.ArgumentParser):
 
 def parser():
     p = ArgumentParser(
-        prog='pocketdeploy', description='Deploy and operate an OCI VPS from colors.yml.',
+        prog='pocketdeploy', description='Deploy and operate an OCI, DigitalOcean or Google Cloud VPS from colors.yml.',
         allow_abbrev=False, formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''Deployment commands:
   init           Prepare local state and SSH keys; no cloud or Vault calls
@@ -64,7 +65,7 @@ Use -f to select a deployment. Run without arguments to show this help.''')
     p.add_argument('--verbose', action='store_true', help='Show safe request timings and waiting progress on stderr')
     p.add_argument('--quiet', action='store_true', help='Suppress progress on stderr')
     p.add_argument('--dry-run', action='store_true', help='Plan converge/delete without applying changes')
-    p.add_argument('--instance-id', help='Exact tagged OCI instance identity for explicit recovery/adoption')
+    p.add_argument('--instance-id', help='Exact owned provider instance identity for explicit recovery/adoption')
     p.add_argument('--document', help='Vault state document to restore')
     p.add_argument('--version', help='Exact Vault state version to restore')
     p.add_argument('--destination', help='Recovery directory containing matching Git configuration')
@@ -280,7 +281,8 @@ def _execute(args, reporter=None):
                     return initialize(config, state, host, root)
             if args.command != 'rotate-host-key' and state and config.get('provider-dns') != 'cloudflare' and any(r['kind'] == 'cloudflare-dns' and r['attributes'].get('type') == 'A' for r in state.resources()):
                 raise DeployError('Restore the managed DNS configuration before operating its deployment.')
-            cloud = OCI(config, state)
+            cloud_type = OCI if config['provider-compute'] == 'oci' else provider_class(config['provider-compute'])
+            cloud = cloud_type(config, state)
             if read_only:
                 if args.command == 'status':
                     observed = cloud.inspect()

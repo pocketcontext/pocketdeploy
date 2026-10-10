@@ -21,8 +21,8 @@ class Deletion:
     def plan(self):
         # Cloud authentication/ownership is checked before any external writes,
         # including DNS and GitHub retirement. No provisioning planner is used.
-        supported = {'oci-compute', 'oci-firewall', 'oci-boot-volume', 'cloudflare-dns',
-                     'resend-domain', 'resend-api-key', 'github-environment'}
+        supported = self.cloud.resource_kinds | {'cloudflare-dns', 'resend-domain',
+                                                 'resend-api-key', 'github-environment'}
         if any(r['owned'] and r['kind'] not in supported for r in self.state.resources()):
             raise DeployError('Deployment contains an unsupported owned resource; reconcile it before deletion.')
         cloud_actions = self.cloud.plan_delete()
@@ -33,7 +33,7 @@ class Deletion:
         host_actions = []
         self.connection = None
         if compute and compute.get('state') == 'TERMINATING':
-            pending = self.state.get_meta('oci-delete-compute', {})
+            pending = self.state.get_meta(self.cloud.delete_pending_key, {})
             checkpoint = self.state.get_meta('delete-host', {})
             if not ((isinstance(pending, dict) and pending.get('id') == compute.get('id'))
                     and (isinstance(checkpoint, dict) and checkpoint.get('quiesced')

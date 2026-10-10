@@ -1,0 +1,31 @@
+# Replace identifiers and host before use. Never commit the API token.
+schema-version: 1
+profile: digitalocean-example
+provider-compute: digitalocean
+state-file: .colors.sqlite
+compute-prevent-destroy: true
+compute-require-existing-state: false
+compute-ssh-sources: [203.0.113.10/32]
+compute-http-sources: [0.0.0.0/0]
+ssh-user: ubuntu
+digitalocean-account-id: <account-uuid>
+digitalocean-token-env: COLORS_PAR_DIGITALOCEAN_ACCESS_TOKEN
+digitalocean-region: fra1
+digitalocean-vpc-id: <existing-vpc-uuid>
+digitalocean-size: s-1vcpu-2gb
+digitalocean-image: ubuntu-24-04-x64
+provider-dns: no-infra
+provider-smtp: no-infra
+# Used when provider-smtp is enabled with Cloudflare and a sending domain.
+smtp-port: 2587
+smtp-security: starttls
+once-version: v0.3.3
+once:
+  applications:
+    - host: app.example.com
+      image: ghcr.io/pocketcontext/pocketdeploy-demo:latest
+      deploy-strategy: rolling
+      auto_update: false
+      auto_backup: false
+      smtp: false
+      manage-dns: false

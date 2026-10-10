@@ -20,6 +20,8 @@ def fixture(tmp_path):
             return value
         return call
     cloud = SimpleNamespace(plan_delete=action('oci-check', [{'resource': 'compute', 'id': 'vm', 'state': 'RUNNING', 'action': 'delete'}]),
+                            resource_kinds={'oci-compute', 'oci-firewall', 'oci-boot-volume'},
+                            delete_pending_key='oci-delete-compute',
                             connection=action('connection', {'instance_id': 'vm', 'ip': '192.0.2.1'}),
                             delete=action('oci-delete', {'deleted': True}))
     host = SimpleNamespace(plan_delete=action('host-check', {'actions': [{'host': 'app.test', 'action': 'stop-retain-data'}]}),

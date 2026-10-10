@@ -13,6 +13,9 @@ from .output import operation
 
 
 class OCI:
+    resource_kinds = frozenset({'oci-compute', 'oci-firewall', 'oci-boot-volume'})
+    delete_pending_key = 'oci-delete-compute'
+
     def __init__(self, config, state=None):
         self.config, self.state = config, state
 

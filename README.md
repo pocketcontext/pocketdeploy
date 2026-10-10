@@ -1,13 +1,15 @@
 # PocketDeploy
 
-PocketDeploy provisions and operates OCI servers and ONCE applications, with
+PocketDeploy provisions and operates OCI, DigitalOcean and Google Cloud servers
+and ONCE applications, with
 explicit resource ownership, resumable operations, and encrypted deployment
 recovery through VaultContext. It manages compute, firewall rules, DNS, outbound
 email configuration, and GitHub deployment access from versioned configuration.
 
 ## Scope and recovery
 
-PocketDeploy supports OCI compute, existing OCI networking, ONCE application
+PocketDeploy supports OCI, DigitalOcean Droplets and Google Compute Engine,
+existing provider networking, ONCE application
 delivery, Cloudflare DNS, Resend sending domains, and GitHub deployment
 environments. One active operator per deployment is supported; local locking
 does not coordinate operators on different machines. Existing production
@@ -44,7 +46,7 @@ uv sync --locked --extra test
 pocketdeploy --help
 ```
 
-`devenv.nix` provides Python 3.12, uv, OCI CLI, OpenSSH, Git, GitHub CLI, curl,
+`devenv.nix` provides Python 3.12, uv, OCI CLI, Google Cloud CLI, OpenSSH, Git, GitHub CLI, curl,
 jq, SQLite and a pinned VaultContext CLI wrapper. `devenv.lock` and `uv.lock` pin the development environment and
 Python dependencies. Blue is pinned to a tested Git commit. `direnv allow` is
 optional; `.envrc` loads devenv and an optional ignored `.envrc.private`.
@@ -68,6 +70,29 @@ availability domain. Configure your OCI CLI authentication profile; the default
 auth mode is `security_token`. The existing subnet/VCN, internet gateway, routes
 and subnet security lists remain externally managed. Inherited subnet rules can
 grant access beyond the dedicated NSG; an NSG does not subtract those permissions.
+
+## Compute provider selection
+
+Set `provider-compute` to `oci` (the existing default), `digitalocean` or `gcp`.
+Use [the provider configuration reference](skills/pocketdeploy/references/providers.md)
+and the corresponding `examples/colors-digitalocean.yml` or `examples/colors-gcp.yml`.
+Google Cloud and DigitalOcean have passed disposable live deployment checks,
+including HTTPS, updates, reboot and SMTP TLS connectivity; see
+[verification](docs/verification.md). Application email delivery and
+populated application backup recovery remain separate checks.
+Use `uv run pocketdeploy` for this source version. The copied portable launcher
+retains its published package pin until a new release is published and verified.
+
+Existing VPCs/subnets, routing, cloud accounts/projects and API enablement remain
+operator-managed. PocketDeploy creates a single public IPv4 Ubuntu 24.04 server,
+its owned firewall resources and boot storage. Resizing, replacement, extra disks,
+reserved addresses and cross-cloud data migration are outside this version.
+Cloudflare, Resend, GitHub, ONCE and Vault workflows remain shared.
+
+Provider/account/project/network scope is bound to local state and checked during
+Vault restoration. Switching `provider-compute` cannot migrate an existing
+deployment: create a fresh deployment and separately restore application data and
+cut over DNS. Existing OCI state and checkpoints keep their original scope format.
 
 ## Provider read recovery
 
@@ -139,11 +164,11 @@ instance still requires recovery. Use `init → vault-save → converge → vaul
 when encrypted recovery is configured. The first snapshot preserves authority
 before provisioning; the second records the resulting resource identities.
 
-`converge` runs a DAG: preflight → keys → OCI → host → service DNS →
+`converge` runs a DAG: preflight → keys → compute → host → service DNS →
 SMTP verification → SMTP credentials → applications → HTTPS verification → GitHub.
 SMTP stages are skipped when Resend is disabled.
 Each external mutation records intent first and the verified result afterward.
-An unchanged converge makes no OCI mutations and no application replacement.
+An unchanged converge makes no compute-provider mutations and no application replacement.
 Host setup still verifies/enables services, and mutable image tags are pulled to
 check whether their immutable digest changed. Prefer digest-pinned app images
 for reproducibility. `plan` never creates cloud resources or keys; mutable image
@@ -292,7 +317,7 @@ it. If no resource is visible, it refuses to issue another create blindly.
 Operators must establish the prior request's outcome before recovery. Deletion
 similarly records intent and can resume after the resource has disappeared.
 
-`adopt --instance-id OCID` recovers an existing, matching, already UUID-tagged
+`adopt --instance-id PROVIDER_ID` recovers an existing, matching, already UUID-tagged
 instance into existing state with the same deployment UUID. Restore the local
 state checkpoint first; adoption never creates a replacement deployment identity.
 It verifies and records the instance, firewall and boot volume, rejects a
@@ -300,7 +325,9 @@ conflicting recorded instance, and resumes interrupted adoption. It deliberately
 server, rewrite another manager's tags or migrate Terraform state. Full production
 ownership transfer remains a separate operation.
 
-Firewall updates add and verify missing rules before removing stale rules.
+OCI and DigitalOcean firewall updates add and verify missing rules before removing stale rules.
+Google Cloud patches and verifies each owned SSH/HTTP rule after its operation
+completes; the two rules do not form one cloud transaction.
 An interrupted update retains its intent. If an attempted addition has an
 uncertain outcome and the desired rules are not visible, automatic retries stop
 until the operator establishes the outcome. Existing rules are preserved during
@@ -318,7 +345,7 @@ cloud reality before mutations. Do not use a shared network filesystem for state
 ## Application delivery
 
 SSH client and server Ed25519 keys are generated inside the deployment's `.ssh/`
-directory. Cloud-init receives a bootstrap server key through OCI metadata;
+directory. Cloud-init receives a bootstrap server key through provider metadata/user data;
 the OCI CLI request body travels over stdin, but instance metadata is not secret
 storage. SSH pins the bootstrap public key on first contact. Before sending
 application configuration or SMTP credentials, convergence installs a replacement
@@ -370,7 +397,7 @@ Full adoption of `once-pocketcontext-v2` is not implemented or performed.
 Use `devenv shell` for pinned `cf`, `resend` and `gh` tools. Cloudflare
 1.0.0-beta.14 and Resend 2.23.0 dependencies are locked in
 `tools/cloud-clis/package-lock.json` and built with a fixed Nix dependency hash;
-Cloudflare CLI is beta. s-nail runs only on the OCI host; host setup installs
+Cloudflare CLI is beta. s-nail runs only on the deployment host; host setup installs
 the Ubuntu distribution package when at least one managed application enables
 `smtp: true`. Its version is not pinned, and no local s-nail is required.
 
@@ -380,6 +407,8 @@ cloudflare-zone-id: YOUR_32_CHARACTER_ZONE_ID
 provider-smtp: resend
 smtp-domain: notifications.bigconfig.online
 smtp-from: mail@notifications.bigconfig.online
+smtp-port: 2587
+smtp-security: starttls
 resend-region: eu-west-1
 once:
   applications:
@@ -391,6 +420,21 @@ once:
       deploy-strategy: rolling
       smtp: true
 ```
+
+For new configurations, use Resend port `2587` with `smtp-security: starttls`.
+Allowed pairs are `587`/`2587` with `starttls` and `465`/`2465` with
+`implicit-tls`. If omitted, the port remains `465` for backward compatibility;
+security is derived from the selected port. The explicit `smtp-test` client
+requires the configured TLS mode and verifies the server certificate.
+
+ONCE passes server, port, username, password and sender into the application;
+it does not provide a universal SMTP TLS-mode switch. `smtp-security` controls
+the test client, not application mail libraries. Configure each application's
+supported TLS settings separately. For example, Basecamp Fizzy defaults to
+STARTTLS; implicit TLS additionally requires its `SMTP_TLS=true` setting.
+Do not infer application email success from the host-level probe alone.
+DigitalOcean documents blocking standard SMTP ports by default; verify `2587`
+connectivity on the intended Droplet before relying on delivery.
 
 Supply `CLOUDFLARE_API_TOKEN` and `RESEND_API_KEY` through your trusted shell.
 Cloudflare needs zone read and DNS edit on the selected existing zone. Resend
@@ -449,7 +493,7 @@ pocketdeploy smtp-test --to YOUR_TEST_ADDRESS
 ```
 
 This explicit command sends one message from `smtp-from` using s-nail on the VPS,
-Resend port 465 and certificate-verified TLS. Credentials travel over SSH stdin
+the configured Resend port and certificate-verified TLS. Credentials travel over SSH stdin
 and use a temporary private configuration file, cleaned afterward. Success means
 SMTP acceptance, not inbox delivery. Convergence never sends a test message.
 A static website does not acquire email functionality from SMTP provisioning;

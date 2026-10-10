@@ -181,6 +181,26 @@ class State:
         with self.db:
             self.db.execute('UPDATE steps SET status=?,result=? WHERE id=?', ('complete', json.dumps(result), step_id))
 
+    def complete_delete(self, name, step_id, pending_key):
+        """Publish verified remote deletion as one local transaction.
+
+        Callers must establish cloud absence first. Keeping the resource, step
+        and receipt atomic prevents a crash from stranding half a deletion.
+        """
+        self._writable()
+        with self.db:
+            pending = self.get_meta(pending_key)
+            record = self.get_resource(name)
+            if (not isinstance(pending, dict) or pending.get('step') != step_id
+                    or (record and (not record['owned'] or pending.get('id') != record['provider_id']))):
+                raise DeployError('Deletion receipt does not match recorded ownership.')
+            changed = self.db.execute('UPDATE steps SET status=?,result=? WHERE id=?',
+                                      ('complete', json.dumps({'deleted': True}), step_id))
+            if changed.rowcount != 1:
+                raise DeployError('Deletion intent is missing; preserve recovery state.')
+            self.db.execute('DELETE FROM resources WHERE name=?', (name,))
+            self.db.execute('UPDATE meta SET value=? WHERE key=?', ('null', pending_key))
+
     def snapshot(self, path):
         path = _private_path(path)
         if path.exists():

@@ -142,3 +142,35 @@ def test_snapshot_rejects_existing_and_symlink(tmp_path):
         symlink.symlink_to(destination)
         with pytest.raises(DeployError, match='symlinks'):
             state.snapshot(symlink)
+
+
+def test_delete_receipt_and_resource_commit_atomically(tmp_path):
+    with State(tmp_path / 'state', 'test', {}, create=True) as state:
+        state.put_resource('compute', 'synthetic', 'vm', {})
+        operation = state.begin_operation('delete', 'hash')
+        step = state.intent(operation, 'delete-compute', {'id': 'vm'})
+        state.set_meta('pending-delete', {'step': step, 'id': 'vm'})
+        # Failure after completing the step must roll back the entire receipt.
+        state.db.execute("CREATE TRIGGER fail_delete BEFORE DELETE ON resources BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END")
+        with pytest.raises(sqlite3.IntegrityError):
+            state.complete_delete('compute', step, 'pending-delete')
+        assert state.get_resource('compute')['provider_id'] == 'vm'
+        assert state.get_meta('pending-delete')['step'] == step
+        assert state.safe_status()['pending_steps'] == 1
+        state.db.execute('DROP TRIGGER fail_delete')
+        state.complete_delete('compute', step, 'pending-delete')
+        assert state.get_resource('compute') is None
+        assert state.get_meta('pending-delete') is None
+        assert state.safe_status()['pending_steps'] == 0
+
+
+def test_delete_receipt_cannot_remove_different_record(tmp_path):
+    with State(tmp_path / 'state', 'test', {}, create=True) as state:
+        state.put_resource('compute', 'synthetic', 'replacement', {})
+        operation = state.begin_operation('delete', 'hash')
+        step = state.intent(operation, 'delete-compute', {'id': 'old'})
+        state.set_meta('pending-delete', {'step': step, 'id': 'old'})
+        with pytest.raises(DeployError, match='ownership'):
+            state.complete_delete('compute', step, 'pending-delete')
+        assert state.get_resource('compute')['provider_id'] == 'replacement'
+        assert state.safe_status()['pending_steps'] == 1

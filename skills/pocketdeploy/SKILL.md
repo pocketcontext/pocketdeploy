@@ -1,6 +1,6 @@
 ---
 name: pocketdeploy
-description: Configure and operate PocketDeploy OCI VPS deployments from colors.yml using the portable Python CLI, including plans, convergence, SSH, deletion and VaultContext recovery. Use for deployment operations, not application business data.
+description: Configure and operate PocketDeploy OCI, DigitalOcean and Google Cloud VPS deployments from colors.yml using the portable Python CLI, including plans, convergence, SSH, deletion and VaultContext recovery. Use for deployment operations, not application business data.
 ---
 
 # PocketDeploy
@@ -12,8 +12,8 @@ it by absolute path. It uses `colors.yml` only in the current working directory;
 location does not select the deployment. Read
 [configuration.md](references/configuration.md) before editing desired state.
 
-Use the deployment's `devenv.nix` for Python, uv, OCI CLI, OpenSSH and the
-VaultContext CLI plus pinned Cloudflare and Resend tools. s-nail runs on the OCI
+Use the deployment's `devenv.nix` for Python, uv, OCI CLI, Google Cloud CLI, OpenSSH and the
+VaultContext CLI plus pinned Cloudflare and Resend tools. s-nail runs on the deployment
 host and is installed during host setup when a managed application enables SMTP;
 it is not a local dependency. The portable launcher installs Python dependencies; it does
 not install external tools or authenticate to providers. Working-tree package
@@ -34,7 +34,12 @@ Preserve the existing profile, resource identities and user changes. For a new
 deployment, start with the configuration reference's example and fresh state;
 do not copy the package repository's live test identity. A profile is durable;
 resource names are descriptive, while recorded IDs and deployment UUID tags
-establish ownership. Existing subnet/VCN resources remain externally managed.
+establish ownership. Existing networks/subnets remain externally managed.
+For DigitalOcean or Google Cloud, read [providers.md](references/providers.md).
+Provider changes require fresh deployment state; they do not migrate applications.
+The new backends are source features pending a new portable launcher release.
+Google Cloud and DigitalOcean have disposable live verification receipts.
+Use `uv run pocketdeploy` from the source checkout for them.
 
 ```sh
 # New deployment with Vault recovery configured
@@ -60,7 +65,7 @@ healthy repeat is idempotent; missing authority for an existing instance still
 requires recovery. Save this initial authority before provisioning, then save again after
 creation to checkpoint the resource identities.
 
-`plan` and `converge --dry-run` validate and read live OCI resources and, for an
+`plan` and `converge --dry-run` validate and read live compute-provider resources and, for an
 existing host, application state through SSH. They can create a local lock;
 they do not provision resources or generate keys. They require suitable tools,
 authentication and application bindings. `status` returns
@@ -70,7 +75,7 @@ acknowledged Vault document/version/save time, or null; older receipts may lack 
 time. It makes no Vault call and does not establish freshness. A restored
 snapshot may contain a prior receipt. A plan is not proof of completed convergence.
 
-`converge` runs the DAG: preflight → keys → OCI → host → service DNS →
+`converge` runs the DAG: preflight → keys → compute → host → service DNS →
 SMTP verification → SMTP credentials → applications → HTTPS verification → GitHub.
 SMTP stages are skipped when Resend is disabled. `create` is removed; there is no compatibility alias. Cloud/app mutations must stay within the user's authorized scope;
 existing authorization applies without repeated permission requests. Expired
@@ -82,14 +87,14 @@ Set `compute-require-existing-state: true` for an established deployment. Missin
 state or keys must be restored. A missing recorded instance is not permission
 to create another. Uncertain create outcomes require reconciliation of the
 recorded operation and tagged resources before retrying; do not clear state to
-bypass protection. `adopt --instance-id OCID` requires existing local state with
+bypass protection. `adopt --instance-id PROVIDER_ID` requires existing local state with
 the matching deployment UUID and records the owned instance, firewall and boot
 volume. Restore state first; adoption cannot reconstruct a lost identity and
 does not transfer production ownership from another
 manager. Instance replacement/resizing and storage drift are unsupported in v1.
 
 Before ordinary SSH operations, the controller requires a verified replacement
-for the host key distributed in OCI metadata. Convergence performs the rotation.
+for the host key distributed in provider metadata/user data. Convergence performs the rotation.
 For an older deployment needing inspection or retirement without application
 changes, run `pocketdeploy rotate-host-key`, then `pocketdeploy vault-save`.
 Rotation changes SSH trust only and resumes with the same pending key after an
@@ -252,7 +257,7 @@ message as part of ordinary convergence. No SMTP inbox is provisioned.
 
 Review `./pocketdeploy delete --dry-run` before an authorized deletion. Set
 `compute-prevent-destroy: false` explicitly. There is no boot-volume retention
-option. The deletion DAG preflights OCI, GitHub, DNS, SMTP and host ownership
+option. The deletion DAG preflights compute, GitHub, DNS, SMTP and host ownership
 and readiness before writes. It retires GitHub environments, fences queued CI,
 and gracefully stops managed apps. The `delete-services` stage revokes the
 sending key, deletes its domain and removes all owned DNS records. Compute

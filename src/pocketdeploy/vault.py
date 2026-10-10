@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .common import DeployError, local_path, run
+from .config import scope
 
 MAX_FILE_SIZE = 8 * 1024 * 1024
 
@@ -161,9 +162,7 @@ def restore(config, root, document, version, overwrite=False):
                     raise ValueError()
             finally:
                 db.close()
-            expected_scope = {'provider': 'oci', 'profile': config['oci-config-file-profile'],
-                              'region': config.get('oci-region', '') or '',
-                              'compartment': config['oci-compartment-id'], 'subnet': config['oci-subnet-id']}
+            expected_scope = scope(config)
             if (not isinstance(identity, dict) or identity.get('schema') != 1 or identity.get('profile') != config['profile']
                     or identity.get('scope') != expected_scope):
                 raise ValueError()

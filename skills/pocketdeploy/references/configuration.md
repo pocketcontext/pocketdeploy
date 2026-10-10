@@ -1,9 +1,11 @@
 # Configuration
 
-PocketDeploy v1 accepts the flat Colors format and OCI only. Unknown fields are
+PocketDeploy accepts the flat Colors format with OCI, DigitalOcean or Google Cloud compute. Unknown fields are
 rejected. Paths are relative to the selected `colors.yml` directory and must
 stay inside it. Track desired configuration and `.envrc`; ignore credentials,
 SQLite state and journals, `.ssh/`, snapshots and generated output.
+
+For provider-specific configuration and authentication, read [providers.md](providers.md).
 
 ## New deployment
 
@@ -33,6 +35,8 @@ compute-ssh-sources: [203.0.113.10/32]
 compute-http-sources: [0.0.0.0/0]
 provider-dns: no-infra
 provider-smtp: no-infra
+smtp-port: 2587
+smtp-security: starttls
 once-version: v0.3.3
 once:
   applications:
@@ -170,6 +174,15 @@ managed Cloudflare DNS; one zone/domain per deployment is supported. Supply
 `CLOUDFLARE_API_TOKEN` and `RESEND_API_KEY` through the trusted shell; keep values
 outside colors.yml. Required management scopes: zone read/DNS edit and Resend
 domain/API-key management. `gh` requires repository administrator access.
+
+For new deployments, set `smtp-port: 2587` and `smtp-security: starttls`.
+Omitting the port preserves legacy `465`; omitted security is inferred from the
+port. Allowed pairs: `465`/`2465` with `implicit-tls`, `587`/`2587` with `starttls`.
+The security field configures the explicit s-nail test; ONCE only forwards the
+SMTP server, port, credentials and sender. Each application's SMTP client must
+support and use the selected mode. Fizzy defaults to STARTTLS; implicit TLS
+requires its documented `SMTP_TLS=true` environment setting. Certificate checks
+stay enabled. A host probe does not verify application mail configuration.
 
 Applications opt into `manage-dns: true`, `smtp: true` and
 `github: owner/repository`. GitHub images must belong to that repository on GHCR;

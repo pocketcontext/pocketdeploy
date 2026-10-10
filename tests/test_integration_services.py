@@ -225,7 +225,9 @@ def test_delete_retires_recorded_github_even_after_app_removed(tmp_path, monkeyp
             events.append('compute-delete')
             state.remove_resource('compute')
             return {'deleted': True}
-        return SimpleNamespace(plan_delete=lambda: [], delete=delete)
+        return SimpleNamespace(plan_delete=lambda: [], delete=delete,
+                               resource_kinds={'oci-compute', 'oci-firewall', 'oci-boot-volume'},
+                               delete_pending_key='oci-delete-compute')
     with patch.object(cli, 'OCI', side_effect=cloud_factory), patch('pocketdeploy.deletion.GitHub', side_effect=github_factory):
         cli.execute(cli.parser().parse_args(['delete']))
     assert events == ['github-delete', 'compute-delete']
@@ -336,7 +338,9 @@ smtp-from: mail@notifications.example.test
             events.append('compute-delete')
             state.remove_resource('compute')
             return {'deleted': True}
-        return SimpleNamespace(plan_delete=plan, delete=delete)
+        return SimpleNamespace(plan_delete=plan, delete=delete,
+                               resource_kinds={'oci-compute', 'oci-firewall', 'oci-boot-volume'},
+                               delete_pending_key='oci-delete-compute')
 
     monkeypatch.setattr(services_module, 'run', provider)
     monkeypatch.setattr(retry.time, 'sleep', lambda seconds: events.append('retry-wait'))

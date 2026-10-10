@@ -349,3 +349,53 @@ def test_custom_configuration_restore_safety(tmp_path, monkeypatch, legacy, fail
         vault.restore(config, destination, 'checkpoint', 'v1', overwrite=True)
     assert calls == (['checkpoint', 'colors.yml'] if legacy else ['checkpoint'])
     assert {p.name: p.read_bytes() for p in destination.iterdir()} == original_files
+
+
+@pytest.mark.parametrize('provider,binding', [
+    ('digitalocean', {'digitalocean-account-id': 'account', 'digitalocean-region': 'lon1', 'digitalocean-vpc-id': 'vpc'}),
+    ('gcp', {'gcp-project': 'project', 'gcp-zone': 'europe-west2-a', 'gcp-network': 'network', 'gcp-subnet': 'subnet'}),
+])
+@pytest.mark.parametrize('mismatch', [False, True])
+def test_new_provider_checkpoint_scope_checked_before_private_files(tmp_path, monkeypatch, provider, binding, mismatch):
+    from pocketdeploy.config import scope as config_scope
+    root = tmp_path / 'source'
+    config = setup_files(root)
+    config = {key: value for key, value in config.items() if not key.startswith('oci-')}
+    config.update({'provider-compute': provider, **binding})
+    storage, downloads = {}, []
+
+    def command(config, *args):
+        args = list(map(str, args))
+        if args[0] == 'save':
+            document = 'document-' + str(len(storage))
+            storage[document] = Path(args[2]).read_bytes()
+            return {'id': document, 'version': 'version-1'}
+        assert args[0] == 'restore'
+        downloads.append(args[1])
+        Path(args[args.index('--to') + 1]).write_bytes(storage[args[1]])
+        return {'restored': True}
+
+    monkeypatch.setattr(vault, '_command', command)
+    with State(root / '.colors.sqlite', 'synthetic', config_scope(config), create=True) as state:
+        state.put_resource('compute', provider + '-instance', 'instance', {'safe': 'synthetic'})
+        deployment_id = state.deployment_id
+        receipt = vault.save(config, state, root)
+    target = tmp_path / 'restored'
+    target.mkdir()
+    shutil.copyfile(root / 'colors.yml', target / 'colors.yml')
+    restore_config = dict(config)
+    if mismatch:
+        # Same provider but different account/project must fail as strictly as provider switches.
+        field = 'digitalocean-account-id' if provider == 'digitalocean' else 'gcp-project'
+        restore_config[field] = 'other'
+        with pytest.raises(DeployError, match='incompatible manifest'):
+            vault.restore(restore_config, target, receipt['state_document'], receipt['state_version'])
+        assert downloads == [receipt['state_document']]
+        assert sorted(path.name for path in target.iterdir()) == ['colors.yml']
+    else:
+        result = vault.restore(restore_config, target, receipt['state_document'], receipt['state_version'])
+        assert result['reconciliation_required']
+        with State(target / '.colors.sqlite', 'synthetic', config_scope(config), read_only=True) as state:
+            assert state.deployment_id == deployment_id
+            assert state.get_resource('compute')['provider_id'] == 'instance'
+        assert (target / '.envrc.private').read_text() == 'synthetic private data'

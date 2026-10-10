@@ -14,6 +14,7 @@ from email.utils import parsedate_to_datetime
 from .common import DeployError, run
 from .output import operation
 from .retry import run_read
+from .smtp import smtp_transport
 
 
 def _retry_after(headers):
@@ -575,5 +576,6 @@ class Services:
         key = self.state.get_resource('smtp-key')
         if not key:
             raise DeployError('SMTP credential is missing; converge first.')
-        return {'server': 'smtp.resend.com', 'port': 465, 'username': 'resend',
+        port, security = smtp_transport(self.c)
+        return {'server': 'smtp.resend.com', 'port': port, 'security': security, 'username': 'resend',
                 'password': key['attributes']['token'], 'from': self.c['smtp-from']}

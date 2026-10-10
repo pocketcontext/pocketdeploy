@@ -1,6 +1,136 @@
-# OCI verification
+# Deployment verification
 
-## Latest recorded status — 10 October 2026
+## DigitalOcean live verification — 10 October 2026
+
+A disposable Frankfurt deployment completed using the existing `default-fra1`
+VPC. Profile `pocketdeploy-do-test`, deployment UUID
+`522b26b4-20a4-4665-856b-065c87930ef2`, used Ubuntu 24.04 AMD64 and
+`s-1vcpu-2gb`. Authentication used `COLORS_PAR_DIGITALOCEAN_ACCESS_TOKEN` from
+ignored private bindings. The Droplet (`607963476`), dedicated firewall,
+deployment tag and generated SSH files were deleted after testing. Independent
+inventory at **19:10:37 UTC** showed zero Droplets, no test firewall/tag, zero
+local resources or pending steps, and the original VPC retained.
+
+Verified live:
+
+- Provisioning, restricted SSH ingress, pinned host-key rotation, Docker and ONCE.
+- Digest-pinned demo application with public, certificate-verified HTTPS.
+- No-op plan/converge preserved the running container.
+- Stop-first application update replaced the container and preserved a synthetic
+  file in its named volume.
+- Reboot changed the kernel boot ID; the updated container, volume file, HTTPS,
+  Docker and ONCE recovered.
+- Host metadata was reachable while container metadata requests were blocked;
+  packet counters confirmed the DROP rule handled them, including after reboot.
+- Resend port 2587 accepted certificate-verified STARTTLS with TLS 1.3 before and
+  after reboot. No SMTP authentication or email was sent.
+- Dedicated firewall source additions and removal; the final update completed
+  with bounded asynchronous verification and no manual retry.
+- Deletion preflight, application quiescence, resumed deletion and key cleanup.
+
+The live run exposed API normalization (`action: allow`, all ports represented
+as `0`), delayed inventory visibility and asynchronous firewall application.
+The adapter now normalizes equivalent rules and waits after successful creates
+and firewall writes without repeating uncertain mutations. During deletion,
+DigitalOcean briefly removed the Droplet tag before removing the Droplet; the
+live run safely resumed after disappearance. Post-delete polling now observes
+the exact authorized ID until absent, with regression coverage; that final
+polling change was validated synthetically, not with another paid deployment.
+Normal ownership/preflight checks remain strict. Final validation: **688 tests
+passed**, `uv build`, skill validation and `git diff --check` passed.
+
+Safe receipts, synthetic probes and private state remain in ignored
+`.colors-do-live-20261010/`. No shared networking, managed DNS, SMTP domains or
+GitHub environments were changed. Application email delivery, Vault recovery and
+populated application backup restoration were not tested. No live test server
+remains. Package publication and portable launcher repinning remain pending.
+
+## Google Cloud live verification — 10 October 2026
+
+A separately authorized disposable deployment completed in project `pocketcontext`,
+zone `europe-west3-a`, using the existing `default` network/subnet. Its profile was
+`pocketdeploy-gcp-test`, deployment UUID `7623e166-825e-4939-b291-3c3a47e462bd`.
+The E2 small AMD64 VM used Ubuntu 24.04 and a 20 GiB balanced persistent boot disk.
+The VM, disk, both dedicated firewall rules and generated SSH files were deleted;
+independent inventory checks completed at **18:48:01 UTC**. The shared network
+remained, and both pre-existing project VMs retained their IDs and running state.
+The former test hostname `34.89.231.180.sslip.io` is no longer this deployment.
+
+The refreshed operator identity was Application Default Credentials, not an active
+gcloud CLI account. Added explicit `gcp-auth: application-default` support instead
+of silently falling back between credential sources. Default CLI authentication
+is unchanged; combining ADC with `gcp-account` is rejected. Tokens were never
+printed, stored in deployment state or sent to the host.
+
+Live checks passed:
+
+- Local initialization and read-only planning, then VM/disk/firewall creation.
+- Pinned bootstrap SSH trust, replacement host-key verification, Docker and
+  checksum-pinned ONCE v0.3.3 installation.
+- Deployment of the pinned AMD64 demo image, public HTTP `/up` and synthetic
+  `/generation`, followed by valid public HTTPS with ONCE-managed TLS.
+- An unchanged plan reported only retained compute resources and no app actions.
+  Repeated convergence preserved the exact application container identity; the
+  mutation journal contained only the four original infrastructure creates.
+- A stop-first environment update replaced the container, served the new synthetic
+  generation, preserved the named volume identities and retained a synthetic file
+  written under `/storage`.
+- A host reboot was confirmed by a changed boot ID. Docker, ONCE, the same app
+  container, public HTTPS and the synthetic volume file recovered.
+- Both metadata DROP rules survived reboot. A container request increased their
+  packet counters and could not reach IMDS, while the host could reach the same
+  metadata endpoint. Root and host-network processes remain outside this boundary.
+- Resend `smtp.resend.com:2587` accepted STARTTLS with certificate verification and
+  TLS 1.3 before and after reboot. No authentication or test email was attempted.
+- An owned SSH firewall source update was planned and applied through the Compute
+  API without replacing the application or changing other compute resources.
+- Deletion dry-run, clean application quiescence, remote resource removal and
+  local SSH-key cleanup. Final cloud inspection found no deployment resources;
+  SQLite reported zero resources and zero pending steps, with zero generated key
+  files remaining.
+
+The live configuration, private state and safe probe receipts remain under ignored
+`.colors-gcp-live-20261010-183722/` in the local checkout. This test did not modify
+root OCI configuration, production deployments, shared networking, managed DNS,
+Resend domains or GitHub environments. The default VPC's inherited SSH permissions
+are broader than the dedicated test rule, so this does not prove exclusive ingress
+isolation. Application email delivery, Vault checkpoint recovery, populated
+application restore and live fault injection remain separate checks. DigitalOcean was subsequently checked as recorded above.
+
+After the authentication change: **676 synthetic tests passed**, `uv build`, skill
+validation and `git diff --check` passed. Package publication and portable launcher
+repinning were not performed.
+
+## Multi-provider source validation — 10 October 2026
+
+The working source adds DigitalOcean and Google Compute Engine adapters, shared
+provider scope/recovery handling and configurable Resend SMTP transport. New
+examples select port 2587 with STARTTLS; omitted settings preserve legacy 465.
+The portable launcher still points to its existing published package, which does
+not include these source changes. Run `uv run pocketdeploy` for the new adapters.
+
+Validation completed locally:
+
+- `uv sync --extra test` and final locked dependency synchronization.
+- Full synthetic suite: 672 tests passed. Coverage includes preserved OCI hashes
+  and scopes, offline provider initialization, cross-provider recovery rejection,
+  both new provider lifecycles, uncertain operations, foreign firewall targets,
+  image pinning, deletion receipt atomicity and SMTP transport validation.
+- `uv build` produced the source archive and wheel. The wheel was installed in
+  an isolated environment outside the checkout; CLI help, both provider imports,
+  offline initialization, private key permissions and scope rejection passed.
+- The existing published launcher passed 31 copied-launcher checks without cloud
+  access. These checks do not establish new-provider support in that old pin.
+- The updated devenv shell provided Google Cloud CLI successfully; the operator
+  skill passed its validator and `git diff --check` passed.
+
+No live cloud resources or emails were created. Provider API compatibility is
+covered with synthetic fixtures, not an actual account rehearsal. Live startup,
+reboot, firewall behavior, application SMTP and populated data recovery remain
+unverified for the new backends. Package publication and launcher repinning are
+not part of this source validation.
+
+## Latest recorded OCI status — 10 October 2026
 
 The `pocketdeploy-oci-test` deployment was intentionally deleted. The final
 operation completed at 07:39:17 UTC after an initial preflight read failure and

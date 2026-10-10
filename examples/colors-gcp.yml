@@ -1,0 +1,40 @@
+# Existing project, network and subnet; authenticate gcloud separately.
+schema-version: 1
+profile: gcp-example
+provider-compute: gcp
+state-file: .colors.sqlite
+compute-prevent-destroy: true
+compute-require-existing-state: false
+compute-ssh-sources: [203.0.113.10/32]
+compute-http-sources: [0.0.0.0/0]
+ssh-user: ubuntu
+gcp-project: <project-id>
+# Use application-default for credentials from gcloud auth application-default login.
+gcp-auth: gcloud
+gcp-zone: europe-west3-a
+gcp-network: <existing-network-name>
+gcp-subnet: <existing-subnet-name>
+gcp-machine-type: e2-small
+gcp-image-project: ubuntu-os-cloud
+gcp-image-family: ubuntu-2404-lts-amd64
+# Optional exact image selfLink instead of family discovery:
+# gcp-image: https://www.googleapis.com/compute/v1/projects/ubuntu-os-cloud/global/images/IMAGE_NAME
+gcp-boot-disk-size-gb: 50
+gcp-boot-disk-type: pd-balanced
+# Optional authenticated gcloud account:
+# gcp-account: operator@example.com
+provider-dns: no-infra
+provider-smtp: no-infra
+# Used when provider-smtp is enabled with Cloudflare and a sending domain.
+smtp-port: 2587
+smtp-security: starttls
+once-version: v0.3.3
+once:
+  applications:
+    - host: app.example.com
+      image: ghcr.io/pocketcontext/pocketdeploy-demo:latest
+      deploy-strategy: rolling
+      auto_update: false
+      auto_backup: false
+      smtp: false
+      manage-dns: false

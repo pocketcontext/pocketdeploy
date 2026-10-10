@@ -9,6 +9,7 @@ from pathlib import Path
 
 from blue.cli import load_yaml, read_pars, par_name
 from .common import DeployError, local_path
+from .smtp import smtp_transport
 
 DEFAULTS = {
     'schema-version': 1, 'provider-compute': 'oci', 'workdir': '.colors',
@@ -29,6 +30,22 @@ ROOT_KEYS = set(DEFAULTS) | {
     'once',
     'cloudflare-zone-id', 'smtp-domain', 'smtp-from', 'resend-region',
     'ssh-host-private-key-file', 'ssh-host-public-key-file',
+    'smtp-port', 'smtp-security',
+    'digitalocean-account-id', 'digitalocean-token-env', 'digitalocean-region',
+    'digitalocean-vpc-id', 'digitalocean-size', 'digitalocean-image',
+    'gcp-project', 'gcp-zone', 'gcp-network', 'gcp-subnet', 'gcp-account', 'gcp-auth',
+    'gcp-machine-type', 'gcp-image', 'gcp-image-project', 'gcp-image-family',
+    'gcp-boot-disk-size-gb', 'gcp-boot-disk-type',
+}
+
+PROVIDER_DEFAULTS = {
+    'oci': {},  # Preserve existing resolved configuration and checkpoint identities.
+    'digitalocean': {'digitalocean-token-env': 'COLORS_PAR_DIGITALOCEAN_ACCESS_TOKEN',
+                     'digitalocean-size': 's-1vcpu-2gb',
+                     'digitalocean-image': 'ubuntu-24-04-x64'},
+    'gcp': {'gcp-machine-type': 'e2-small', 'gcp-image-project': 'ubuntu-os-cloud',
+            'gcp-image-family': 'ubuntu-2404-lts-amd64',
+            'gcp-boot-disk-size-gb': 50, 'gcp-boot-disk-type': 'pd-balanced'},
 }
 
 
@@ -54,8 +71,20 @@ def load(path, *, env=None, resolve=True):
     if set(raw) - ROOT_KEYS:
         raise DeployError('Unsupported configuration field; see the configuration reference.')
     overlaid = read_pars({**DEFAULTS, **raw}, os.environ if env is None else env)
+    provider = overlaid.get('provider-compute')
+    if not isinstance(provider, str) or provider not in PROVIDER_DEFAULTS:
+        raise DeployError('Supported compute providers are oci, digitalocean and gcp.')
+    # Apply defaults only to the selected provider, including environment overrides.
+    defaults = PROVIDER_DEFAULTS[provider]
+    prefixes = ('oci-', 'digitalocean-', 'gcp-')
+    foreign = tuple(prefix for prefix in prefixes if prefix != provider + '-')
+    if any(key.startswith(foreign) for key in raw):
+        raise DeployError('Compute configuration contains fields for a different provider.')
+    overlaid = {key: value for key, value in overlaid.items() if not key.startswith(foreign)}
+    overlaid = read_pars({**defaults, **overlaid}, environment)
     # Do not copy unrelated operator credentials into this deployment's state.
-    config = {key: value for key, value in overlaid.items() if key in ROOT_KEYS}
+    config = {key: value for key, value in overlaid.items()
+              if key in ROOT_KEYS and not key.startswith(foreign)}
     config['_root'] = str(path.parent)
     config['_file'] = str(path)
     validate(config)
@@ -67,26 +96,60 @@ def load(path, *, env=None, resolve=True):
 
 
 def scope(c):
+    provider = c.get('provider-compute', 'oci')
+    if provider == 'digitalocean':
+        return {'provider': provider, 'account': c['digitalocean-account-id'],
+                'region': c['digitalocean-region'], 'vpc': c['digitalocean-vpc-id']}
+    if provider == 'gcp':
+        return {'provider': provider, 'project': c['gcp-project'], 'zone': c['gcp-zone'],
+                'network': c['gcp-network'], 'subnet': c['gcp-subnet']}
+    if provider != 'oci':
+        raise DeployError('Unsupported compute provider.')
     return {'provider': 'oci', 'profile': c['oci-config-file-profile'],
             'region': c.get('oci-region', ''), 'compartment': c['oci-compartment-id'],
             'subnet': c['oci-subnet-id']}
 
 
 def validate(c):
-    if c['schema-version'] != 1 or c['provider-compute'] != 'oci':
-        raise DeployError('Only schema 1 and OCI compute are supported.')
+    if c['schema-version'] != 1:
+        raise DeployError('Only configuration schema 1 is supported.')
+    provider = c['provider-compute']
+    if provider not in PROVIDER_DEFAULTS:
+        raise DeployError('Supported compute providers are oci, digitalocean and gcp.')
     if not re.fullmatch(r'[a-z][a-z0-9-]{0,39}', str(c.get('profile', ''))):
         raise DeployError('Profile must be a lowercase identifier of at most 40 characters.')
-    for key in ['oci-config-file-profile', 'oci-compartment-id', 'oci-subnet-id', 'oci-availability-domain']:
+    required = {
+        'oci': ['oci-config-file-profile', 'oci-compartment-id', 'oci-subnet-id', 'oci-availability-domain'],
+        'digitalocean': ['digitalocean-account-id', 'digitalocean-region', 'digitalocean-vpc-id',
+                         'digitalocean-size', 'digitalocean-image', 'digitalocean-token-env'],
+        'gcp': ['gcp-project', 'gcp-zone', 'gcp-network', 'gcp-subnet', 'gcp-machine-type',
+                'gcp-image-project', 'gcp-image-family', 'gcp-boot-disk-type'],
+    }[provider]
+    for key in required:
         if not isinstance(c.get(key), str) or not c[key].strip() or '<' in c[key]:
-            raise DeployError('OCI profile, compartment, subnet and availability domain are required.')
+            raise DeployError('Required compute provider configuration is missing or invalid.')
+        if c[key].startswith('-') or any(ord(char) < 32 for char in c[key]):
+            raise DeployError('Invalid compute provider identifier.')
+    if provider == 'digitalocean' and not re.fullmatch(r'[A-Z_][A-Z0-9_]*', c['digitalocean-token-env']):
+        raise DeployError('digitalocean-token-env must name an environment variable.')
+    if provider == 'gcp':
+        if c.get('gcp-auth', 'gcloud') not in ('gcloud', 'application-default'):
+            raise DeployError('gcp-auth must be gcloud or application-default.')
+        if c.get('gcp-auth') == 'application-default' and c.get('gcp-account'):
+            raise DeployError('gcp-account cannot select an Application Default Credentials identity.')
+        if type(c.get('gcp-boot-disk-size-gb')) is not int or c['gcp-boot-disk-size-gb'] < 10:
+            raise DeployError('gcp-boot-disk-size-gb must be an integer of at least 10.')
+        for key in ('gcp-account', 'gcp-image'):
+            if key in c and (not isinstance(c[key], str) or not c[key] or c[key].startswith('-')
+                             or any(ord(char) < 32 for char in c[key])):
+                raise DeployError('Invalid optional Google Cloud identifier.')
     user = c.get('ssh-user', 'ubuntu')
     if not isinstance(user, str) or not re.fullmatch(r'[a-z_][a-z0-9_-]{0,31}', user):
         raise DeployError('ssh-user must be a conventional lowercase Linux username of at most 32 characters.')
     for key in ['compute-prevent-destroy', 'compute-require-existing-state']:
         if key in c and type(c[key]) is not bool:
             raise DeployError('Protection and existing-state flags must be booleans.')
-    for key in ['oci-ocpus', 'oci-memory-in-gbs', 'oci-boot-volume-size-in-gbs']:
+    for key in (['oci-ocpus', 'oci-memory-in-gbs', 'oci-boot-volume-size-in-gbs'] if provider == 'oci' else []):
         if type(c[key]) not in (int, float) or c[key] <= 0:
             raise DeployError('Compute sizes must be positive numbers.')
     for key in ['compute-ssh-sources', 'compute-http-sources']:
@@ -100,6 +163,7 @@ def validate(c):
             raise DeployError('Firewall sources must contain valid IPv4 CIDRs.') from None
     if c['provider-dns'] not in ('no-infra', 'cloudflare') or c['provider-smtp'] not in ('no-infra', 'resend'):
         raise DeployError('Supported DNS/SMTP providers are cloudflare/resend or no-infra.')
+    smtp_transport(c)
     if c['provider-dns'] == 'cloudflare':
         if not re.fullmatch(r'[a-f0-9]{32}', str(c.get('cloudflare-zone-id', ''))):
             raise DeployError('Cloudflare requires an explicit cloudflare-zone-id.')
