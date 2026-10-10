@@ -45,6 +45,31 @@ auth mode is `security_token`. The existing subnet/VCN, internet gateway, routes
 and subnet security lists remain externally managed. Inherited subnet rules can
 grant access beyond the dedicated NSG; an NSG does not subtract those permissions.
 
+## Provider read recovery
+
+Resend and Cloudflare reads recover from connection failures, timeouts, HTTP 429
+throttling and HTTP 500/502/503/504 within the current operation. Only explicitly
+allowlisted reads use this recovery layer; PocketDeploy does not replay mutations.
+Authentication, permissions, certificate failures and exhausted daily/monthly
+quotas stop immediately. Provider response bodies and credentials stay private.
+
+`--provider-read-timeout SECONDS` sets a per-read recovery budget (integer seconds
+from 0 to 3600, default 120) for `plan`, `converge` and `delete`, including dry runs. `0` disables PocketDeploy retries while
+retaining the normal request timeout and any retries performed by the provider
+CLI. Each read makes at most five subprocess attempts; subprocess execution,
+provider CLI retries and backoff all consume the same deadline. Backoff uses
+full jitter with exponential ceilings of 1, 2, 4 and 8 seconds. An available `Retry-After` takes
+precedence; when it cannot fit in the remaining budget, the read stops rather
+than retrying early. SMTP reads also respect the verification stage deadline.
+The pinned Cloudflare CLI omits response headers from errors, so its reads use
+backoff without `Retry-After`; Resend exposes that header in structured errors.
+
+Transient read recovery continues the same DAG without repeating completed
+stages. Exhausted recovery preserves the normal durable operation state;
+uncertain mutation outcomes still require reconciliation before repeating them.
+This budget does not extend the entire command timeout or change OCI/GitHub
+retry behavior.
+
 ## Portable skill and launcher
 
 Install the skill for your agent from this repository:

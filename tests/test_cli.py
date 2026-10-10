@@ -71,6 +71,39 @@ oci-availability-domain: ad
 
 
 @pytest.mark.parametrize('arguments', [
+    ['plan', '--provider-read-timeout', '-1'],
+    ['delete', '--provider-read-timeout', '3601'],
+    ['converge', '--provider-read-timeout', '1.5'],
+    ['init', '--provider-read-timeout', '120'],
+    ['status', '--provider-read-timeout', '120'],
+])
+def test_invalid_read_retry_budget_before_config(tmp_path, monkeypatch, arguments):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, 'load', lambda *a, **kw: pytest.fail('Loaded configuration'))
+    with pytest.raises(DeployError) as error:
+        cli.execute(cli.parser().parse_args(arguments))
+    assert error.value.code == 'invalid_usage'
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize('command', ['plan', 'converge', 'delete'])
+@pytest.mark.parametrize('value, expected', [(None, 120), ('0', None), ('3600', 3600)])
+def test_read_retry_budget_context_scoped_to_execution(monkeypatch, command, value, expected):
+    from pocketdeploy.retry import run_read
+    import pocketdeploy.retry as retry
+    monkeypatch.setattr(retry.time, 'monotonic', lambda: 0)
+    seen = []
+    def execute(*args):
+        return run_read(lambda remaining: seen.append(remaining))
+    monkeypatch.setattr(cli, '_execute', execute)
+    args = [command, '--dry-run'] + (['--provider-read-timeout', value] if value is not None else [])
+    cli.execute(cli.parser().parse_args(args))
+    assert seen == [expected]
+    run_read(lambda remaining: seen.append(remaining))
+    assert seen[-1] == 120
+
+
+@pytest.mark.parametrize('arguments', [
     ['converge', '--smtp-verification-timeout', '-1'],
     ['converge', '--smtp-verification-timeout', '3601'],
     ['converge', '--smtp-verification-timeout', '1.5'],

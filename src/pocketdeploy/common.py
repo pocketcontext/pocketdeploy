@@ -6,10 +6,14 @@ from pathlib import Path
 class DeployError(Exception):
     """Only fixed, non-secret messages should reach this exception."""
 
-    def __init__(self, message, *, code="operation_failed", stage=None):
+    def __init__(self, message, *, code="operation_failed", stage=None,
+                 retryable=False, retry_after=None, status=None):
         super().__init__(message)
         self.code = code
         self.stage = stage
+        self.retryable = retryable
+        self.retry_after = retry_after
+        self.status = status
 
 
 def run(args, *, input=None, timeout=120, env=None, error_classifier=None):

@@ -5,79 +5,158 @@ Provider responses and API keys remain private. No mail is sent by convergence.
 import ipaddress
 import json
 import os
+import re
 import time
+import math
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 from .common import DeployError, run
 from .output import operation
+from .retry import run_read
+
+
+def _retry_after(headers):
+    """Keep only a finite delay from a structured Retry-After header."""
+    if not isinstance(headers, dict):
+        return None
+    value = next((v for k, v in headers.items() if isinstance(k, str) and k.lower() == 'retry-after'), None)
+    if not isinstance(value, (str, int, float)) or isinstance(value, bool):
+        return None
+    try:
+        seconds = float(value)
+    except (ValueError, OverflowError):
+        try:
+            stamp = parsedate_to_datetime(value)
+            if stamp.tzinfo is None:
+                return None
+            seconds = (stamp - datetime.now(timezone.utc)).total_seconds()
+        except (TypeError, ValueError, OverflowError):
+            return None
+    return max(0.0, seconds) if math.isfinite(seconds) else None
+
+
+def _cloudflare_error(stderr):
+    """Normalize cf 1.0.0-beta.14's APIError box, never arbitrary status text.
+
+    Its error renderer omits response headers, including Retry-After.
+    Only the final status footer of the fixed APIError frame is trusted.
+    """
+    clean = re.sub(r'\x1b\[[0-9;]*m', '', stderr).strip()
+    lines = clean.splitlines()
+    if not lines or lines[0] != '┌ APIError':
+        return None
+    try:
+        end = lines.index('└')
+    except ValueError:
+        return None
+    if end < 2 or any(line != '│' and not line.startswith('│ ') for line in lines[1:end]):
+        return None
+    match = re.fullmatch(r'│ ([1-5][0-9]{2}) ([A-Za-z ]+)(?: · HTTP /[^\r\n]*)?', lines[end - 1])
+    if not match:
+        return None
+    status = int(match[1])
+    reasons = {400: 'Bad Request', 401: 'Unauthorized', 403: 'Forbidden',
+               404: 'Not Found', 405: 'Method Not Allowed', 409: 'Conflict',
+               422: 'Unprocessable Entity', 429: 'Too Many Requests',
+               500: 'Internal Server Error', 502: 'Bad Gateway',
+               503: 'Service Unavailable', 504: 'Gateway Timeout'}
+    if reasons.get(status) != match[2]:
+        return None
+    return {'error': {'statusCode': status}}
 
 
 def _provider_error(tool, stderr):
-    """Classify structured failures without returning provider-controlled text."""
+    """Inspect bounded private diagnostics; expose fixed messages and safe metadata."""
+    if not isinstance(stderr, str) or len(stderr) > 65536:
+        return None
     try:
         data = json.loads(stderr)
-    except (ValueError, TypeError):
-        # The CLI may precede its JSON error with retry diagnostics.
-        data = None
-        if isinstance(stderr, str) and len(stderr) <= 65536:
-            decoder = json.JSONDecoder()
-            for offset, char in enumerate(stderr):
-                if char != '{':
-                    continue
-                try:
-                    candidate, _ = decoder.raw_decode(stderr[offset:])
-                except ValueError:
-                    continue
-                if isinstance(candidate, dict) and isinstance(candidate.get('error'), dict):
-                    data = candidate
-                    break
-        if data is None:
-            text = stderr.lower() if isinstance(stderr, str) and len(stderr) <= 65536 else ''
-            if 'domain' in text and any(word in text for word in ('limit', 'maximum', 'quota')):
-                return DeployError(('Resend' if tool == 'resend' else 'Cloudflare') + ' domain quota prevents creation; review the account plan and existing domains.', code='provider_domain_quota')
-            if 'rate limit' in text or 'rate_limit_exceeded' in text:
-                return DeployError(('Resend' if tool == 'resend' else 'Cloudflare') + ' rate limit reached; wait before retrying reads and reconcile uncertain writes.', code='provider_rate_limited')
-            return None
-    if not isinstance(data, dict):
-        return None
-    error = data.get('error', data)
+    except ValueError:
+        data = _cloudflare_error(stderr) if tool == 'cf' else None
+        decoder = json.JSONDecoder()
+        for offset, char in enumerate(stderr):
+            if data is not None:
+                break
+            if char != '{':
+                continue
+            try:
+                candidate, _ = decoder.raw_decode(stderr[offset:])
+            except ValueError:
+                continue
+            if isinstance(candidate, dict) and isinstance(candidate.get('error'), dict):
+                data = candidate
+                break
+    error = data.get('error', data) if isinstance(data, dict) else {}
     if not isinstance(error, dict):
         return None
     details = error
-    if isinstance(error.get('body'), str):
+    body = error.get('body')
+    if isinstance(body, str):
         try:
-            body = json.loads(error['body'])
-            if isinstance(body, dict):
-                details = {**error, **body}
+            body = json.loads(body)
         except ValueError:
-            pass
+            body = None
+    if isinstance(body, dict):
+        details = {**error, **body}
     code = details.get('name', details.get('code'))
-    status = details.get('statusCode', details.get('status'))
+    status = next((value for value in (error.get('statusCode'), error.get('status'),
+                   details.get('statusCode'), details.get('status'))
+                   if type(value) is int and 100 <= value <= 599), None)
+    delay = _retry_after(error.get('headers', data.get('headers') if isinstance(data, dict) else None))
     label = 'Resend' if tool == 'resend' else 'Cloudflare'
-    message = details.get('message', '')
-    # Provider messages are inspected privately only to select fixed explanations.
+    message = details.get('message', '') if data is not None else stderr
     message = message.lower() if isinstance(message, str) else ''
-    if ('domain' in message and any(x in message for x in ('limit', 'maximum', 'quota'))):
-        return DeployError(label + ' domain quota prevents creation; review the account plan and existing domains.', code='provider_domain_quota')
+
+    def failure(text, category, retryable=False):
+        return DeployError(label + text, code=category, status=status,
+                           retry_after=delay, retryable=retryable)
+
+    if 'domain' in message and any(x in message for x in ('limit', 'maximum', 'quota')):
+        return failure(' domain quota prevents creation; review the account plan and existing domains.', 'provider_domain_quota')
+    if code in ('daily_quota_exceeded', 'monthly_quota_exceeded', 'quota_exceeded') or any(
+            x in message for x in ('daily quota', 'monthly quota', 'daily limit', 'monthly limit')):
+        return failure(' usage quota exhausted; review the account plan and quota reset.', 'provider_usage_quota')
     if code in ('restricted_api_key', 'invalid_access', 'forbidden', 'insufficient_permissions', 'unrecognized_scope') or status == 403:
-        return DeployError(label + ' denied this operation; the management credential needs the required resource permission.', code='provider_permission_denied')
+        return failure(' denied this operation; the management credential needs the required resource permission.', 'provider_permission_denied')
     if code in ('auth_error', 'missing_api_key', 'invalid_api_key') or status == 401:
-        return DeployError(label + ' authentication failed; check the configured management credential.', code='provider_authentication_failed')
-    if code in ('rate_limit_exceeded', 'daily_quota_exceeded') or status == 429:
-        return DeployError(label + ' rate or usage limit reached; wait before retrying reads and reconcile uncertain writes.', code='provider_rate_limited')
+        return failure(' authentication failed; check the configured management credential.', 'provider_authentication_failed')
     if code in ('validation_error', 'missing_name') or status in (400, 422):
-        return DeployError(label + ' rejected the requested settings; verify domain, region and account configuration.', code='provider_validation_failed')
-    return DeployError(label + ' request failed; provider output suppressed. Reconcile uncertain writes before retrying.', code='provider_request_failed')
+        return failure(' rejected the requested settings; verify domain, region and account configuration.', 'provider_validation_failed')
+    if any(x in message for x in ('certificate', 'cert_', 'self signed', 'tls handshake', 'ssl')):
+        return failure(' TLS verification failed; check certificate trust and endpoint configuration.', 'provider_tls_failed')
+    if code == 'rate_limit_exceeded' or status == 429 or (data is None and 'rate limit' in message):
+        return failure(' request throttled; wait for the provider retry window.', 'provider_rate_limited', True)
+    if status in (500, 502, 503, 504):
+        return failure(' temporarily unavailable; provider output suppressed.', 'provider_unavailable', True)
+    transport = ((code.lower() + ' ') if isinstance(code, str) else '') + message
+    if status is None and any(x in transport for x in (
+            'econnreset', 'econnrefused', 'etimedout', 'eai_again', 'connection reset',
+            'connection refused', 'temporary failure in name resolution', 'socket hang up',
+            'connect timeout', 'connection timed out', 'request timed out')):
+        return failure(' connection failed temporarily; provider output suppressed.', 'provider_connection_failed', True)
+    if data is None:
+        return None
+    return failure(' request failed; provider output suppressed. Reconcile uncertain writes before retrying.', 'provider_request_failed')
 
 
-def _call(tool, args, *, timeout=90):
-    with operation('Cloudflare request' if tool == 'cf' else 'Resend request'):
-        raw = run([tool, *args], timeout=timeout, error_classifier=lambda stderr: _provider_error(tool, stderr))
-    if not raw.strip() and 'delete' in args:
-        return {}
-    try:
-        return json.loads(raw)
-    except (ValueError, TypeError):
-        raise DeployError('Provider returned an invalid response; output suppressed.') from None
+def _call(tool, args, *, timeout=90, deadline=None):
+    label = 'Cloudflare request' if tool == 'cf' else 'Resend request'
+    read = ((tool == 'resend' and args[:2] in (['domains', 'get'], ['domains', 'list'], ['api-keys', 'list'])) or
+            (tool == 'cf' and (args[:2] == ['zones', 'get'] or args[:3] == ['dns', 'records', 'list'])))
+
+    def attempt(remaining=None):
+        cap = min(timeout, remaining) if remaining is not None else timeout
+        with operation(label):
+            raw = run([tool, *args], timeout=cap, error_classifier=lambda stderr: _provider_error(tool, stderr))
+        if not raw.strip() and 'delete' in args:
+            return {}
+        try:
+            return json.loads(raw)
+        except (ValueError, TypeError):
+            raise DeployError('Provider returned an invalid response; output suppressed.') from None
+
+    return run_read(attempt, deadline=deadline, label=label) if read else attempt()
 
 
 def _identifier(value):
@@ -222,8 +301,8 @@ class Services:
     def _cf(self, args):
         return _call('cf', ['dns', 'records', *args, '--zone', self.c['cloudflare-zone-id']])
 
-    def _resend(self, args, *, timeout=90):
-        return _call('resend', [*args, '--json'], timeout=timeout)
+    def _resend(self, args, *, timeout=90, deadline=None):
+        return _call('resend', [*args, '--json'], timeout=timeout, deadline=deadline)
 
     def _records(self, name):
         found = []
@@ -422,9 +501,10 @@ class Services:
             if timeout and remaining <= 0:
                 raise pending()
             try:
-                return self._resend(args, timeout=min(90, remaining) if timeout else 90)
+                return self._resend(args, timeout=min(90, remaining) if timeout else 90,
+                                    deadline=deadline if timeout else None)
             except DeployError as error:
-                if timeout and error.code == 'command_timeout' and time.monotonic() >= deadline:
+                if timeout and error.code in ('command_timeout', 'provider_read_timeout') and time.monotonic() >= deadline:
                     raise pending() from None
                 raise
 

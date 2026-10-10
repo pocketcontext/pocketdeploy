@@ -263,3 +263,89 @@ def test_github_external_dns_still_requires_public_https():
     with patch('pocketdeploy.health.urllib.request.urlopen', return_value=nullcontext(response)) as request:
         verify({'once': {'applications': [{'host': 'www.example.test', 'health-path': '/up', 'github': 'example/site', 'manage-dns': False}]}})
     assert request.call_args.args[0] == 'https://www.example.test/up'
+
+
+def test_transient_service_read_recovers_without_restarting_converge(tmp_path, monkeypatch):
+    from pocketdeploy import retry, services as services_module
+    from pocketdeploy.services import Services
+
+    events = []
+    config, cloud, host, services, github, event = dependencies(tmp_path, events)
+    attempts = []
+    real_service = Services(config, None)
+
+    def provider(args, **kwargs):
+        assert args[:3] == ['resend', 'domains', 'list']
+        attempts.append(args)
+        events.append('provider-read')
+        if len(attempts) == 1:
+            raise DeployError('Temporary provider failure.', code='provider_unavailable', retryable=True)
+        return '{"data": [], "has_more": false}'
+
+    def preflight():
+        events.append('service-preflight')
+        assert real_service._resend(['domains', 'list']) == {'data': [], 'has_more': False}
+
+    services.preflight = preflight
+    monkeypatch.setattr(services_module, 'run', provider)
+    monkeypatch.setattr(retry.time, 'sleep', lambda seconds: events.append('retry-wait'))
+    with patch('pocketdeploy.services.Services', return_value=services), patch('pocketdeploy.github.GitHub', return_value=github), patch('pocketdeploy.health.verify', side_effect=event('https')):
+        asyncio.run(converge(config, object(), cloud, host, 'operation', Reporter(quiet=True)))
+    assert len(attempts) == 2
+    assert events[:4] == ['service-preflight', 'provider-read', 'retry-wait', 'provider-read']
+    for stage in ('service-preflight', 'service-plan', 'keys', 'compute', 'host', 'services', 'smtp-credentials', 'apps', 'github'):
+        assert events.count(stage) == 1
+
+
+def test_delete_preflight_transient_read_recovers_in_one_cli_invocation(tmp_path, monkeypatch):
+    from pocketdeploy import retry, services as services_module
+    from pocketdeploy.state import State
+
+    cli, config, scope = local_deployment(tmp_path, monkeypatch, '''compute-prevent-destroy: false
+provider-dns: cloudflare
+cloudflare-zone-id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+provider-smtp: resend
+smtp-domain: notifications.example.test
+smtp-from: mail@notifications.example.test
+''')
+    with State(tmp_path / '.colors.sqlite', 'demo', scope) as state:
+        state.put_resource('smtp-domain', 'resend-domain', 'domain-id', {'name': config['smtp-domain']})
+    monkeypatch.setenv('RESEND_API_KEY', 'synthetic-management-secret')
+    events = []
+    read_attempts = []
+    deleted = [False]
+
+    def provider(args, **kwargs):
+        if args[:3] == ['resend', 'domains', 'list']:
+            read_attempts.append(args)
+            events.append('provider-read')
+            if len(read_attempts) == 1:
+                assert not deleted[0]
+                raise DeployError('Temporary provider failure.', code='provider_unavailable', retryable=True)
+            return json.dumps({'data': [] if deleted[0] else [{'id': 'domain-id', 'name': config['smtp-domain']}], 'has_more': False})
+        assert args[:4] == ['resend', 'domains', 'delete', 'domain-id']
+        events.append('domain-delete')
+        deleted[0] = True
+        return '{}'
+
+    def cloud_factory(config, state):
+        def plan():
+            events.append('cloud-preflight')
+            return []
+        def delete(operation):
+            events.append('compute-delete')
+            state.remove_resource('compute')
+            return {'deleted': True}
+        return SimpleNamespace(plan_delete=plan, delete=delete)
+
+    monkeypatch.setattr(services_module, 'run', provider)
+    monkeypatch.setattr(retry.time, 'sleep', lambda seconds: events.append('retry-wait'))
+    with patch.object(cli, 'OCI', side_effect=cloud_factory):
+        result = cli.execute(cli.parser().parse_args(['delete', '--provider-read-timeout', '10']))
+    assert result['deleted'] is True
+    assert result['retained_resources'] == []
+    assert events[:4] == ['cloud-preflight', 'provider-read', 'retry-wait', 'provider-read']
+    assert events.count('cloud-preflight') == 1
+    assert events.count('domain-delete') == 1
+    assert events.count('compute-delete') == 1
+    assert result['completed_stages'] == ['delete-preflight', 'delete-github', 'delete-applications', 'delete-services', 'delete-infrastructure', 'delete-local-keys']

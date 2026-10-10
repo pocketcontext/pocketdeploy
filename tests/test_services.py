@@ -522,3 +522,141 @@ def test_late_verified_response_does_not_unlock_credentials(service, verificatio
         service.verify_smtp(10)
     assert error.value.code == 'smtp_verification_pending'
     assert service._verified_domain is None
+
+
+@pytest.mark.parametrize('status,code,retryable', [
+    (429, 'provider_rate_limited', True), (500, 'provider_unavailable', True),
+    (502, 'provider_unavailable', True), (503, 'provider_unavailable', True),
+    (504, 'provider_unavailable', True), (501, 'provider_request_failed', False),
+    (401, 'provider_authentication_failed', False),
+    (403, 'provider_permission_denied', False),
+])
+def test_structured_retry_classification(status, code, retryable):
+    from pocketdeploy.services import _provider_error
+    result = _provider_error('resend', json.dumps({'error': {
+        'code': 'fetch_error', 'statusCode': status, 'message': 'PRIVATE',
+        'headers': {'Retry-After': '12', 'Authorization': 'PRIVATE'}}}))
+    assert (result.code, result.status, result.retryable, result.retry_after) == (code, status, retryable, 12)
+    assert 'PRIVATE' not in str(result)
+
+
+@pytest.mark.parametrize('message,code,retryable', [
+    ('ECONNRESET PRIVATE', 'provider_connection_failed', True),
+    ('EAI_AGAIN PRIVATE', 'provider_connection_failed', True),
+    ('certificate expired ECONNRESET PRIVATE', 'provider_tls_failed', False),
+    ('fetch failed PRIVATE', 'provider_request_failed', False),
+    ('daily quota exceeded PRIVATE', 'provider_usage_quota', False),
+    ('monthly limit exceeded PRIVATE', 'provider_usage_quota', False),
+])
+def test_network_and_quota_categories(message, code, retryable):
+    from pocketdeploy.services import _provider_error
+    result = _provider_error('resend', json.dumps({'error': {'code': 'fetch_error', 'message': message}}))
+    assert (result.code, result.retryable) == (code, retryable)
+    assert 'PRIVATE' not in str(result)
+
+
+def test_quota_is_not_throttle():
+    from pocketdeploy.services import _provider_error
+    result = _provider_error('resend', json.dumps({'error': {
+        'statusCode': 429, 'body': {'name': 'daily_quota_exceeded', 'message': 'PRIVATE'}}}))
+    assert result.code == 'provider_usage_quota'
+    assert not result.retryable
+
+
+@pytest.mark.parametrize('value,expected', [('12', 12), ('NaN', None), ('inf', None), (True, None), ([], None), ('invalid', None)])
+def test_retry_after_seconds_are_safe(value, expected):
+    from pocketdeploy.services import _retry_after
+    assert _retry_after({'rEtRy-AfTeR': value}) == expected
+
+
+def test_retry_after_http_date():
+    from datetime import datetime, timezone, timedelta
+    from email.utils import format_datetime
+    from pocketdeploy.services import _retry_after
+    value = format_datetime(datetime.now(timezone.utc) + timedelta(seconds=60), usegmt=True)
+    assert 58 <= _retry_after({'retry-after': value}) <= 60
+
+
+@pytest.mark.parametrize('tool,args,read', [
+    ('resend', ['domains', 'get', 'd'], True),
+    ('resend', ['domains', 'list'], True),
+    ('resend', ['api-keys', 'list'], True),
+    ('cf', ['zones', 'get', '--zone', 'z'], True),
+    ('cf', ['dns', 'records', 'list'], True),
+    ('resend', ['domains', 'verify', 'd'], False),
+    ('resend', ['domains', 'create'], False),
+    ('resend', ['domains', 'delete', 'd'], False),
+    ('resend', ['api-keys', 'create'], False),
+    ('cf', ['dns', 'records', 'delete', 'd'], False),
+    ('cf', ['dns', 'records', 'edit', 'd'], False),
+])
+def test_only_allowlisted_reads_use_retry_wrapper(monkeypatch, tool, args, read):
+    wrappers, calls = [], []
+    def wrapper(attempt, **kwargs):
+        wrappers.append(kwargs)
+        return attempt(7)
+    def run(args, **kwargs):
+        calls.append(kwargs)
+        return '{}'
+    monkeypatch.setattr('pocketdeploy.services.run_read', wrapper)
+    monkeypatch.setattr('pocketdeploy.services.run', run)
+    assert _call(tool, args, deadline=100) == {}
+    assert bool(wrappers) == read
+    assert calls[0]['timeout'] == (7 if read else 90)
+    if read:
+        assert wrappers[0]['deadline'] == 100
+
+
+def test_smtp_passes_absolute_deadline_to_read_recovery(service, verification, monkeypatch):
+    domain, clock, sleeps = verification
+    calls = []
+    def resend(args, **kwargs):
+        calls.append(kwargs)
+        return {**domain, 'status': 'verified'}
+    monkeypatch.setattr(service, '_resend', resend)
+    service.verify_smtp(30)
+    assert [call['deadline'] for call in calls] == [30, 30]
+
+
+@pytest.mark.parametrize('status,reason,retryable', [
+    (503, 'Service Unavailable', True), (429, 'Too Many Requests', True),
+    (401, 'Unauthorized', False), (403, 'Forbidden', False),
+])
+def test_pinned_cloudflare_api_error_box(status, reason, retryable):
+    from pocketdeploy.services import _provider_error
+    # cf@1.0.0-beta.14 handleError -> formatErrorBox; headers are not rendered.
+    stderr = f'\n┌ APIError\n│ [10000] PRIVATE provider message\n│ {status} {reason} · HTTP /zones/PRIVATE/dns_records\n└\n'
+    error = _provider_error('cf', stderr)
+    assert error.status == status
+    assert error.retryable is retryable
+    assert error.retry_after is None
+    assert 'PRIVATE' not in str(error)
+
+
+@pytest.mark.parametrize('stderr', [
+    'Provider said Status code: 503',
+    '┌ Error\n│ 503 Service Unavailable\n└',
+    '┌ APIError\n│ 503 Private Message\n└',
+    '┌ APIError\n│ 503 Service Unavailable\n│ other footer\n└',
+    '┌ APIError\n│ 503 Service Unavailable',
+])
+def test_cloudflare_arbitrary_text_does_not_supply_status(stderr):
+    from pocketdeploy.services import _provider_error
+    result = _provider_error('cf', stderr)
+    assert result is None or result.status is None
+
+
+def test_provider_body_cannot_replace_transport_status():
+    from pocketdeploy.services import _provider_error
+    result = _provider_error('resend', json.dumps({'error': {
+        'status': 503, 'body': {'status': 'PRIVATE', 'statusCode': 400}}}))
+    assert result.status == 503
+    assert result.retryable
+
+
+def test_cloudflare_colored_box_uses_final_footer_only():
+    from pocketdeploy.services import _provider_error
+    stderr = '\n\x1b[31m┌\x1b[0m \x1b[1mAPIError\x1b[0m\n│ 503 Service Unavailable\n│ 401 Unauthorized · HTTP /zones/private\n└\n'
+    error = _provider_error('cf', stderr)
+    assert error.status == 401
+    assert not error.retryable

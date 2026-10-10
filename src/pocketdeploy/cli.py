@@ -73,6 +73,8 @@ Use -f to select a deployment. Run without arguments to show this help.''')
     p.add_argument('--rotate-github-keys', action='store_true', help='Rotate disposable GitHub deployment keys during converge')
     p.add_argument('--smtp-verification-timeout', type=int, metavar='SECONDS',
                    help='Wait for SMTP verification during converge (0–3600 seconds; default: 600; 0 checks once)')
+    p.add_argument('--provider-read-timeout', type=int, metavar='SECONDS',
+                   help='Resend/Cloudflare read recovery budget for plan/converge/delete (0–3600; default: 120; 0 disables outer retries)')
     p.add_argument('--to', help='Recipient for the explicit smtp-test command')
     return p
 
@@ -219,6 +221,16 @@ async def converge(config, state, cloud, host, operation, reporter=None, rotate_
 
 
 def execute(args, reporter=None):
+    from .retry import read_retry_budget
+    timeout = getattr(args, 'provider_read_timeout', None)
+    if timeout is not None and (args.command not in ('plan', 'converge', 'delete')
+                                or type(timeout) is not int or not 0 <= timeout <= 3600):
+        raise DeployError('--provider-read-timeout requires plan/converge/delete and 0–3600 seconds.', code='invalid_usage')
+    with read_retry_budget(120 if timeout is None else timeout):
+        return _execute(args, reporter)
+
+
+def _execute(args, reporter=None):
     reporter = reporter or Reporter(quiet=getattr(args, "quiet", False), command=args.command)
     if getattr(args, 'verbose', False) and getattr(args, 'quiet', False):
         raise DeployError('--verbose and --quiet cannot be combined.', code='invalid_usage')

@@ -10,6 +10,13 @@ import threading
 _active_reporter = ContextVar('pocketdeploy_reporter', default=None)
 
 
+def retry_progress(delay, attempt):
+    """Report retry timing without provider output or request data."""
+    reporter = _active_reporter.get()
+    if reporter is not None:
+        reporter.progress(f'Provider read: retrying in {delay:.1f}s (attempt {attempt}/5)')
+
+
 @contextmanager
 def operation(label):
     """Time a fixed, code-authored operation label; never pass commands or data."""

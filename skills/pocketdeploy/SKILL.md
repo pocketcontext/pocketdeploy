@@ -213,6 +213,21 @@ skip the trigger and polling.
 Compute, host setup and DNS reconciliation are not repeated while waiting. SMTP
 credentials and applications wait for verification.
 
+Resend and Cloudflare allowlisted reads retry temporary connection failures,
+timeouts, HTTP 429 throttling and HTTP 500/502/503/504 within the same DAG stage.
+Use `--provider-read-timeout SECONDS` with `plan`, `converge` or `delete`, including dry runs (integer 0–3600, default 120).
+The budget is per read and includes provider CLI retries, subprocess time and
+backoff; at most five subprocess attempts are made. `0` disables PocketDeploy
+retries, retaining normal request timeouts and provider CLI retry behavior.
+Backoff uses full jitter with ceilings of 1, 2, 4 and 8 seconds; honor
+available `Retry-After` without retrying early if it exceeds the remaining budget.
+The pinned Cloudflare CLI omits error headers, so Cloudflare uses backoff without
+`Retry-After`; Resend exposes it in structured errors. SMTP
+reads also respect the verification deadline. Authentication, permissions,
+certificate errors and exhausted usage quotas fail immediately. Mutations are
+never blindly replayed. Recovery does not restart upstream DAG stages or change
+OCI/GitHub retry behavior; unresolved mutation outcomes require reconciliation.
+
 `converge --smtp-verification-timeout SECONDS` sets the verification wait budget
 (integer seconds from 0 to 3600, default 600). `0` makes one immediate check
 without polling. The option requires `converge` without `--dry-run` and belongs
