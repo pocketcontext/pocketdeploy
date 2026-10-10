@@ -1,18 +1,5 @@
 { pkgs, ... }:
 let
-  sNail = pkgs.stdenv.mkDerivation {
-    pname = "s-nail";
-    version = "14.9.25";
-    src = pkgs.fetchurl {
-      url = "https://ftp.sdaoden.eu/s-nail-14.9.25.tar.xz";
-      sha256 = "20ff055be9829b69d46ebc400dfe516a40d287d7ce810c74355d6bdc1a28d8a9";
-    };
-    buildInputs = [ pkgs.openssl ];
-    nativeBuildInputs = [ pkgs.pkg-config ];
-    makeFlags = [ "VAL_PREFIX=${placeholder "out"}" "OPT_DOTLOCK=no" "OPT_SMTP=require" "OPT_TLS=require" ];
-    preBuild = "patchShebangs .";
-    buildFlags = [ "all" ];
-  };
   cloudClis = pkgs.buildNpmPackage {
     pname = "pocketdeploy-cloud-clis";
     version = "1";
@@ -32,7 +19,7 @@ let
   };
 in
 {
-  packages = with pkgs; [ python312 uv oci-cli openssh git gh curl jq sqlite sNail cloudClis ];
+  packages = with pkgs; [ python312 uv oci-cli openssh git gh curl jq sqlite cloudClis ];
   scripts.vaultcontext.exec = ''
     uv tool run --from 'vaultcontext-client @ git+https://github.com/pocketcontext/vaultcontext.git@5157597a4ea9f33cb9806b1485bb84f01b5cf276' vaultcontext "$@"
   '';

@@ -343,10 +343,12 @@ Full adoption of `once-pocketcontext-v2` is not implemented or performed.
 
 ## DNS, SMTP and GitHub delivery
 
-Use `devenv shell` for pinned `cf`, `resend`, `gh` and `s-nail` tools. Cloudflare
+Use `devenv shell` for pinned `cf`, `resend` and `gh` tools. Cloudflare
 1.0.0-beta.14 and Resend 2.23.0 dependencies are locked in
 `tools/cloud-clis/package-lock.json` and built with a fixed Nix dependency hash;
-s-nail 14.9.25 uses a fixed source hash. Cloudflare CLI is beta.
+Cloudflare CLI is beta. s-nail runs only on the OCI host; host setup installs
+the Ubuntu distribution package when at least one managed application enables
+`smtp: true`. Its version is not pinned, and no local s-nail is required.
 
 ```yaml
 provider-dns: cloudflare

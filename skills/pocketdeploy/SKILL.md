@@ -13,7 +13,9 @@ location does not select the deployment. Read
 [configuration.md](references/configuration.md) before editing desired state.
 
 Use the deployment's `devenv.nix` for Python, uv, OCI CLI, OpenSSH and the
-VaultContext CLI plus pinned Cloudflare, Resend and s-nail tools. The portable launcher installs Python dependencies; it does
+VaultContext CLI plus pinned Cloudflare and Resend tools. s-nail runs on the OCI
+host and is installed during host setup when a managed application enables SMTP;
+it is not a local dependency. The portable launcher installs Python dependencies; it does
 not install external tools or authenticate to providers. Working-tree package
 development uses `uv run pocketdeploy` from the package checkout.
 
