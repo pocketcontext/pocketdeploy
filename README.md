@@ -1,14 +1,38 @@
 # PocketDeploy
 
-Deploy an OCI VPS and ONCE applications with Python and CLI tools. Blue supplies
-the workflow DAG; there is no Terraform, OpenTofu, Ansible or Clojure runtime.
+PocketDeploy provisions and operates OCI servers and ONCE applications, with
+explicit resource ownership, resumable operations, and encrypted deployment
+recovery through VaultContext. It manages compute, firewall rules, DNS, outbound
+email configuration, and GitHub deployment access from versioned configuration.
 
+## Scope and recovery
+
+PocketDeploy supports OCI compute, existing OCI networking, ONCE application
+delivery, Cloudflare DNS, Resend sending domains, and GitHub deployment
+environments. One active operator per deployment is supported; local locking
+does not coordinate operators on different machines. Existing production
+infrastructure requires a separate ownership-transfer procedure.
+
+Vault checkpoints preserve deployment state, configuration bindings, and SSH
+authority. **Application databases and uploaded files need their own backups and
+restore procedures.** Restoring a controller checkpoint does not restore an
+application or establish that its data is recoverable.
+
+The implementation uses Python and CLI tools, with a pinned Blue workflow DAG.
 `colors.yml` is desired configuration. A private SQLite file records identities,
-operations, resolved settings and recovery checkpoints. VaultContext stores
-versioned encrypted recovery sets. The package and the live OCI test deployment
-share this repository. `.envrc` and `colors.yml` are tracked in Git. Private
-bindings (`.envrc.private`), state (`.colors.sqlite`) and keys (`.ssh/`) live
-alongside them and remain ignored. There is no `.private` directory.
+operations, resolved settings and recovery checkpoints. `.envrc` and `colors.yml`
+are tracked in Git; private bindings (`.envrc.private`), state (`.colors.sqlite`)
+and keys (`.ssh/`) remain ignored beside them.
+
+The test deployment associated with this checkout was intentionally deleted on
+10 October 2026. Its root configuration remains for explicitly authorized
+recreation. See [verification status and history](docs/verification.md) for the
+last recorded checks and recovery limitations.
+
+Start with [setup](#setup) and the [command sequence](#commands). Operator details
+cover [configuration](#configuration), [state and ownership](#state-interruption-and-ownership),
+[application delivery](#application-delivery), [DNS, SMTP and GitHub](#dns-smtp-and-github-delivery),
+and [Vault recovery](#vault-recovery).
 
 ## Setup
 
@@ -37,8 +61,8 @@ an authenticated account and an interactive user-unlocked session. Outside
 devenv, install `vaultcontext` separately or set its `vault-command` path.
 
 For a new deployment, copy `examples/colors.yml` into its repository as
-`colors.yml`. The root configuration in this checkout operates the existing test
-deployment; do not reuse its identity for a new deployment. Replace the example
+`colors.yml`. The root configuration in this checkout belongs to the deleted
+test deployment; do not reuse its identity for a new deployment. Replace the example
 OCI identifiers with your existing compartment, public subnet and
 availability domain. Configure your OCI CLI authentication profile; the default
 auth mode is `security_token`. The existing subnet/VCN, internet gateway, routes

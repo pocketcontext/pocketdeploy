@@ -1,4 +1,33 @@
-# OCI verification — 9 October 2026
+# OCI verification
+
+## Latest recorded status — 10 October 2026
+
+The `pocketdeploy-oci-test` deployment was intentionally deleted. The final
+operation completed at 07:39:17 UTC after an initial preflight read failure and
+a successful second delete invocation. Compute, firewall, boot volume, owned
+DNS and SMTP resources, the GitHub deployment environment, and generated SSH
+files were removed. Subsequent CLI checks reported zero recorded resources;
+one historical pending step was preserved. Shared networking, management
+credentials, private bindings, SQLite receipts, and Vault history remain.
+
+The last locally acknowledged Vault checkpoint predates the final lifecycle
+rehearsals and deletion. It is stale; remote Vault was not queried for newer
+versions. Preserve the current local deletion receipt and private bindings.
+Recreation requires separate authorization. The desired hostnames and earlier
+IP addresses below do not describe running test services.
+
+The bounded provider-read recovery release passed 550 synthetic tests and 31
+copied-launcher checks. Its live verification was a read-only plan; no live
+fault injection or additional deletion was performed after that release.
+Populated application recovery, production ownership transfer, and live
+reboot/packet-filter validation remain separate checks.
+
+Source: [published lifecycle and retry receipt](https://wiki.pocketcontext.com/#/passages/13gfmw1e5k9xiqs)
+(requires WikiContext authentication). This summary reconciles the recorded
+history; it is not a new cloud inventory. The dated entries below preserve
+historical behavior, commands, pins and observations, superseded where stated.
+
+## Verification history — starting 9 October 2026
 
 PocketDeploy was exercised on a separately authorized OCI test deployment,
 profile `pocketdeploy-oci-test`. Production `once-pocketcontext-v2` resources and
