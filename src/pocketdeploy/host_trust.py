@@ -43,7 +43,7 @@ def rotate(host, connection):
     if trust.get('verified'):
         return
     if not trust:
-        with tempfile.TemporaryDirectory(prefix='.host-rotation-', dir=host.root) as directory:
+        with tempfile.TemporaryDirectory(prefix='.colors-host-rotation-', dir=host.root) as directory:
             key = Path(directory) / 'key'
             result = subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(key)], capture_output=True)
             if result.returncode:

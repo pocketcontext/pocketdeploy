@@ -86,7 +86,7 @@ class GitHub:
         if not private.exists():
             self.state.set_meta(pending, 'replace')
             private.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            with tempfile.TemporaryDirectory(prefix='.github-key-', dir=self.root) as directory:
+            with tempfile.TemporaryDirectory(prefix='.colors-github-key-', dir=self.root) as directory:
                 generated = Path(directory) / 'key'
                 run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(generated)])
                 for source, target in ((generated, private), (Path(str(generated) + '.pub'), public)):
