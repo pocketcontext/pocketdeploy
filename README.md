@@ -52,6 +52,12 @@ Python dependencies. Blue is pinned to a tested Git commit. `direnv allow` is
 optional; `.envrc` loads devenv and an optional ignored `.envrc.private`.
 Nothing automatically sources private files during deployment or restoration.
 
+The Nix flake exports `packages.<system>.cloud-clis` for deployment shells.
+It supplies the pinned `cf` and `resend` executables from `tools/cloud-clis/`.
+Consumers pin this repository by commit in `devenv.yaml`, follow their existing
+`nixpkgs` input, and use `inputs.pocketdeploy.packages.${pkgs.stdenv.hostPlatform.system}.cloud-clis`.
+The shared package definition also builds this repository's development tools.
+
 The portable launcher `./pocketdeploy` is a symlink to the executable bundled in
 `skills/pocketdeploy/`. Copy that executable into a deployment repository or onto
 PATH; uv fetches its immutable PocketDeploy package pin and Python dependencies.
