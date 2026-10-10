@@ -7,9 +7,9 @@ and DNS cutover. Existing OCI scope and configuration defaults are preserved.
 Do not copy the root checkout's retired test identity into a new deployment.
 
 DigitalOcean and Google Cloud have recorded live disposable deployment checks
-(see the repository's `docs/verification.md`). Use
-`uv run pocketdeploy` from this source checkout until a package is published and
-the portable launcher pin is updated. Application mail delivery and populated data
+(see the repository's `docs/verification.md`) and are included in the bundled
+portable launcher. Older copied launchers require an explicit pin update.
+Application mail delivery and populated data
 recovery still require separate verification; both provider checks verify
 SMTP TLS connectivity without sending.
 

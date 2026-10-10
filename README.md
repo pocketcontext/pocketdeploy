@@ -80,8 +80,8 @@ Google Cloud and DigitalOcean have passed disposable live deployment checks,
 including HTTPS, updates, reboot and SMTP TLS connectivity; see
 [verification](docs/verification.md). Application email delivery and
 populated application backup recovery remain separate checks.
-Use `uv run pocketdeploy` for this source version. The copied portable launcher
-retains its published package pin until a new release is published and verified.
+The bundled portable launcher includes these provider adapters. Previously copied
+launchers retain their explicit package pins until deliberately updated.
 
 Existing VPCs/subnets, routing, cloud accounts/projects and API enablement remain
 operator-managed. PocketDeploy creates a single public IPv4 Ubuntu 24.04 server,
@@ -282,9 +282,8 @@ container graceful shutdown, from 1 to 3600 seconds (default 300). The SSH
 operation budget includes all configured applications' shutdown and readiness
 budgets. Readiness failure retains the pending marker; it does not automatically
 roll back a container that may have written data. Configure `health-path` to
-succeed only when the application is usable. These readiness and application
-adoption features are source changes pending publication; the portable launcher
-continues to run its explicit published commit.
+succeed only when the application is usable. The bundled portable launcher includes readiness budgets and explicit application
+adoption. Previously copied launchers must be updated before using these features.
 
 The mapping references
 `COLORS_PAR_APP_WIKICONTEXT_PRODUCTION_LITESTREAM_ENDPOINT`. Missing bindings

@@ -37,9 +37,9 @@ resource names are descriptive, while recorded IDs and deployment UUID tags
 establish ownership. Existing networks/subnets remain externally managed.
 For DigitalOcean or Google Cloud, read [providers.md](references/providers.md).
 Provider changes require fresh deployment state; they do not migrate applications.
-The new backends are source features pending a new portable launcher release.
-Google Cloud and DigitalOcean have disposable live verification receipts.
-Use `uv run pocketdeploy` from the source checkout for them.
+The bundled launcher includes all three provider backends. Google Cloud and
+DigitalOcean have disposable live verification receipts. Previously copied
+launchers retain their original package pins until deliberately updated.
 
 ```sh
 # New deployment with Vault recovery configured
@@ -93,8 +93,8 @@ volume. Restore state first; adoption cannot reconstruct a lost identity and
 does not transfer production ownership from another
 manager. Instance replacement/resizing and storage drift are unsupported in v1.
 
-Application ownership transfer uses the source command `adopt-app`; it is distinct
-from compute `adopt` and is pending a new portable launcher release. Read the
+Application ownership transfer uses `adopt-app`; it is distinct from compute
+`adopt` and is included in the bundled launcher. Read the
 repository README's application adoption procedure before transfer. Disable and
 drain prior delivery first, use safe `status --json` container/image/volume/settings
 fingerprint evidence, and provide `--previous-delivery-disabled`. Never edit host

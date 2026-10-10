@@ -96,7 +96,7 @@ digests. `deploy-strategy` defaults to `rolling`; use `stop-first` for stateful
 services, with `deploy-stop-timeout` from 1–3600 seconds (default 300).
 `deploy-ready-timeout` accepts 1–3600 seconds (default 60) for the post-replacement
 HTTP readiness check. Size both budgets for application drain and recovery.
-This source feature requires publishing and adopting a new portable launcher pin.
+Update older copied launchers before using this setting.
 `health-path` defaults to `/`. `disable_tls: true` opts into HTTP; otherwise
 prepare working public DNS/TLS. Optional `cpus` and `memory` are nonnegative
 integers passed to ONCE. Automatic updates/backups must remain disabled.

@@ -81,6 +81,11 @@ def main():
             else:
                 assert not removed.stdout and 'Invalid command arguments' in removed.stderr
             assert not list(empty.iterdir()), 'Removed command created deployment files.'
+        assert 'adopt-app' in bare.stdout and '--previous-delivery-disabled' in bare.stdout
+        incomplete_adoption = invoke(empty, 'adopt-app', '--json', '--quiet', expected='')
+        assert incomplete_adoption.returncode == 2
+        assert json.loads(incomplete_adoption.stdout)['error']['code'] == 'invalid_usage'
+        assert not list(empty.iterdir()), 'Incomplete application adoption created files.'
         assert 'smtp-test' in bare.stdout
         assert '--smtp-verification-timeout' in bare.stdout
         assert '--provider-read-timeout' in bare.stdout
@@ -129,6 +134,24 @@ def main():
         missing = invoke(nested, 'plan', '-f', 'missing.yml', expected='pocketdeploy:')
         assert STATE_REQUIRED not in missing.stdout + missing.stderr, 'Missing explicit config fell back to another file.'
         assert not list(root.rglob('.colors.sqlite*')), 'Checks unexpectedly wrote deployment state.'
+        application = root / 'application'
+        application.mkdir()
+        application_config = application / 'colors.yml'
+        application_config.write_text(CONFIG + '''once:
+  applications:
+    - host: synthetic.example.com
+      image: example/app:latest
+      deploy-ready-timeout: 900
+''')
+        invoke(application, 'adopt-app', '--app-host', 'synthetic.example.com',
+               '--container-id', 'a' * 64, '--image-id', 'sha256:' + 'b' * 64,
+               '--volume', 'data:/storage', '--settings-sha256', 'c' * 64,
+               '--previous-delivery-disabled', expected=STATE_REQUIRED)
+        assert not list(application.glob('.colors.sqlite*')), 'Application adoption created identity.'
+        application_config.write_text(application_config.read_text().replace('deploy-ready-timeout: 900',
+                                                                            'deploy-ready-timeout: 0'))
+        invoke(application, 'status', expected='Ready timeout must be between 1 and 3600 seconds.')
+        assert not list(application.glob('.colors.sqlite*')), 'Invalid readiness budget created state.'
         fresh = root / 'fresh'
         fresh.mkdir()
         (fresh / 'colors.yml').write_text(CONFIG.replace('compute-require-existing-state: true',
@@ -218,7 +241,7 @@ def main():
         assert token.read_text() not in expired_run.stdout + expired_run.stderr
         print(f'Expired synthetic OCI token rejected locally in {elapsed:.2f}s; OCI was not invoked.')
 
-    print('Portable launcher: 31 checks passed (no cloud access).')
+    print('Portable launcher: 34 checks passed (no cloud access).')
 
 
 if __name__ == '__main__':

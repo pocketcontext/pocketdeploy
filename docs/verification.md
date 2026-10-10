@@ -1,5 +1,27 @@
 # Deployment verification
 
+## Application adoption and launcher release — 10 October 2026
+
+Published package commit `8de7fc0b2a3063c137b173e8f5e6fc4e8b8026c4` adds
+explicit existing-application adoption, safe status comparison evidence and
+configurable HTTP readiness budgets. Adoption verifies container/image/volume and
+settings evidence under the shared host lock, records durable provenance, and
+preserves current configuration for a later desired-state convergence. Interrupted
+manifest commits and rejected drift are covered synthetically.
+
+The bundled portable launcher now pins that immutable package, including the
+DigitalOcean/Google Cloud implementations described below. Earlier source-only
+publication notes are historical and superseded by this release.
+
+Validation: **736 synthetic tests passed**, source archive and wheel builds passed,
+and **34 copied-launcher checks passed** outside the checkout. New launcher checks
+verify application-adoption help, complete evidence requirements, missing-state
+rejection and readiness-budget validation before any external deployment command.
+The source commit's [GitHub CI](https://github.com/pocketcontext/pocketdeploy/actions/runs/38085648929)
+passed. No live application adoption or cloud mutation was part of this package
+release; deployment cutover and populated application recovery remain separate.
+
+
 ## DigitalOcean live verification — 10 October 2026
 
 A disposable Frankfurt deployment completed using the existing `default-fra1`
