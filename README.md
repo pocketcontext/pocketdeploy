@@ -316,6 +316,12 @@ Canonical Ubuntu 24.04 image and pins its OCID in state; `oci-image-id` can pin 
 before creation. ONCE v0.3.3 is checksum-pinned for amd64 and arm64. Docker comes
 from the Ubuntu distribution package repository; its package version is not pinned.
 
+`compute-ssh-ports` defaults to `["22"]`. Add quoted TCP ports for SSH companion
+services, for example `["22", "2022"]`. These ports share `compute-ssh-sources`
+and the existing owned firewall lifecycle on every provider. This setting only
+controls firewall ingress; it does not configure SSH's listening or connection port.
+An empty source list disables access to all configured ports.
+
 ## Adopting an existing application
 
 `adopt-app` transfers an existing ONCE application's ownership explicitly. It does

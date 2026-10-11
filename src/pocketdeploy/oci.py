@@ -243,7 +243,7 @@ class OCI:
 
     def _rules(self):
         rules = [{'direction': 'EGRESS', 'protocol': 'all', 'destination': '0.0.0.0/0', 'destinationType': 'CIDR_BLOCK', 'isStateless': False}]
-        for key, ports in [('compute-ssh-sources', (22,)), ('compute-http-sources', (80, 443))]:
+        for key, ports in [('compute-ssh-sources', tuple(map(int, self.config.get('compute-ssh-ports', ['22'])))), ('compute-http-sources', (80, 443))]:
             for source in self.config.get(key, []):
                 try:
                     ipaddress.ip_network(source, strict=True)

@@ -238,7 +238,7 @@ class GCP:
                 'network': self.base + self._network(), 'direction': 'INGRESS', 'priority': 1000,
                 'disabled': not bool(self.config['compute-ssh-sources' if ssh else 'compute-http-sources']), 'targetTags': [self._tag()],
                 'sourceRanges': self.config['compute-ssh-sources' if ssh else 'compute-http-sources'] or ['0.0.0.0/0'],
-                'allowed': [{'IPProtocol': 'tcp', 'ports': ['22'] if ssh else ['80', '443']}]}
+                'allowed': [{'IPProtocol': 'tcp', 'ports': self.config.get('compute-ssh-ports', ['22']) if ssh else ['80', '443']}]}
 
     def _firewall_equal(self, item, role):
         desired = self._firewall(role)

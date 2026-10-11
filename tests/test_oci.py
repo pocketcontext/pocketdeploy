@@ -660,3 +660,14 @@ def test_adopt_missing_firewall_refused_even_during_provisioning(adapter, monkey
     with pytest.raises(DeployError, match='running compute and its owned firewall'):
         adapter.adopt('compute-id', 'unused')
     assert adapter.state.resources() == []
+
+
+def test_additional_ssh_ports_share_sources(adapter):
+    adapter.config['compute-ssh-ports'] = ['22', '2022']
+    rules = adapter._rules()
+    extra = next(rule for rule in rules if rule.get('tcpOptions', {}).get('destinationPortRange', {}).get('min') == 2022)
+    assert extra['source'] == '192.0.2.1/32'
+    assert extra['tcpOptions']['destinationPortRange'] == {'min': 2022, 'max': 2022}
+    adapter.config['compute-ssh-sources'] = []
+    assert not any(rule.get('tcpOptions', {}).get('destinationPortRange', {}).get('min') in (22, 2022)
+                   for rule in adapter._rules())

@@ -513,3 +513,12 @@ def test_create_uses_only_tracked_deployment_tag(adapter, monkeypatch):
     adapter.converge('key', adapter.state.begin_operation('converge', 'hash'))
     body = next(body for method, path, body in calls if method == 'POST' and path == 'droplets')
     assert body['tags'] == [adapter._tag()]
+
+
+def test_additional_ssh_ports_share_sources(adapter):
+    adapter.config['compute-ssh-ports'] = ['22', '2022']
+    rules = adapter._rules()['inbound_rules']
+    extra = next(rule for rule in rules if rule['ports'] == '2022')
+    assert extra['sources'] == {'addresses': ['192.0.2.1/32']}
+    adapter.config['compute-ssh-sources'] = []
+    assert not any(rule['ports'] in ('22', '2022') for rule in adapter._rules()['inbound_rules'])

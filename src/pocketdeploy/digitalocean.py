@@ -204,7 +204,7 @@ class DigitalOcean:
 
     def _rules(self):
         inbound = []
-        for key, ports in [('compute-ssh-sources', ('22',)), ('compute-http-sources', ('80', '443'))]:
+        for key, ports in [('compute-ssh-sources', self.config.get('compute-ssh-ports', ['22'])), ('compute-http-sources', ('80', '443'))]:
             addresses = sorted({str(ipaddress.ip_network(cidr, strict=False)) for cidr in self.config.get(key, ['0.0.0.0/0'])})
             if addresses:
                 inbound.extend({'protocol': 'tcp', 'ports': port, 'sources': {'addresses': addresses}} for port in ports)

@@ -181,3 +181,19 @@ def test_implicit_cloudflare_dns_requires_tls(tmp_path, flag, allowed):
     else:
         with pytest.raises(DeployError, match='requires TLS'):
             load(path, env={}, resolve=False)
+
+
+@pytest.mark.parametrize('ports', [[], [22], ['0'], ['65536'], ['022'], ['22', '22'],
+                                    ['22-2022'], ['all'], '22', [None], [{}]])
+def test_invalid_ssh_ports(tmp_path, ports):
+    import json
+    path = tmp_path / 'colors.yml'
+    path.write_text(BASE + '\ncompute-ssh-ports: ' + json.dumps(ports) + '\n')
+    with pytest.raises(DeployError, match='compute-ssh-ports'):
+        load(path, env={}, resolve=False)
+
+
+def test_additional_ssh_ports_configuration(tmp_path):
+    path = tmp_path / 'colors.yml'
+    path.write_text(BASE + '\ncompute-ssh-ports: ["22", "2022", "65535"]\n')
+    assert load(path, env={}, resolve=False)['compute-ssh-ports'] == ['22', '2022', '65535']

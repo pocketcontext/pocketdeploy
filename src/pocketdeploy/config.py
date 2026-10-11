@@ -28,6 +28,7 @@ DEFAULTS = {
     'once-version': 'v0.3.3',
 }
 ROOT_KEYS = set(DEFAULTS) | {
+    'compute-ssh-ports',  # Implicit ['22'] preserves existing desired-state hashes.
     'profile', 'oci-config-file-profile', 'oci-region', 'oci-compartment-id',
     'oci-subnet-id', 'oci-availability-domain', 'oci-image-id', 'ssh-user',
     'ssh-private-key-file', 'ssh-public-key-file', 'ssh-known-hosts-file',
@@ -176,6 +177,11 @@ def validate(c):
     for key in (['oci-ocpus', 'oci-memory-in-gbs', 'oci-boot-volume-size-in-gbs'] if provider == 'oci' else []):
         if type(c[key]) not in (int, float) or c[key] <= 0:
             raise DeployError('Compute sizes must be positive numbers.')
+    ports = c.get('compute-ssh-ports', ['22'])
+    if (not isinstance(ports, list) or not ports or
+            any(not isinstance(port, str) or not re.fullmatch(r'[1-9][0-9]{0,4}', port) or
+                int(port) > 65535 for port in ports) or len(set(ports)) != len(ports)):
+        raise DeployError('compute-ssh-ports must contain unique quoted TCP ports from 1 to 65535.')
     for key in ['compute-ssh-sources', 'compute-http-sources']:
         if not isinstance(c[key], list):
             raise DeployError('Firewall sources must be CIDR lists.')

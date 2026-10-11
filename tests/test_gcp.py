@@ -424,3 +424,17 @@ def test_gvnic_drift_and_profile_names(adapter):
     assert 'nic-type' not in adapter._drift(item, None)
     assert adapter._name('compute') == 'test-compute'
     assert adapter._name('boot-volume') == 'test-boot-volume'
+
+
+def test_additional_ssh_ports_share_owned_firewall_and_sources(adapter):
+    old = adapter._firewall('firewall')
+    adapter.config['compute-ssh-ports'] = ['22', '2022']
+    wanted = adapter._firewall('firewall')
+    assert wanted['allowed'] == [{'IPProtocol': 'tcp', 'ports': ['22', '2022']}]
+    assert wanted['sourceRanges'] == old['sourceRanges']
+    assert wanted['targetTags'] == old['targetTags']
+    assert not adapter._firewall_equal(old, 'firewall')
+    assert adapter._firewall_equal(wanted, 'firewall')
+    assert adapter._firewall('firewall-http')['allowed'][0]['ports'] == ['80', '443']
+    adapter.config['compute-ssh-sources'] = []
+    assert adapter._firewall('firewall')['disabled']
