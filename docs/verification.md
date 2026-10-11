@@ -593,3 +593,16 @@ and GitHub environment pocketdeploy-oci-test. The replacement VPS is
 the application was running and healthy, with zero pending host operations.
 The full owned-resource delete/recreate cycle is now complete. No test email
 or Vault backup was performed during this completion.
+
+## Structured diagnostics (11 October 2026)
+
+- Shared command, SSH and standalone remote failures now retain validated fixed
+  operation/category, exit code or signal, elapsed time and recognized HTTP status.
+  Application task/user attribution is supported with explicit remote allowlists.
+- Raw output, arguments, credentials and exception text remain suppressed. No
+  masking or output excerpts were introduced; provider retry policy is unchanged.
+- Failed workflow diagnostics are attached to operation IDs in existing private
+  state and remain visible after a successful retry, without a schema migration.
+- Synthetic verification: 857 tests passed; source distribution and wheel built.
+  The copied published launcher passed 36 checks outside the checkout, without
+  cloud access. No PocketDeploy-owned live deployment was created or modified.
