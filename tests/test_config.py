@@ -197,3 +197,34 @@ def test_additional_ssh_ports_configuration(tmp_path):
     path = tmp_path / 'colors.yml'
     path.write_text(BASE + '\ncompute-ssh-ports: ["22", "2022", "65535"]\n')
     assert load(path, env={}, resolve=False)['compute-ssh-ports'] == ['22', '2022', '65535']
+
+
+def test_public_normalization_alias_environment_defaults_and_app_hash(tmp_path):
+    from pocketdeploy.config import normalize, scope
+    raw = {'profile': 'test', 'provider-compute': 'digitalocean',
+           'digitalocean-account-id': 'account', 'digitalocean-region': 'lon1',
+           'digitalocean-vpc-uuid': 'vpc'}
+    kwargs = {'path': tmp_path / 'alice.yml', 'aliases': {'digitalocean-vpc-uuid': 'digitalocean-vpc-id'},
+              'defaults': {'digitalocean-size': 's-1vcpu-1gb'}, 'env': {'COLORS_PAR_DIGITALOCEAN_VPC_UUID': 'override',
+              'COLORS_PAR_UNRELATED_TOKEN': 'secret'}, 'desired': {'transmission-peer-port': 51413}}
+    c = normalize(raw, **kwargs)
+    assert c['_root'] == str(tmp_path)
+    assert c['digitalocean-vpc-id'] == 'override'
+    assert c['digitalocean-size'] == 's-1vcpu-1gb'
+    assert 'unrelated-token' not in c
+    assert 'digitalocean-vpc-id' not in raw
+    assert normalize(raw, **{**kwargs, 'desired': {'transmission-peer-port': 1234}})['_desired_hash'] != c['_desired_hash']
+    del raw['digitalocean-vpc-uuid']
+    c = normalize(raw, path=tmp_path / 'alice.yml', env={})
+    assert scope(c)['vpc'] == 'regional-default'
+
+
+@pytest.mark.parametrize('rule', [{'protocol':'icmp','ports':['22'],'sources':['0.0.0.0/0']},
+    {'protocol':'udp','ports':[22],'sources':['0.0.0.0/0']},
+    {'protocol':'udp','ports':['65536'],'sources':['0.0.0.0/0']},
+    {'protocol':'udp','ports':['22'],'sources':['::/0']}])
+def test_invalid_extra_ingress_rejected(tmp_path, rule):
+    from pocketdeploy.config import normalize
+    with pytest.raises(DeployError, match='Ingress'):
+        normalize({'profile':'test','provider-compute':'digitalocean','digitalocean-account-id':'account',
+                   'digitalocean-region':'lon1','compute-ingress':[rule]}, path=tmp_path/'colors.yml', env={})

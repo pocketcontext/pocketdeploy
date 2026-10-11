@@ -1,4 +1,5 @@
 """Flat Colors configuration; secret resolution stays out of CLI output."""
+import copy
 import hashlib
 import ipaddress
 import json
@@ -28,6 +29,7 @@ DEFAULTS = {
     'once-version': 'v0.3.3',
 }
 ROOT_KEYS = set(DEFAULTS) | {
+    'compute-ingress',
     'compute-ssh-ports',  # Implicit ['22'] preserves existing desired-state hashes.
     'profile', 'oci-config-file-profile', 'oci-region', 'oci-compartment-id',
     'oci-subnet-id', 'oci-availability-domain', 'oci-image-id', 'ssh-user',
@@ -70,14 +72,41 @@ def load(path, *, env=None, resolve=True):
         raise DeployError('Cannot parse configuration.') from None
     if not isinstance(raw, dict):
         raise DeployError('Configuration must be a mapping.')
-    environment = os.environ if env is None else env
+    return normalize(raw, path=path, env=env, resolve=resolve)
+
+
+def normalize(raw, *, path, env=None, resolve=True, aliases=None, defaults=None, desired=None):
+    """Validate canonical configuration, optionally mapping application field names.
+
+    ``aliases`` maps input names to PocketDeploy names; conflicting spellings fail.
+    Application-only fields must be removed by the caller. Paths are rooted beside
+    ``path``. ``desired`` adds application settings to the fingerprint; callers
+    must omit credentials. ONCE bindings retain their existing fingerprint policy.
+    """
+    path = Path(path).absolute()
+    if not isinstance(raw, dict):
+        raise DeployError('Configuration must be a mapping.')
+    raw = copy.deepcopy(raw)
+    environment = dict(os.environ if env is None else env)
+    for source, target in (aliases or {}).items():
+        if target not in ROOT_KEYS or source == target:
+            raise DeployError('Invalid configuration alias.')
+        if source in raw:
+            if target in raw:
+                raise DeployError('Configuration contains conflicting field aliases.')
+            raw[target] = raw.pop(source)
+        if par_name(source) in environment:
+            if par_name(target) in environment:
+                raise DeployError('Environment contains conflicting field aliases.')
+            environment[par_name(target)] = environment.pop(par_name(source))
+    raw = {**copy.deepcopy(defaults or {}), **raw}
     if 'vault-save-after-run' in raw or 'COLORS_PAR_VAULT_SAVE_AFTER_RUN' in environment:
         raise DeployError('vault-save-after-run / COLORS_PAR_VAULT_SAVE_AFTER_RUN is retired; remove it and use explicit pocketdeploy vault-save checkpoints.')
     if 'compute-retain-boot-volume' in raw or 'COLORS_PAR_COMPUTE_RETAIN_BOOT_VOLUME' in environment:
         raise DeployError('compute-retain-boot-volume is retired; delete removes all deployment-owned boot volumes. Remove the field and COLORS_PAR_COMPUTE_RETAIN_BOOT_VOLUME.')
     if set(raw) - ROOT_KEYS:
         raise DeployError('Unsupported configuration field; see the configuration reference.')
-    overlaid = read_pars({**DEFAULTS, **raw}, os.environ if env is None else env)
+    overlaid = read_pars({**DEFAULTS, **raw}, environment)
     provider = overlaid.get('provider-compute')
     if not isinstance(provider, str) or provider not in PROVIDER_DEFAULTS:
         raise DeployError('Supported compute providers are oci, digitalocean and gcp.')
@@ -96,9 +125,12 @@ def load(path, *, env=None, resolve=True):
     config['_file'] = str(path)
     validate(config)
     if resolve:
-        resolve_env(config, os.environ if env is None else env)
+        resolve_env(config, environment)
     config['_desired_hash'] = hashlib.sha256(json.dumps(
         {k: v for k, v in config.items() if not k.startswith('_')}, sort_keys=True).encode()).hexdigest()
+    if desired is not None:
+        config['_desired_hash'] = hashlib.sha256(json.dumps(
+            {'compute': config['_desired_hash'], 'application': desired}, sort_keys=True).encode()).hexdigest()
     return config
 
 
@@ -106,7 +138,7 @@ def scope(c):
     provider = c.get('provider-compute', 'oci')
     if provider == 'digitalocean':
         return {'provider': provider, 'account': c['digitalocean-account-id'],
-                'region': c['digitalocean-region'], 'vpc': c['digitalocean-vpc-id']}
+                'region': c['digitalocean-region'], 'vpc': c.get('digitalocean-vpc-id', 'regional-default')}
     if provider == 'gcp':
         return {'provider': provider, 'project': c['gcp-project'], 'zone': c['gcp-zone'],
                 'network': c['gcp-network'], 'subnet': c['gcp-subnet']}
@@ -127,7 +159,7 @@ def validate(c):
         raise DeployError('Profile must be a lowercase identifier of at most 40 characters.')
     required = {
         'oci': ['oci-config-file-profile', 'oci-compartment-id', 'oci-subnet-id', 'oci-availability-domain'],
-        'digitalocean': ['digitalocean-account-id', 'digitalocean-region', 'digitalocean-vpc-id',
+        'digitalocean': ['digitalocean-account-id', 'digitalocean-region',
                          'digitalocean-size', 'digitalocean-image', 'digitalocean-token-env'],
         'gcp': ['gcp-project', 'gcp-zone', 'gcp-network', 'gcp-subnet', 'gcp-machine-type',
                 'gcp-image-project', 'gcp-image-family', 'gcp-boot-disk-type'],
@@ -137,6 +169,8 @@ def validate(c):
             raise DeployError('Required compute provider configuration is missing or invalid.')
         if c[key].startswith('-') or any(ord(char) < 32 for char in c[key]):
             raise DeployError('Invalid compute provider identifier.')
+    if 'digitalocean-vpc-id' in c and (not isinstance(c['digitalocean-vpc-id'], str) or not re.fullmatch(r'[A-Za-z0-9-]+', c['digitalocean-vpc-id'])):
+        raise DeployError('Invalid DigitalOcean VPC identifier.')
     if provider == 'digitalocean' and not re.fullmatch(r'[A-Z_][A-Z0-9_]*', c['digitalocean-token-env']):
         raise DeployError('digitalocean-token-env must name an environment variable.')
     if provider == 'gcp':
@@ -182,6 +216,23 @@ def validate(c):
             any(not isinstance(port, str) or not re.fullmatch(r'[1-9][0-9]{0,4}', port) or
                 int(port) > 65535 for port in ports) or len(set(ports)) != len(ports)):
         raise DeployError('compute-ssh-ports must contain unique quoted TCP ports from 1 to 65535.')
+    ingress = c.get('compute-ingress', [])
+    if not isinstance(ingress, list) or (ingress and provider != 'digitalocean'):
+        raise DeployError('compute-ingress currently requires DigitalOcean and a list of rules.')
+    for rule in ingress:
+        if (not isinstance(rule, dict) or set(rule) != {'protocol', 'ports', 'sources'}
+                or rule['protocol'] not in ('tcp', 'udp')
+                or not isinstance(rule['ports'], list) or not rule['ports']
+                or any(not isinstance(port, str) or not re.fullmatch(r'[1-9][0-9]{0,4}', port)
+                       or int(port) > 65535 for port in rule['ports'])
+                or len(set(rule['ports'])) != len(rule['ports'])
+                or not isinstance(rule['sources'], list) or not rule['sources']):
+            raise DeployError('Ingress rules require tcp/udp, unique quoted ports and nonempty IPv4 CIDR sources.')
+        try:
+            if any(ipaddress.ip_network(source).version != 4 for source in rule['sources']):
+                raise ValueError()
+        except (ValueError, TypeError):
+            raise DeployError('Ingress sources must contain valid IPv4 CIDRs.') from None
     for key in ['compute-ssh-sources', 'compute-http-sources']:
         if not isinstance(c[key], list):
             raise DeployError('Firewall sources must be CIDR lists.')

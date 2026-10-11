@@ -58,14 +58,43 @@ class DigitalOcean:
                 return result
         raise DeployError('DigitalOcean inventory pagination exceeded its bound.')
 
-    def _scope(self, network=False):
+    def _scope(self, network=False, *, persist=False):
         account = self._call('GET', 'account').get('account', {})
         if account.get('uuid') != self.config['digitalocean-account-id'] or account.get('status') != 'active':
             raise DeployError('DigitalOcean account identity or active status does not match configuration.')
         if network:
-            vpc = self._call('GET', 'vpcs/' + quote(self.config['digitalocean-vpc-id'], safe='')).get('vpc', {})
-            if vpc.get('id') != self.config['digitalocean-vpc-id'] or vpc.get('region') != self.config['digitalocean-region']:
-                raise DeployError('DigitalOcean VPC does not match the configured region.')
+            self._resolve_vpc(persist=persist)
+
+    def _resolve_vpc(self, *, persist=False):
+        explicit = self.config.get('digitalocean-vpc-id')
+        pinned = self.state.get_meta('digitalocean-resolved-vpc') if self.state else None
+        if explicit:
+            identity = explicit
+        else:
+            candidates = [v for v in self._list('vpcs')
+                          if v.get('region') == self.config['digitalocean-region'] and v.get('default') is True]
+            if len(candidates) != 1:
+                raise DeployError('DigitalOcean region has no unique existing default VPC.')
+            identity = candidates[0]['id']
+        vpc = self._call('GET', 'vpcs/' + quote(identity, safe='')).get('vpc', {})
+        if (vpc.get('id') != identity or vpc.get('region') != self.config['digitalocean-region']
+                or (not explicit and vpc.get('default') is not True)):
+            raise DeployError('DigitalOcean VPC does not match the configured region or default selection.')
+        binding = {'account': self.config['digitalocean-account-id'],
+                   'region': self.config['digitalocean-region'], 'id': identity}
+        if pinned and pinned != binding:
+            raise DeployError('DigitalOcean default VPC identity changed; explicit recovery is required.')
+        self.config['_digitalocean-vpc-id'] = identity
+        if not explicit and not pinned and self.state and self.state.get_resource('compute'):
+            raise DeployError('Existing DigitalOcean compute has no recorded VPC resolution; recover its checkpoint.')
+        if persist and not explicit:
+            self.state.set_meta('digitalocean-resolved-vpc', binding)
+        return identity
+
+    def _vpc_id(self):
+        explicit = self.config.get('digitalocean-vpc-id')
+        pinned = self.state.get_meta('digitalocean-resolved-vpc') if self.state else None
+        return explicit or (pinned or {}).get('id') or self.config.get('_digitalocean-vpc-id')
 
     def _tag(self):
         if not self.state:
@@ -208,6 +237,10 @@ class DigitalOcean:
             addresses = sorted({str(ipaddress.ip_network(cidr, strict=False)) for cidr in self.config.get(key, ['0.0.0.0/0'])})
             if addresses:
                 inbound.extend({'protocol': 'tcp', 'ports': port, 'sources': {'addresses': addresses}} for port in ports)
+        for rule in self.config.get('compute-ingress', []):
+            addresses = sorted({str(ipaddress.ip_network(cidr)) for cidr in rule['sources']})
+            inbound.extend({'protocol': rule['protocol'], 'ports': port,
+                            'sources': {'addresses': addresses}} for port in rule['ports'])
         outbound = [{'protocol': protocol, **({'ports': 'all'} if protocol != 'icmp' else {}),
                      'destinations': {'addresses': ['0.0.0.0/0', '::/0']}} for protocol in ('tcp', 'udp', 'icmp')]
         return {'inbound_rules': inbound, 'outbound_rules': outbound}
@@ -302,7 +335,8 @@ class DigitalOcean:
             ('digitalocean-region', item.get('region', {}).get('slug')),
             ('digitalocean-size', item.get('size_slug')),
             ('digitalocean-vpc-id', item.get('vpc_uuid')))
-            if actual != self.config.get(key, 's-1vcpu-2gb' if key == 'digitalocean-size' else None)]
+            if actual != (self._vpc_id() if key == 'digitalocean-vpc-id' else
+                          self.config.get(key, 's-1vcpu-2gb' if key == 'digitalocean-size' else None))]
         record = self.state.get_resource('compute')
         pinned = self.state.get_meta('digitalocean-image-id')
         desired = str(self.config.get('digitalocean-image', 'ubuntu-24-04-x64'))
@@ -413,7 +447,7 @@ class DigitalOcean:
     def converge(self, public_key, operation_id):
         if any(self.state.get_meta('digitalocean-delete-' + role) for role in ('compute', 'firewall', 'tag')):
             raise DeployError('DigitalOcean deletion is pending; finish deletion before convergence.')
-        self._scope(network=True)
+        self._scope(network=True, persist=True)
         self._validate_launch()
         if self.state.get_meta('digitalocean-image-id'):
             self._image()
@@ -431,9 +465,9 @@ class DigitalOcean:
         self._reconcile_rules(firewall, operation_id)
         if not item:
             item = self._create('compute', operation_id, {
-                'name': self.config['profile'] + '-once-compute', 'region': self.config['digitalocean-region'],
+                'name': self.config['profile'] + '-compute', 'region': self.config['digitalocean-region'],
                 'size': self.config.get('digitalocean-size', 's-1vcpu-2gb'), 'image': self._image(),
-                'vpc_uuid': self.config['digitalocean-vpc-id'], 'backups': False, 'ipv6': False,
+                'vpc_uuid': self._vpc_id(), 'backups': False, 'ipv6': False,
                 'tags': [self._tag()], 'user_data': self._user_data(public_key)})
         self._recover('compute', item)
         for _ in range(120):
@@ -449,7 +483,7 @@ class DigitalOcean:
     def connection(self):
         self._scope()
         item = self._find('compute')
-        if not item or item.get('vpc_uuid') != self.config['digitalocean-vpc-id']:
+        if not item or item.get('vpc_uuid') != self._vpc_id():
             raise DeployError('No owned DigitalOcean Droplet in the configured VPC.')
         addresses = [n.get('ip_address') for n in item.get('networks', {}).get('v4', []) if n.get('type') == 'public']
         if len(addresses) != 1:
@@ -536,7 +570,7 @@ class DigitalOcean:
         if (any(self.state.get_meta('digitalocean-delete-' + role) for role in ('compute', 'firewall', 'tag'))
                 or self.state.get_meta('digitalocean-pending-firewall-rules')):
             raise DeployError('DigitalOcean deletion or firewall update is pending; reconcile before adoption.')
-        self._scope(network=True)
+        self._scope(network=True, persist=True)
         item, firewall = self._find('compute'), self._find('firewall')
         if (not item or str(item['id']) != str(instance_id) or not firewall
                 or item.get('status') != 'active' or not self._firewall_ready(firewall)

@@ -92,43 +92,7 @@ Use -f to select a deployment. Run without arguments to show this help.''')
     return p
 
 
-def initialize(config, state, host, root):
-    """Prepare local recovery authority without touching providers or old files."""
-    bindings = local_path(root, '.envrc.private')
-    pairs = ((host.key, host.pub), (host.hostkey, host.hostpub))
-    authority = [path for pair in pairs for path in pair] + [host.known]
-    paths = [*authority, bindings]
-    if any(a.get('github') for a in config.get('once', {}).get('applications', [])):
-        from .github import GitHub
-        github = GitHub(config, state, root, host)
-        paths.extend(path for app in github.apps for path in github.key_paths(app))
-    state_path = local_path(root, config['state-file'])
-    reserved = {Path(config['_file']).resolve(), local_path(root, '.envrc'),
-                local_path(root, config['workdir']), state_path,
-                *(Path(str(state_path) + suffix) for suffix in ('.lock', '-journal', '-wal', '-shm'))}
-    if len(set(paths)) != len(paths) or set(paths).intersection(reserved):
-        raise DeployError('Initialization files must have distinct paths.')
-    for path in paths:
-        if path.exists():
-            info = path.stat()
-            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
-                raise DeployError('Initialization files must be owned regular files without hardlinks.')
-    if state.get_resource('compute') and any(not path.exists() for path in authority):
-        raise DeployError('Existing compute SSH identity is missing; restore it from Vault.')
-    for private, public in pairs:
-        if private.exists() != public.exists():
-            raise DeployError('SSH key pair is incomplete; restore the complete identity before initialization.')
-    host.prepare_keys()
-    if any(a.get('github') for a in config.get('once', {}).get('applications', [])):
-        from .github import GitHub
-        GitHub(config, state, root, host).prepare_keys()
-    try:
-        descriptor = os.open(bindings, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
-    except FileExistsError:
-        pass
-    else:
-        os.close(descriptor)
-    return {'profile': config['profile'], 'initialized': True, 'deployment_id': state.deployment_id}
+from .runtime import initialize
 
 
 async def converge(config, state, cloud, host, operation, reporter=None, rotate_github_keys=False,

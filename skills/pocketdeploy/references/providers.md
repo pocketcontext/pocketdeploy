@@ -17,8 +17,14 @@ SMTP TLS connectivity without sending.
 
 Start from `examples/colors-digitalocean.yml` in the package repository. Required
 fields are `digitalocean-account-id` (the account UUID returned by `/v2/account`),
-`digitalocean-region` and `digitalocean-vpc-id`. The VPC must already exist in the
-chosen region. Defaults are `digitalocean-size: s-1vcpu-2gb` and
+`digitalocean-region`. Set `digitalocean-vpc-id` to an existing VPC, or omit it
+to discover the unique regional default. Discovery verifies the active account,
+region and default status. Convergence records the resolved identity; later
+changes to the default block convergence rather than switch networks. Read-only
+planning does not pin a discovery. Connection and deletion continue to use the
+recorded VPC so an old deployment can be retired safely. Explicit-VPC state
+scopes remain unchanged; switching between explicit and discovered selection
+requires a new deployment or explicit recovery. No VPC is created or owned. Defaults are `digitalocean-size: s-1vcpu-2gb` and
 `digitalocean-image: ubuntu-24-04-x64`. The image selector resolves to a numeric
 image identity saved in state. The boot disk belongs to the Droplet; separate
 volumes, backups and snapshots are not managed by this backend.
@@ -29,6 +35,23 @@ the trusted shell/private bindings, never in colors.yml. The backend uses HTTPS
 directly and does not require doctl. The token needs account/VPC/image/size reads,
 Droplet and Cloud Firewall lifecycle access, and deployment-tag management.
 No API token is sent to the server, ONCE or GitHub.
+
+Additional DigitalOcean application ingress uses `compute-ingress`:
+
+```yaml
+compute-ingress:
+  - protocol: tcp
+    ports: ["51413"]
+    sources: ["0.0.0.0/0"]
+  - protocol: udp
+    ports: ["51413"]
+    sources: ["0.0.0.0/0"]
+```
+
+Rules require TCP or UDP, unique quoted ports from 1 through 65535 and IPv4
+CIDRs. Other providers reject nonempty extra ingress until their adapters support
+it. Firewall updates retain existing access until additions are observed applied.
+New Droplets use `<profile>-compute`; recorded existing names remain unchanged.
 
 The deployment UUID tag is created and recorded before its firewall and removed
 after remote cleanup. Ownership uses that tag on the Droplet and recorded resource

@@ -522,3 +522,59 @@ def test_additional_ssh_ports_share_sources(adapter):
     assert extra['sources'] == {'addresses': ['192.0.2.1/32']}
     adapter.config['compute-ssh-sources'] = []
     assert not any(rule['ports'] in ('22', '2022') for rule in adapter._rules()['inbound_rules'])
+
+
+def default_vpc_api(adapter, monkeypatch):
+    inventory, calls = fake(adapter, monkeypatch)
+    request = adapter._call
+    vpcs = [{'id': 'vpc', 'region': 'lon1', 'default': True}]
+    def call(method, path, body=None):
+        if method == 'GET' and path.startswith('vpcs?'):
+            return {'vpcs': vpcs}
+        if method == 'GET' and path.startswith('vpcs/'):
+            return {'vpc': next((v for v in vpcs if v['id'] == path[5:]), {})}
+        return request(method, path, body)
+    monkeypatch.setattr(adapter, '_call', call)
+    del adapter.config['digitalocean-vpc-id']
+    return vpcs, inventory, calls
+
+
+def test_default_vpc_plan_read_only_converge_pins_and_refuses_switch(adapter, monkeypatch):
+    vpcs, inventory, calls = default_vpc_api(adapter, monkeypatch)
+    adapter.plan()
+    assert adapter.state.get_meta('digitalocean-resolved-vpc') is None
+    operation = adapter.state.begin_operation('converge', 'hash')
+    adapter.converge('ssh-ed25519 synthetic', operation)
+    assert adapter.state.get_meta('digitalocean-resolved-vpc') == {'account': 'account', 'region': 'lon1', 'id': 'vpc'}
+    assert next(body for method, path, body in calls if method == 'POST' and path == 'droplets')['name'] == 'test-compute'
+    vpcs[0]['default'] = False
+    vpcs.append({'id': 'replacement', 'region': 'lon1', 'default': True})
+    with pytest.raises(DeployError, match='identity changed'):
+        adapter.plan()
+    # Recorded resources can still be accessed and retired after default changes.
+    assert adapter.connection()['instance_id'] == '123'
+    adapter.delete(operation)
+    assert inventory['droplets'] == []
+
+
+@pytest.mark.parametrize('vpcs', [[], [{'id': 'wrong', 'region': 'nyc1', 'default': True}],
+    [{'id': 'one', 'region': 'lon1', 'default': True}, {'id': 'two', 'region': 'lon1', 'default': True}]])
+def test_default_vpc_requires_unique_existing_regional_default(adapter, monkeypatch, vpcs):
+    current, _, calls = default_vpc_api(adapter, monkeypatch)
+    current[:] = vpcs
+    with pytest.raises(DeployError, match='unique existing default'):
+        adapter.plan()
+    assert all(method == 'GET' for method, _, _ in calls)
+
+
+def test_extra_tcp_udp_ingress_reconciles(adapter, monkeypatch):
+    inventory, calls = fake(adapter, monkeypatch)
+    operation = adapter.state.begin_operation('converge', 'hash')
+    adapter.converge('ssh-ed25519 synthetic', operation)
+    adapter.config['compute-ingress'] = [{'protocol': protocol, 'ports': ['51413'], 'sources': ['0.0.0.0/0']} for protocol in ('tcp', 'udp')]
+    adapter.converge('ssh-ed25519 synthetic', operation)
+    assert adapter._rules_equal(inventory['firewalls'][0])
+    assert {r['protocol'] for r in inventory['firewalls'][0]['inbound_rules'] if r.get('ports') == '51413'} == {'tcp', 'udp'}
+    calls.clear()
+    adapter.converge('ssh-ed25519 synthetic', operation)
+    assert all(method == 'GET' for method, _, _ in calls)

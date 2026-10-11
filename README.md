@@ -301,8 +301,9 @@ SSH file paths, and Vault settings. Old `compute-api-version`, `provider-backend
 and infrastructure-state `r2-*` fields are not supported. Application storage
 parameter references can continue to point to existing R2 services.
 
-Resource names default to `<profile>-once-compute` and
-`<profile>-once-firewall`. A profile is durable; an ONCE upgrade does not rename
+OCI resource names default to `<profile>-once-compute` and
+`<profile>-once-firewall`. New DigitalOcean Droplets use `<profile>-compute`;
+existing identities and names are preserved. A profile is durable; an ONCE upgrade does not rename
 it. A separate UUID establishes controller identity and ownership tags. Exact
 resource IDs, provider scope and lifecycle are stored in SQLite. Names alone
 never authorize adoption or deletion. Existing application/shared resource names
@@ -738,3 +739,21 @@ passing the JSON payload through stdin and parsing JSON stdout. Put credentials
 in the payload, never in source text. Remote errors suppress stdout/stderr.
 `Host.ssh(connection, command=None)` provides an interactive or command session.
 These interfaces share the same transport as ONCE deployment operations.
+
+Application controllers can use `pocketdeploy.runtime.session(config,
+read_only=False, allow_create=False)` to open matching state and its provider/host
+under a local deployment lock. Read-only plans with `allow_create=True` leave a
+missing state absent. `recorded_operation(state, command, desired_hash)` records
+success, failure and interruption. `initialize(config, state, host, root)` prepares
+local authority. `delete_compute(config, state, cloud, host, operation)` is for
+compute-only applications: it enforces destruction protection, refuses service
+resources and removes keys only after all recorded resources are gone. Callers
+must stop their application and finish data copying before deletion.
+
+`Host.prepare_transport(connection)` prepares pinned SSH arguments once on the
+controller thread. Its immutable transport supports concurrent `run_python`,
+`tunnel(local_port, remote_port)` as a loopback-only context manager, and
+`rsync_shell()` for the rsync remote-shell option. It never reopens controller
+state from worker threads. `pocketdeploy.ssh_config.update(payload, owner=...)`
+maintains application-owned SSH aliases under one shared local lock. Owners must
+keep their stable uppercase marker (Walter uses `WALTER`).

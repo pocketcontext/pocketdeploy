@@ -204,19 +204,13 @@ class Host:
         except ValueError:
             raise DeployError('Host returned invalid response; output suppressed') from None
 
+    def prepare_transport(self, connection):
+        """Resolve pinned trust once on the controller thread for concurrent use."""
+        from .transport import SSHTransport
+        return SSHTransport(tuple(self._argv(connection)))
+
     def _python_process(self, connection, source, payload, timeout):
-        # Only non-secret program text is sent as the SSH command. Data uses stdin.
-        command = 'sudo python3 -c ' + shlex.quote(source)
-        try:
-            result = subprocess.run(self._argv(connection) + [command], input=json.dumps(payload),
-                                    capture_output=True, text=True, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            raise DeployError('SSH host operation timed out; remote work may still be running.',
-                              code='command_timeout') from None
-        except OSError:
-            raise DeployError('SSH could not be started; check OpenSSH installation.',
-                              code='command_unavailable') from None
-        return result
+        return self.prepare_transport(connection).python_process(source, payload, timeout)
 
     def run_python(self, connection, source, payload, timeout=1200):
         """Execute trusted Python as root with private JSON input and JSON output.
