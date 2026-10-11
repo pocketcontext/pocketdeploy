@@ -764,7 +764,28 @@ controller thread. Its immutable transport supports concurrent `run_python`,
 `rsync_shell()` for the rsync remote-shell option. It never reopens controller
 state from worker threads. `pocketdeploy.ssh_config.update(payload, owner=...)`
 maintains application-owned SSH aliases under one shared local lock. Owners must
-keep their stable uppercase marker (Walter uses `WALTER`).
+keep their stable uppercase marker (Walter uses `WALTER`). Aliases live in
+`~/.ssh/config.d/00-<owner-lowercase>-<profile>.conf`; the main SSH configuration
+is never rewritten. Configure an unconditional include before SSH options that
+could override the managed connection settings, for example:
+
+```sshconfig
+Host *
+    Include config.d/*
+
+Host *
+    # Your default SSH options follow here.
+```
+
+Installation requires that the include loads the managed file with its pinned
+host trust and explicit identity settings taking precedence. Conflicting aliases,
+unsafe files and ambiguous include layouts are refused. Existing managed blocks
+in the main configuration require deliberate removal before installing a drop-in;
+the updater does not silently migrate them. Removal deletes only the matching
+owned drop-in and leaves the main configuration and other deployments intact.
+`check_only` validates installation without writing files. Copied launchers and
+applications pinned to older PocketDeploy commits retain their previous behavior
+until their dependency is deliberately updated.
 
 Structured diagnostics are available in `pocketdeploy.diagnostics`:
 `build_diagnostic(operation, category, returncode=..., elapsed_seconds=...)` and
