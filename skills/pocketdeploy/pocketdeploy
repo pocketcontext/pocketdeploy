@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["pocketdeploy @ git+https://github.com/pocketcontext/pocketdeploy.git@22b9a5c9235a52ac4a772554e26b21bef6f571f5"]
+# dependencies = ["pocketdeploy @ git+https://github.com/pocketcontext/pocketdeploy.git@2231acf6f720003e14593a24aa304e14bf989fcb"]
 # ///
 """Portable PocketDeploy CLI; deployment selection follows the caller's directory."""
 from pocketdeploy.cli import main
