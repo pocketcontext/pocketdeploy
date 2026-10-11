@@ -85,9 +85,39 @@ def test_tunnel_rejects_occupied_port_without_starting_ssh():
     from unittest.mock import patch
     transport = SSHTransport(('ssh', '-l', 'ubuntu', '--', '192.0.2.1'))
     with socket.socket() as listener:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind(('127.0.0.1', 0))
+        listener.listen(1)
         with patch('pocketdeploy.transport.subprocess.Popen') as spawn:
             with pytest.raises(DeployError, match='unavailable'):
                 with transport.tunnel(listener.getsockname()[1], 9091):
                     pytest.fail('occupied port accepted')
         spawn.assert_not_called()
+
+
+def test_tunnel_port_probe_accepts_previous_forward_time_wait():
+    import socket
+    from unittest.mock import patch
+    transport = SSHTransport(('ssh', '-l', 'ubuntu', '--', '192.0.2.1'))
+    # Close the accepted server endpoint first, leaving TIME_WAIT on the
+    # forwarding port, exactly as a closed SSH tunnel can do.
+    with socket.socket() as listener:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(('127.0.0.1', 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        with socket.create_connection(('127.0.0.1', port)) as client:
+            accepted, _ = listener.accept()
+            accepted.close()
+            assert client.recv(1) == b''
+    with socket.socket() as ordinary_probe:
+        with pytest.raises(OSError):
+            ordinary_probe.bind(('127.0.0.1', port))
+    process = Mock()
+    process.poll.return_value = 1
+    with patch('pocketdeploy.transport.subprocess.Popen', return_value=process) as spawn:
+        with pytest.raises(DeployError, match='failed or timed out'):
+            with transport.tunnel(port, 9091):
+                pytest.fail('synthetic exited SSH accepted')
+    # Getting as far as Popen proves the real TIME_WAIT probe succeeded.
+    spawn.assert_called_once()

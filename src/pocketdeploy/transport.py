@@ -49,6 +49,10 @@ class SSHTransport:
         # never silently route application credentials to an existing listener.
         try:
             with socket.socket() as probe:
+                # OpenSSH listeners use SO_REUSEADDR: completed forwards can
+                # leave TIME_WAIT sockets without any live listener. Match that
+                # behavior while still refusing an active listener.
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 probe.bind(('127.0.0.1', local_port))
         except OSError:
             raise DeployError('Local tunnel port is unavailable.') from None
