@@ -1,4 +1,5 @@
 """Prepared pinned SSH commands, safe to use without controller state in workers."""
+import base64
 from contextlib import contextmanager
 from dataclasses import dataclass
 import json
@@ -10,13 +11,25 @@ import time
 from .common import DeployError
 
 
+def python_command(source):
+    """Transport source unchanged through POSIX shells and Fish.
+
+    Fish interprets backslash escapes even inside single quotes. Encode program
+    text instead of quoting it directly; the fixed wrapper has no backslashes
+    or embedded single quotes. Private payloads still travel only over stdin.
+    """
+    encoded = base64.b64encode(source.encode('utf-8')).decode('ascii')
+    wrapper = 'import base64;exec(compile(base64.b64decode("' + encoded + '"),"<remote>","exec"))'
+    return "sudo python3 -c '" + wrapper + "'"
+
+
 @dataclass(frozen=True)
 class SSHTransport:
     argv: tuple[str, ...]
 
     def python_process(self, source, payload, timeout=1200):
         try:
-            return subprocess.run([*self.argv, 'sudo python3 -c ' + shlex.quote(source)],
+            return subprocess.run([*self.argv, python_command(source)],
                                   input=json.dumps(payload), capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
             raise DeployError('SSH host operation timed out; remote work may still be running.', code='command_timeout') from None

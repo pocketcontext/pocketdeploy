@@ -1,10 +1,10 @@
 """Durable rotation away from the cloud metadata bootstrap SSH identity."""
 from pathlib import Path
 import json
-import shlex
 import subprocess
 import tempfile
 
+from .transport import python_command
 from .common import DeployError
 
 
@@ -61,7 +61,7 @@ def rotate(host, connection):
     # bootstrap key is no longer accepted by sshd.
     source = Path(__file__).with_name('host_trust_remote.py').read_text()
     result = request(host, connection, public,
-                     'sudo python3 -c ' + shlex.quote(source),
+                     python_command(source),
                      json.dumps({'private': trust['private'], 'public': trust['public']}))
     if result.returncode:
         raise DeployError('SSH host key rotation failed; rerun rotate-host-key to recover; output suppressed.')

@@ -2,8 +2,8 @@
 import json
 from pathlib import Path
 import re
-import shlex
 
+from .transport import python_command
 from .common import DeployError, run
 from .output import operation
 
@@ -14,7 +14,7 @@ def smtp_test(host, connection, settings, recipient):
     source = Path(__file__).with_name('smtp_test_remote.py').read_text()
     payload = {'smtp': settings, 'to': recipient}
     with operation('SSH: SMTP submission test'):
-        output = run(host._argv(connection) + ['sudo python3 -c ' + shlex.quote(source)],
+        output = run(host._argv(connection) + [python_command(source)],
                      input=json.dumps(payload), timeout=120)
     try:
         result = json.loads(output)
