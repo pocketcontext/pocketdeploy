@@ -26,6 +26,8 @@ def test_host_key_is_anchored_and_payload_not_in_args(tmp_path):
     trust(host)
     argv = host._argv({'ip': '192.0.2.1', 'user': 'ubuntu'})
     assert 'StrictHostKeyChecking=yes' in argv
+    assert 'IdentityAgent=none' in argv
+    assert 'ForwardAgent=no' in argv
     assert '192.0.2.1 ssh-ed25519 ' in host.known.read_text()
 
 
@@ -172,3 +174,27 @@ def test_ssh_rechecks_hardlinks_before_writing_known_hosts(tmp_path):
     with pytest.raises(DeployError, match='hardlinks'):
         host._argv({'ip': '192.0.2.1'})
     assert bindings.read_text() == 'synthetic private binding'
+
+
+def test_generic_python_uses_private_stdin_and_pinned_ssh(tmp_path):
+    host = Host({}, SimpleNamespace(deployment_id='test'), tmp_path)
+    host.prepare_keys()
+    trust(host)
+    with patch('pocketdeploy.host.subprocess.run', return_value=SimpleNamespace(returncode=0, stdout='{"ok":true}')) as call:
+        assert host.run_python({'ip': '192.0.2.1'}, 'print("{}")', {'secret': 'synthetic-private'}, timeout=37) == {'ok': True}
+    assert 'synthetic-private' not in repr(call.call_args.args)
+    assert json.loads(call.call_args.kwargs['input']) == {'secret': 'synthetic-private'}
+    assert call.call_args.kwargs['timeout'] == 37
+    assert 'StrictHostKeyChecking=yes' in call.call_args.args[0]
+
+
+def test_generic_python_suppresses_remote_failure(tmp_path):
+    import pytest
+    from pocketdeploy.common import DeployError
+    host = Host({}, SimpleNamespace(deployment_id='test'), tmp_path)
+    host.prepare_keys()
+    trust(host)
+    with patch('pocketdeploy.host.subprocess.run', return_value=SimpleNamespace(returncode=1, stdout='synthetic-secret', stderr='synthetic-secret')):
+        with pytest.raises(DeployError, match='output suppressed') as error:
+            host.run_python({'ip': '192.0.2.1'}, 'pass', {})
+    assert 'synthetic-secret' not in str(error.value)

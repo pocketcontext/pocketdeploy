@@ -7,7 +7,7 @@ from pocketdeploy.state import State
 @pytest.fixture
 def adapter(tmp_path):
     state = State(tmp_path / 'state', 'test', {}, create=True)
-    config = {'gcp-project': 'test-project', 'gcp-zone': 'us-central1-a',
+    config = {'profile': 'test', 'gcp-project': 'test-project', 'gcp-zone': 'us-central1-a',
               'gcp-network': 'existing', 'gcp-subnet': 'existing',
               'compute-ssh-sources': ['192.0.2.1/32'], 'compute-http-sources': ['0.0.0.0/0']}
     yield GCP(config, state)
@@ -117,7 +117,11 @@ def test_failed_reads_not_absence(adapter, monkeypatch):
         adapter._find('compute', allow_missing=True)
 
 
-def test_complete_lifecycle_and_noop(adapter, monkeypatch):
+@pytest.mark.parametrize('machine,count,nic', [('e2-small', 0, 'VIRTIO_NET'),
+                                               ('c4a-standard-4-lssd', 1, 'GVNIC'),
+                                               ('n2-standard-4', 2, 'GVNIC')])
+def test_complete_lifecycle_and_noop(adapter, monkeypatch, machine, count, nic):
+    adapter.config.update({'gcp-machine-type': machine, 'gcp-local-ssd-count': count, 'gcp-nic-type': nic})
     adapter.config['gcp-image'] = adapter.base + 'projects/images/global/images/ubuntu-exact'
     inventory = {r: [] for r in adapter.roles}
     mutations = []
@@ -138,6 +142,9 @@ def test_complete_lifecycle_and_noop(adapter, monkeypatch):
             role = body['description'].rsplit(':', 1)[1]
             item = dict(body, id=str(100 + adapter.roles.index(role)), selfLink=adapter.base + path + '/' + body['name'])
             if role == 'compute':
+                if machine.endswith('-lssd'):
+                    assert len(body['disks']) == 1
+                    item['disks'] = item['disks'] + [{'type': 'SCRATCH', 'interface': 'NVME'} for _ in range(count)]
                 item['status'] = 'RUNNING'
                 item['machineType'] = adapter.base + item['machineType']
                 item['networkInterfaces'][0]['accessConfigs'][0]['natIP'] = '192.0.2.5'
@@ -394,3 +401,26 @@ def test_explicit_auth_mode_uses_selected_credential_source(adapter, monkeypatch
     monkeypatch.setattr('pocketdeploy.gcp.build_opener', lambda *a: Opener())
     assert adapter._call(adapter._root()) == {}
     assert calls == [expected]
+
+
+def test_scratch_never_authorizes_foreign_persistent_disk(adapter):
+    adapter.config['gcp-local-ssd-count'] = 1
+    disk = {'selfLink': 'owned-disk'}
+    item = {'disks': [{'source': 'owned-disk', 'boot': True, 'autoDelete': False},
+                      {'type': 'SCRATCH', 'interface': 'NVME'}]}
+    assert adapter._attachments_match(item, disk)
+    item['disks'][1]['source'] = 'foreign-disk'
+    assert not adapter._attachments_match(item, disk)
+    item['disks'][1] = {'type': 'PERSISTENT', 'source': 'foreign-disk'}
+    assert not adapter._attachments_match(item, disk)
+
+
+def test_gvnic_drift_and_profile_names(adapter):
+    adapter.config['gcp-nic-type'] = 'GVNIC'
+    item = {'networkInterfaces': [{'network': adapter.base + adapter._network(),
+                                  'subnetwork': adapter.base + adapter._subnet()}]}
+    assert 'nic-type' in adapter._drift(item, None)
+    item['networkInterfaces'][0]['nicType'] = 'GVNIC'
+    assert 'nic-type' not in adapter._drift(item, None)
+    assert adapter._name('compute') == 'test-compute'
+    assert adapter._name('boot-volume') == 'test-boot-volume'

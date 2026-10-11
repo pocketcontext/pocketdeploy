@@ -155,7 +155,7 @@ class Host:
         self.known.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.known.write_text(f"{connection['ip']} {public[0]} {public[1]}\n")
         os.chmod(self.known, 0o600)
-        return ['ssh', '-F', '/dev/null', '-i', str(self.key), '-o', 'IdentitiesOnly=yes', '-o', 'BatchMode=yes',
+        return ['ssh', '-F', '/dev/null', '-i', str(self.key), '-o', 'IdentitiesOnly=yes', '-o', 'IdentityAgent=none', '-o', 'ForwardAgent=no', '-o', 'BatchMode=yes',
                 '-o', 'ControlMaster=no', '-o', 'ControlPath=none', '-o', 'HostKeyAlgorithms=ssh-ed25519',
                 '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=10',
                 '-o', 'UserKnownHostsFile=' + str(self.known),
@@ -183,17 +183,7 @@ class Host:
                    'applications': applications}
         if extra:
             request.update(extra)
-        # Only non-secret program text is sent as the SSH command. Data uses stdin.
-        command = 'sudo python3 -c ' + shlex.quote(source)
-        try:
-            result = subprocess.run(self._argv(connection) + [command], input=json.dumps(request),
-                                    capture_output=True, text=True, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            raise DeployError('SSH host operation timed out; remote work may still be running.',
-                              code='command_timeout') from None
-        except OSError:
-            raise DeployError('SSH could not be started; check OpenSSH installation.',
-                              code='command_unavailable') from None
+        result = self._python_process(connection, source, request, timeout)
         if result.returncode:
             try:
                 response = json.loads(result.stdout)
@@ -209,6 +199,34 @@ class Host:
             if error not in SAFE_ERRORS and isinstance(stage, str) and stage in APPLICATION_ERRORS:
                 raise DeployError(APPLICATION_ERRORS[stage], code=stage.replace('-', '_'))
             raise DeployError('Host operation failed' + (': ' + error if error in SAFE_ERRORS else '; output suppressed'))
+        try:
+            return json.loads(result.stdout)
+        except ValueError:
+            raise DeployError('Host returned invalid response; output suppressed') from None
+
+    def _python_process(self, connection, source, payload, timeout):
+        # Only non-secret program text is sent as the SSH command. Data uses stdin.
+        command = 'sudo python3 -c ' + shlex.quote(source)
+        try:
+            result = subprocess.run(self._argv(connection) + [command], input=json.dumps(payload),
+                                    capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise DeployError('SSH host operation timed out; remote work may still be running.',
+                              code='command_timeout') from None
+        except OSError:
+            raise DeployError('SSH could not be started; check OpenSSH installation.',
+                              code='command_unavailable') from None
+        return result
+
+    def run_python(self, connection, source, payload, timeout=1200):
+        """Execute trusted Python as root with private JSON input and JSON output.
+
+        Source must contain program text only; credentials belong in payload.
+        Provider/remote output is never included in errors.
+        """
+        result = self._python_process(connection, source, payload, timeout)
+        if result.returncode:
+            raise DeployError('Remote Python operation failed; output suppressed')
         try:
             return json.loads(result.stdout)
         except ValueError:

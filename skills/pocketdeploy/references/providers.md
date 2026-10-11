@@ -126,3 +126,24 @@ test. Ordinary plans and convergence do not send test messages.
 - [Resend SMTP ports](https://resend.com/docs/send-with-smtp)
 - [ONCE v0.3.3 SMTP environment](https://github.com/basecamp/once/blob/v0.3.3/internal/docker/application_settings.go)
 - [Fizzy SMTP settings](https://github.com/basecamp/fizzy/blob/main/docs/docker-deployment.md#smtp-email)
+
+### Google development machines
+
+`gcp-nic-type` selects `VIRTIO_NET` (default) or `GVNIC`; the NIC is checked for
+configuration drift. Set `GVNIC` for ARM machine families that require it, and
+select a matching ARM64 image family and supported boot disk type explicitly.
+`gcp-local-ssd-count` is an integer from 0 to 32 (default 0). It is the expected
+number of attached NVMe scratch disks. Machine types ending in `-lssd` attach
+fixed scratch capacity automatically; for other types PocketDeploy requests the
+configured number of Local SSD disks. The machine family must support that count.
+C4A/N4A configurations require GVNIC and Hyperdisk Balanced boot storage. C4A
+Local SSD counts are validated against the selected fixed machine shape; N4A
+does not support Local SSD. See the [Google machine reference](https://docs.cloud.google.com/compute/docs/general-purpose-machines).
+Scratch data is disposable and deletion removes it. Drift and deletion checks
+still reject unexpected persistent disk attachments.
+
+New Google resource names use `<profile>-<role>`, for example
+`walter-gcp-compute` and `walter-gcp-boot-volume`. Ownership continues to require
+recorded provider identity and deployment labels/descriptions; a name grants no
+ownership. Empty `compute-http-sources` disables the HTTP/HTTPS firewall rule for
+SSH-only deployments.

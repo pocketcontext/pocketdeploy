@@ -227,7 +227,7 @@ class GCP:
             self.state.set_meta(key, None)
 
     def _name(self, role):
-        return 'pd-' + self.state.deployment_id + '-' + role
+        return self.config['profile'] + '-' + role
 
     def _tag(self):
         return 'pd-' + self.state.deployment_id
@@ -273,15 +273,35 @@ class GCP:
         interfaces = item.get('networkInterfaces', [])
         if len(interfaces) != 1 or interfaces[0].get('subnetwork') != self.base + self._subnet() or interfaces[0].get('network') != self.base + self._network():
             changed.append('network')
+        if len(interfaces) != 1 or interfaces[0].get('nicType', 'VIRTIO_NET') != self.config.get('gcp-nic-type', 'VIRTIO_NET'):
+            changed.append('nic-type')
         metadata = {i.get('key'): i.get('value') for i in item.get('metadata', {}).get('items', [])}
         if (str(metadata.get('enable-oslogin', '')).lower() != 'false'
                 or str(metadata.get('block-project-ssh-keys', '')).lower() != 'true'
                 or item.get('serviceAccounts') or item.get('tags', {}).get('items') != [self._tag()]):
             changed.append('identity')
-        attachments = item.get('disks', [])
-        if not disk or len(attachments) != 1 or attachments[0].get('source') != disk.get('selfLink') or not attachments[0].get('boot') or attachments[0].get('autoDelete'):
-            changed.append('boot-disk')
+        if not self._attachments_match(item, disk):
+            changed.append('disk-attachments')
         return changed + self._disk_drift(disk)
+
+    def _attachments_match(self, item, disk):
+        attachments = item.get('disks', [])
+        boot = [d for d in attachments if d.get('boot')]
+        scratch = [d for d in attachments if not d.get('boot')]
+        return bool(disk and len(boot) == 1
+                    and boot[0].get('source') == disk.get('selfLink')
+                    and not boot[0].get('autoDelete')
+                    and len(scratch) == self.config.get('gcp-local-ssd-count', 0)
+                    and all(d.get('type') == 'SCRATCH' and d.get('interface') == 'NVME'
+                            and not d.get('source') for d in scratch))
+
+    def _scratch_disks(self):
+        # These machine types attach their fixed scratch capacity automatically.
+        if self.config.get('gcp-machine-type', '').endswith('-lssd'):
+            return []
+        return [{'type': 'SCRATCH', 'interface': 'NVME', 'autoDelete': True,
+                 'initializeParams': {'diskType': self._zone() + '/diskTypes/local-ssd'}}
+                for _ in range(self.config.get('gcp-local-ssd-count', 0))]
 
     def _disk_drift(self, disk):
         changed = []
@@ -379,8 +399,9 @@ class GCP:
                         'machineType': self._zone() + '/machineTypes/' + self.config.get('gcp-machine-type', 'e2-small'),
                         'tags': {'items': [self._tag()]}, 'serviceAccounts': [],
                         'metadata': {'items': [{'key': k, 'value': v} for k, v in metadata.items()]},
-                        'disks': [{'boot': True, 'autoDelete': False, 'source': disk['selfLink']}],
+                        'disks': [{'boot': True, 'autoDelete': False, 'source': disk['selfLink']}] + self._scratch_disks(),
                         'networkInterfaces': [{'network': self.base + self._network(), 'subnetwork': self.base + self._subnet(),
+                                               'nicType': self.config.get('gcp-nic-type', 'VIRTIO_NET'),
                                                'accessConfigs': [{'name': 'External NAT', 'type': 'ONE_TO_ONE_NAT'}]}]}
             if self.state.get_meta('gcp-pending-' + role):
                 pending = self.state.get_meta('gcp-pending-' + role)
@@ -447,8 +468,7 @@ class GCP:
                 raise DeployError('Pending GCP deletion identity differs.')
             if role == 'compute' and item:
                 disk = self._find('boot-volume')
-                attachments = item.get('disks', [])
-                if not disk or len(attachments) != 1 or attachments[0].get('source') != disk.get('selfLink') or attachments[0].get('autoDelete'):
+                if not self._attachments_match(item, disk):
                     raise DeployError('GCP deletion requires a recorded non-auto-delete boot disk.')
             if role == 'boot-volume' and item and item.get('users'):
                 compute = self._find('compute', allow_missing=bool(self.state.get_meta(self.delete_pending_key)))

@@ -88,8 +88,8 @@ launchers retain their explicit package pins until deliberately updated.
 
 Existing VPCs/subnets, routing, cloud accounts/projects and API enablement remain
 operator-managed. PocketDeploy creates a single public IPv4 Ubuntu 24.04 server,
-its owned firewall resources and boot storage. Resizing, replacement, extra disks,
-reserved addresses and cross-cloud data migration are outside this version.
+its owned firewall resources and boot storage. Google Cloud also supports explicitly configured disposable Local SSD storage.
+Resizing, replacement, extra persistent disks, reserved addresses and cross-cloud data migration are outside this version.
 Cloudflare, Resend, GitHub, ONCE and Vault workflows remain shared.
 
 Provider/account/project/network scope is bound to local state and checked during
@@ -722,3 +722,13 @@ manually edit SQLite. Ordinary convergence and deletion refuse an incomplete
 transfer. After adoption, `plan` and `converge` apply the normal proxied-A policy.
 Keep the previous manager disabled and save a new Vault checkpoint before
 removing its obsolete local state.
+
+## Python integration
+
+Applications can depend on a pinned PocketDeploy package and reuse its compute
+adapters, state journal, host keys and SSH transport. `Host.run_python(connection,
+source, payload, timeout=1200)` runs trusted Python as root over pinned SSH,
+passing the JSON payload through stdin and parsing JSON stdout. Put credentials
+in the payload, never in source text. Remote errors suppress stdout/stderr.
+`Host.ssh(connection, command=None)` provides an interactive or command session.
+These interfaces share the same transport as ONCE deployment operations.

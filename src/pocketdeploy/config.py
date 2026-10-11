@@ -40,7 +40,7 @@ ROOT_KEYS = set(DEFAULTS) | {
     'digitalocean-vpc-id', 'digitalocean-size', 'digitalocean-image',
     'gcp-project', 'gcp-zone', 'gcp-network', 'gcp-subnet', 'gcp-account', 'gcp-auth',
     'gcp-machine-type', 'gcp-image', 'gcp-image-project', 'gcp-image-family',
-    'gcp-boot-disk-size-gb', 'gcp-boot-disk-type',
+    'gcp-boot-disk-size-gb', 'gcp-boot-disk-type', 'gcp-nic-type', 'gcp-local-ssd-count',
 }
 
 PROVIDER_DEFAULTS = {
@@ -50,7 +50,8 @@ PROVIDER_DEFAULTS = {
                      'digitalocean-image': 'ubuntu-24-04-x64'},
     'gcp': {'gcp-machine-type': 'e2-small', 'gcp-image-project': 'ubuntu-os-cloud',
             'gcp-image-family': 'ubuntu-2404-lts-amd64',
-            'gcp-boot-disk-size-gb': 50, 'gcp-boot-disk-type': 'pd-balanced'},
+            'gcp-boot-disk-size-gb': 50, 'gcp-boot-disk-type': 'pd-balanced',
+            'gcp-nic-type': 'VIRTIO_NET', 'gcp-local-ssd-count': 0},
 }
 
 
@@ -144,6 +145,24 @@ def validate(c):
             raise DeployError('gcp-account cannot select an Application Default Credentials identity.')
         if type(c.get('gcp-boot-disk-size-gb')) is not int or c['gcp-boot-disk-size-gb'] < 10:
             raise DeployError('gcp-boot-disk-size-gb must be an integer of at least 10.')
+        if c.get('gcp-nic-type', 'VIRTIO_NET') not in ('GVNIC', 'VIRTIO_NET'):
+            raise DeployError('gcp-nic-type must be GVNIC or VIRTIO_NET.')
+        count = c.get('gcp-local-ssd-count', 0)
+        if type(count) is not int or not 0 <= count <= 32:
+            raise DeployError('gcp-local-ssd-count must be an integer from 0 to 32.')
+        if c['gcp-machine-type'].endswith('-lssd') and count == 0:
+            raise DeployError('Local SSD machine types require a positive expected gcp-local-ssd-count.')
+        machine = c['gcp-machine-type']
+        if machine.startswith(('c4a-', 'n4a-')):
+            if c.get('gcp-nic-type') != 'GVNIC':
+                raise DeployError('C4A/N4A require gcp-nic-type GVNIC.')
+            if c['gcp-boot-disk-type'] != 'hyperdisk-balanced':
+                raise DeployError('C4A/N4A require gcp-boot-disk-type hyperdisk-balanced.')
+            shape = re.fullmatch(r'c4a-(?:standard|highmem)-(4|8|16|32|48|64|72)-lssd', machine)
+            expected = {4: 1, 8: 2, 16: 4, 32: 6, 48: 10, 64: 14, 72: 16}.get(
+                int(shape.group(1))) if shape else 0
+            if count != expected:
+                raise DeployError('gcp-local-ssd-count does not match the C4A/N4A machine type.')
         for key in ('gcp-account', 'gcp-image'):
             if key in c and (not isinstance(c[key], str) or not c[key] or c[key].startswith('-')
                              or any(ord(char) < 32 for char in c[key])):

@@ -116,3 +116,25 @@ def test_terminating_compute_requires_matching_provider_and_shutdown_evidence(tm
 def test_invalid_gcp_auth_selection_rejected(tmp_path, extra):
     with pytest.raises(DeployError, match='gcp-auth|gcp-account'):
         configuration(tmp_path, 'gcp', **extra)
+
+
+@pytest.mark.parametrize('extra', [
+    {'gcp-nic-type': 'invalid'}, {'gcp-local-ssd-count': True},
+    {'gcp-local-ssd-count': -1}, {'gcp-local-ssd-count': 33},
+    {'gcp-machine-type': 'c4a-standard-4-lssd'},
+])
+def test_invalid_gcp_local_storage_or_nic_rejected(tmp_path, extra):
+    with pytest.raises(DeployError, match='gcp-nic-type|gcp-local-ssd-count'):
+        configuration(tmp_path, 'gcp', **extra)
+
+
+@pytest.mark.parametrize('machine,count', [('c4a-standard-4-lssd', 1), ('c4a-highmem-32-lssd', 6),
+                                         ('c4a-standard-72-lssd', 16), ('n4a-standard-4', 0)])
+def test_arm_machine_requirements(tmp_path, machine, count):
+    fields = {'gcp-machine-type': machine, 'gcp-local-ssd-count': count,
+              'gcp-nic-type': 'GVNIC', 'gcp-boot-disk-type': 'hyperdisk-balanced'}
+    configuration(tmp_path, 'gcp', **fields)
+    for change in ({'gcp-nic-type': 'VIRTIO_NET'}, {'gcp-boot-disk-type': 'pd-balanced'},
+                   {'gcp-local-ssd-count': count + 1}):
+        with pytest.raises(DeployError, match='require|does not match'):
+            configuration(tmp_path, 'gcp', **{**fields, **change})
