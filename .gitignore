@@ -11,6 +11,7 @@
 *.key
 *.tfstate*
 # Local tooling
+node_modules/
 .venv*/
 .devenv/
 .direnv/

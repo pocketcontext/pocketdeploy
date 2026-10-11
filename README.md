@@ -52,14 +52,8 @@ Python dependencies. Blue is pinned to a tested Git commit. `direnv allow` is
 optional; `.envrc` loads devenv and an optional ignored `.envrc.private`.
 Nothing automatically sources private files during deployment or restoration.
 
-The Nix flake exports `packages.<system>.cloud-clis` for deployment shells.
-It supplies the pinned `cf` and `resend` executables from `tools/cloud-clis/`.
-Consumers pin this repository by commit in `devenv.yaml`, follow their existing
-`nixpkgs` input, and use `inputs.pocketdeploy.packages.${pkgs.stdenv.hostPlatform.system}.cloud-clis`.
-The shared package definition also builds this repository's development tools.
-Exports cover Linux amd64/arm64 and Apple Silicon macOS. Validate builds on each
-native platform; the patched nixpkgs input requires a matching builder even for
-foreign-system evaluation. Intel macOS is excluded by the pinned nixpkgs.
+The development shell supplies Node.js 22 and installs the root `package-lock.json`
+with npm, adding `node_modules/.bin` to `PATH` for the pinned Cloudflare and Resend CLIs.
 
 The portable launcher `./pocketdeploy` is a symlink to the executable bundled in
 `skills/pocketdeploy/`. Copy that executable into a deployment repository or onto
@@ -466,7 +460,7 @@ Full adoption of `once-pocketcontext-v2` is not implemented or performed.
 
 Use `devenv shell` for pinned `cf`, `resend` and `gh` tools. Cloudflare
 1.0.0-beta.14 and Resend 2.23.0 dependencies are locked in
-`tools/cloud-clis/package-lock.json` and built with a fixed Nix dependency hash;
+the root `package-lock.json` and installed by devenv using npm;
 Cloudflare CLI is beta. s-nail runs only on the deployment host; host setup installs
 the Ubuntu distribution package when at least one managed application enables
 `smtp: true`. Its version is not pinned, and no local s-nail is required.

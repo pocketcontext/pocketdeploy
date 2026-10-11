@@ -61,8 +61,10 @@ polling change was validated synthetically, not with another paid deployment.
 Normal ownership/preflight checks remain strict. Final validation: **688 tests
 passed**, `uv build`, skill validation and `git diff --check` passed.
 
-Safe receipts, synthetic probes and private state remain in ignored
-`.colors-do-live-20261010/`. No shared networking, managed DNS, SMTP domains or
+The ignored `.colors-do-live-20261010/` receipts, synthetic probes and private
+state were removed during repository cleanup on 11 October 2026, after confirming
+successful deletion, zero local resources/pending steps and no remaining SSH keys.
+No shared networking, managed DNS, SMTP domains or
 GitHub environments were changed. Application email delivery, Vault recovery and
 populated application backup restoration were not tested. No live test server
 remains. Package publication and portable launcher repinning remain pending.
@@ -111,8 +113,10 @@ Live checks passed:
   SQLite reported zero resources and zero pending steps, with zero generated key
   files remaining.
 
-The live configuration, private state and safe probe receipts remain under ignored
-`.colors-gcp-live-20261010-183722/` in the local checkout. This test did not modify
+The ignored `.colors-gcp-live-20261010-183722/` configuration, private state and
+probe receipts were removed during repository cleanup on 11 October 2026, after
+confirming successful deletion, zero local resources/pending steps and no remaining
+SSH keys. This test did not modify
 root OCI configuration, production deployments, shared networking, managed DNS,
 Resend domains or GitHub environments. The default VPC's inherited SSH permissions
 are broader than the dedicated test rule, so this does not prove exclusive ingress
