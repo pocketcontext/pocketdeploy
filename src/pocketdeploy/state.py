@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .common import DeployError
+from .diagnostics import validate_diagnostic
 
 
 def _private_path(path):
@@ -152,6 +153,13 @@ class State:
                             (operation, workflow, desired_hash, 'running'))
         return operation
 
+    def record_diagnostic(self, operation, diagnostic):
+        """Attach only validated evidence to an existing locally owned operation."""
+        self._writable()
+        safe = validate_diagnostic(diagnostic)
+        if safe is not None and self.db.execute('SELECT 1 FROM operations WHERE id=?', (operation,)).fetchone():
+            self.set_meta('operation-diagnostic:' + operation, safe)
+
     def finish_operation(self, operation, status):
         self._writable()
         if status not in {'succeeded', 'failed', 'interrupted', 'complete', 'completed'}:
@@ -217,9 +225,14 @@ class State:
         receipt = self.get_meta('vault-state-document', {})
         backup = {key: receipt[key] for key in ('document', 'version', 'saved_at')
                   if isinstance(receipt, dict) and isinstance(receipt.get(key), str)}
+        operations = [dict(r) for r in self.db.execute(
+            'SELECT id,workflow,status,started,finished FROM operations ORDER BY rowid DESC LIMIT 10')]
+        for item in operations:
+            diagnostic = validate_diagnostic(self.get_meta('operation-diagnostic:' + item['id']))
+            if diagnostic is not None:
+                item['diagnostic'] = diagnostic
         return {'deployment_id': self.deployment_id,
                 'last_vault_backup': backup or None,
                 'resource_count': self.db.execute('SELECT count(*) FROM resources').fetchone()[0],
                 'pending_steps': self.db.execute("SELECT count(*) FROM steps WHERE status='pending'").fetchone()[0],
-                'operations': [dict(r) for r in self.db.execute(
-                    'SELECT id,workflow,status,started,finished FROM operations ORDER BY rowid DESC LIMIT 10')]}
+                'operations': operations}

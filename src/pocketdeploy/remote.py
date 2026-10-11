@@ -17,6 +17,9 @@ import sys
 import time
 import urllib.request
 
+if 'build_diagnostic' not in globals():
+    from pocketdeploy.diagnostics import build_diagnostic, CommandError
+
 STAGE = 'request'
 BASE = Path('/var/lib/pocketdeploy')
 MANIFEST = BASE / 'manifest.json'
@@ -28,11 +31,18 @@ CHECKSUMS = {
 
 
 def run(*args, timeout=None):
-    result = subprocess.run(args, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout,
-                            env={'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
-                                 'HOME': '/root', 'DEBIAN_FRONTEND': 'noninteractive', 'ONCE_NO_SELF_UPDATE': '1'})
+    started = time.monotonic()
+    try:
+        result = subprocess.run(args, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout,
+                                env={'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+                                     'HOME': '/root', 'DEBIAN_FRONTEND': 'noninteractive', 'ONCE_NO_SELF_UPDATE': '1'})
+    except subprocess.TimeoutExpired:
+        raise CommandError(build_diagnostic(STAGE, 'timeout', elapsed_seconds=time.monotonic() - started)) from None
+    except OSError:
+        raise CommandError(build_diagnostic(STAGE, 'unavailable', elapsed_seconds=time.monotonic() - started)) from None
     if result.returncode:
-        raise RuntimeError('subprocess failed; output suppressed')
+        raise CommandError(build_diagnostic(STAGE, 'nonzero_exit', returncode=result.returncode,
+                                           elapsed_seconds=time.monotonic() - started))
     return result.stdout
 
 
@@ -684,5 +694,5 @@ if __name__ == '__main__':
                 'host is retired; convergence is disabled', 'application did not stop cleanly',
                 'host retirement ownership verification failed', 'application adoption evidence does not match',
                 'application already has managed ownership'}
-        print(json.dumps({'error': str(exc) if str(exc) in safe else 'operation failed; output suppressed', 'stage': STAGE}))
+        print(json.dumps({'error': str(exc) if str(exc) in safe else 'operation failed; output suppressed', 'stage': STAGE, 'diagnostic': getattr(exc, 'diagnostic', None)}))
         sys.exit(1)

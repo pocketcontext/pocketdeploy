@@ -41,7 +41,9 @@ def recorded_operation(state, command, desired_hash):
     operation = state.begin_operation(command, desired_hash)
     try:
         yield operation
-    except BaseException:
+    except BaseException as exc:
+        if getattr(exc, 'diagnostic', None) is not None:
+            state.record_diagnostic(operation, exc.diagnostic)
         state.finish_operation(operation, 'failed')
         raise
     else:

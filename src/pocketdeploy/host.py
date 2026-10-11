@@ -1,4 +1,5 @@
 """SSH transport with deployment-owned host trust and no payload in argv."""
+from .diagnostics import build_diagnostic, validate_diagnostic
 import json
 import hashlib
 import stat
@@ -172,7 +173,7 @@ class Host:
             return self._remote_request(connection, action, timeout=budget)
 
     def _remote_request(self, connection, action, extra=None, timeout=1200):
-        source = Path(__file__).with_name('remote.py').read_text()
+        source = Path(__file__).with_name('diagnostics.py').read_text() + '\n' + Path(__file__).with_name('remote.py').read_text()
         applications = self.config.get('once', {}).get('applications', [])
         if action == 'bootstrap':
             applications = [{'smtp': any(app.get('smtp') for app in applications)}]
@@ -185,8 +186,12 @@ class Host:
             request.update(extra)
         result = self._python_process(connection, source, request, timeout)
         if result.returncode:
+            diagnostic = build_diagnostic('ssh-python', 'nonzero_exit', returncode=result.returncode, elapsed_seconds=getattr(result, "elapsed_seconds", None))
             try:
                 response = json.loads(result.stdout)
+                diagnostic = validate_diagnostic(response.get('diagnostic'), allowed_operations={
+                    'request', 'cloud-init', 'docker-install', 'docker-service', 'host-firewall',
+                    'once-download', 'once-service', *APPLICATION_ERRORS}) or diagnostic
                 error = response.get('error')
                 stage = response.get('stage')
                 error = error if isinstance(error, str) else None
@@ -195,14 +200,14 @@ class Host:
                 error = None
                 stage = None
             if stage in {'cloud-init', 'docker-install', 'docker-service', 'host-firewall', 'once-download', 'once-service'}:
-                raise DeployError('Host bootstrap failed at ' + stage + '; output suppressed')
+                raise DeployError('Host bootstrap failed at ' + stage + '; output suppressed', diagnostic=diagnostic)
             if error not in SAFE_ERRORS and isinstance(stage, str) and stage in APPLICATION_ERRORS:
-                raise DeployError(APPLICATION_ERRORS[stage], code=stage.replace('-', '_'))
-            raise DeployError('Host operation failed' + (': ' + error if error in SAFE_ERRORS else '; output suppressed'))
+                raise DeployError(APPLICATION_ERRORS[stage], code=stage.replace('-', '_'), diagnostic=diagnostic)
+            raise DeployError('Host operation failed' + (': ' + error if error in SAFE_ERRORS else '; output suppressed'), diagnostic=diagnostic)
         try:
             return json.loads(result.stdout)
         except ValueError:
-            raise DeployError('Host returned invalid response; output suppressed') from None
+            raise DeployError('Host returned invalid response; output suppressed', diagnostic=build_diagnostic('ssh-python', 'invalid_response')) from None
 
     def prepare_transport(self, connection):
         """Resolve pinned trust once on the controller thread for concurrent use."""
@@ -220,11 +225,11 @@ class Host:
         """
         result = self._python_process(connection, source, payload, timeout)
         if result.returncode:
-            raise DeployError('Remote Python operation failed; output suppressed')
+            raise DeployError('Remote Python operation failed; output suppressed', diagnostic=build_diagnostic('ssh-python', 'nonzero_exit', returncode=result.returncode, elapsed_seconds=getattr(result, "elapsed_seconds", None)))
         try:
             return json.loads(result.stdout)
         except ValueError:
-            raise DeployError('Host returned invalid response; output suppressed') from None
+            raise DeployError('Host returned invalid response; output suppressed', diagnostic=build_diagnostic('ssh-python', 'invalid_response')) from None
 
     def resolved_app(self, app):
         if not app.get('smtp'):
@@ -240,7 +245,7 @@ class Host:
         return smtp_test(self, connection, settings, recipient)
 
     def install_github(self, connection, targets):
-        source = Path(__file__).with_name('remote.py').read_text()
+        source = Path(__file__).with_name('diagnostics.py').read_text() + '\n' + Path(__file__).with_name('remote.py').read_text()
         with operation('SSH: GitHub deployment authority'):
             return self._remote_request(connection, 'github-install', {
                 'targets': [{**target, 'app': self.resolved_app(target['app'])} for target in targets], 'user': connection.get('user', 'ubuntu'), 'source': source})

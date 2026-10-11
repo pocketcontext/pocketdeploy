@@ -377,7 +377,9 @@ def _execute(args, reporter=None):
                 else:
                     raise DeployError('Unsupported workflow.')
                 state.finish_operation(operation, 'succeeded')
-            except BaseException:
+            except BaseException as exc:
+                if getattr(exc, 'diagnostic', None) is not None:
+                    state.record_diagnostic(operation, exc.diagnostic)
                 state.finish_operation(operation, 'failed')
                 raise
             return result
@@ -409,7 +411,7 @@ def main():
             return code if code >= 0 else 128 - code
         reporter.success(result, elapsed_seconds=time.monotonic() - started)
     except DeployError as exc:
-        reporter.failure(str(exc), code=exc.code, stage=exc.stage or reporter.failed_stage,
+        reporter.failure(str(exc), code=exc.code, stage=exc.stage or reporter.failed_stage, diagnostic=exc.diagnostic,
                          elapsed_seconds=time.monotonic() - started)
         return 2 if exc.code == 'invalid_usage' else 1
     except KeyboardInterrupt:

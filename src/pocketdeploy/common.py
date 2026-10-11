@@ -1,35 +1,53 @@
 """Shared safe command and path primitives. Never echo subprocess failures."""
 import os
 import subprocess
+import time
+from .diagnostics import build_diagnostic, validate_diagnostic
 from pathlib import Path
 
 class DeployError(Exception):
     """Only fixed, non-secret messages should reach this exception."""
 
     def __init__(self, message, *, code="operation_failed", stage=None,
-                 retryable=False, retry_after=None, status=None):
+                 retryable=False, retry_after=None, status=None, diagnostic=None):
         super().__init__(message)
         self.code = code
         self.stage = stage
         self.retryable = retryable
         self.retry_after = retry_after
         self.status = status
+        self.diagnostic = validate_diagnostic(diagnostic)
 
 
-def run(args, *, input=None, timeout=120, env=None, error_classifier=None):
+def run(args, *, input=None, timeout=120, env=None, error_classifier=None, operation="command"):
+    started = time.monotonic()
+    def diagnostic(category, returncode=None):
+        return build_diagnostic(operation, category, returncode=returncode, elapsed_seconds=time.monotonic() - started)
     try:
         r = subprocess.run(args, input=input, capture_output=True, text=True,
                            timeout=timeout, env=env)
     except subprocess.TimeoutExpired:
-        raise DeployError('Command timed out; output suppressed.', code="command_timeout") from None
+        raise DeployError('Command timed out; output suppressed.', code="command_timeout", diagnostic=diagnostic("timeout")) from None
     except OSError:
-        raise DeployError('Command unavailable; output suppressed.', code="command_unavailable") from None
+        raise DeployError('Command unavailable; output suppressed.', code="command_unavailable", diagnostic=diagnostic("unavailable")) from None
     if r.returncode:
         if error_classifier is not None:
             classified = error_classifier(r.stderr)
             if classified is not None:
+                if classified.diagnostic is None:
+                    category = {
+                        'provider_authentication_failed': 'authentication',
+                        'provider_permission_denied': 'permission',
+                        'provider_rate_limited': 'rate_limit',
+                        'provider_tls_failed': 'tls',
+                        'provider_connection_failed': 'connection',
+                        'provider_validation_failed': 'rejected',
+                        'provider_unavailable': 'http',
+                    }.get(classified.code, 'nonzero_exit')
+                    classified.diagnostic = build_diagnostic(operation, category, returncode=r.returncode,
+                        elapsed_seconds=time.monotonic() - started, http_status=classified.status)
                 raise classified from None
-        raise DeployError('Command failed; output suppressed.', code='command_failed') from None
+        raise DeployError('Command failed; output suppressed.', code='command_failed', diagnostic=diagnostic('nonzero_exit', r.returncode)) from None
     return r.stdout
 
 

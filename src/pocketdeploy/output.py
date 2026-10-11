@@ -1,4 +1,5 @@
 """Small stdout result and stderr progress boundary for safe CLI payloads."""
+from .diagnostics import validate_diagnostic
 from contextlib import contextmanager
 from contextvars import ContextVar
 import json
@@ -184,11 +185,16 @@ class Reporter:
                 lines.append(f'Completed in {elapsed_seconds:.1f}s.')
             print('\n'.join(lines), flush=True)
 
-    def failure(self, message, code='operation_failed', stage=None, elapsed_seconds=None):
+    def failure(self, message, code='operation_failed', stage=None, elapsed_seconds=None, diagnostic=None):
         error = {'code': code, 'message': message}
+        diagnostic = validate_diagnostic(diagnostic)
+        if diagnostic is not None:
+            error['diagnostic'] = diagnostic
         if stage:
             error['stage'] = stage
         if self.json_mode:
             self._emit({'schema_version': 1, 'command': self.command, 'ok': False, 'error': error}, elapsed_seconds)
         else:
             print('pocketdeploy: ' + (f'{stage}: ' if stage else '') + message, file=sys.stderr, flush=True)
+            if diagnostic is not None:
+                print('  diagnostic: ' + json.dumps(diagnostic, sort_keys=True), file=sys.stderr, flush=True)

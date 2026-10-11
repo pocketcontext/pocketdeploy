@@ -227,6 +227,14 @@ Commands print a readable summary to stdout by default. Use `--json` for
 scripts: stdout contains exactly one JSON envelope with `schema_version: 1`,
 `command`, `ok`, and `result` on success or `error` on failure. Error objects
 contain a safe `code` and `message`, plus the failing `stage` when known.
+Failures may also contain a validated `diagnostic` object: a caller-authored logical
+operation, fixed failure category, exit code or signal, elapsed seconds, and HTTP
+status when known. Application integrations may add validated task/user attribution.
+No command arguments, stdout, stderr, exception text or response bodies are included;
+there is no masking or output-excerpt mode. Unknown causes remain unknown rather
+than triggering a guess or a change in retry behavior. Validated diagnostics also remain attached to failed operation IDs in private state
+and appear in recent-operation status; retries retain this evidence. Command output
+is never journaled.
 Failures still exit nonzero. Output format does not change when redirected.
 Existing scripts that read JSON must add `--json` and read the `result` field.
 
@@ -757,3 +765,12 @@ controller thread. Its immutable transport supports concurrent `run_python`,
 state from worker threads. `pocketdeploy.ssh_config.update(payload, owner=...)`
 maintains application-owned SSH aliases under one shared local lock. Owners must
 keep their stable uppercase marker (Walter uses `WALTER`).
+
+Structured diagnostics are available in `pocketdeploy.diagnostics`:
+`build_diagnostic(operation, category, returncode=..., elapsed_seconds=...)` and
+`validate_diagnostic(value, allowed_operations=...)`. Use fixed operation names,
+never arguments or credentials. Treat remote JSON as untrusted: pass an explicit
+operation allowlist and explicit task/user allowlists if accepting attribution.
+`DeployError(diagnostic=...)` and `Reporter.failure(diagnostic=...)` preserve this
+allowlisted evidence. The diagnostics module uses only the standard library and
+can be injected into standalone remote programs before their source executes.

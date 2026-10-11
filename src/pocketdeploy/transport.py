@@ -9,6 +9,7 @@ import subprocess
 import time
 
 from .common import DeployError
+from .diagnostics import build_diagnostic
 
 
 def python_command(source):
@@ -28,13 +29,16 @@ class SSHTransport:
     argv: tuple[str, ...]
 
     def python_process(self, source, payload, timeout=1200):
+        started = time.monotonic()
         try:
-            return subprocess.run([*self.argv, python_command(source)],
+            result = subprocess.run([*self.argv, python_command(source)],
                                   input=json.dumps(payload), capture_output=True, text=True, timeout=timeout)
+            result.elapsed_seconds = time.monotonic() - started
+            return result
         except subprocess.TimeoutExpired:
-            raise DeployError('SSH host operation timed out; remote work may still be running.', code='command_timeout') from None
+            raise DeployError('SSH host operation timed out; remote work may still be running.', code='command_timeout', diagnostic=build_diagnostic('ssh-python', 'timeout', elapsed_seconds=time.monotonic() - started)) from None
         except OSError:
-            raise DeployError('SSH could not be started; check OpenSSH installation.', code='command_unavailable') from None
+            raise DeployError('SSH could not be started; check OpenSSH installation.', code='command_unavailable', diagnostic=build_diagnostic('ssh-python', 'unavailable', elapsed_seconds=time.monotonic() - started)) from None
 
     def run_python(self, connection, source, payload, timeout=1200):
         # Connection is retained for the Host-compatible interface, never used to retarget trust.
@@ -42,11 +46,11 @@ class SSHTransport:
             raise DeployError('Prepared SSH transport cannot change destination.')
         result = self.python_process(source, payload, timeout)
         if result.returncode:
-            raise DeployError('Remote Python operation failed; output suppressed')
+            raise DeployError('Remote Python operation failed; output suppressed', diagnostic=build_diagnostic('ssh-python', 'nonzero_exit', returncode=result.returncode, elapsed_seconds=getattr(result, "elapsed_seconds", None)))
         try:
             return json.loads(result.stdout)
         except ValueError:
-            raise DeployError('Host returned invalid response; output suppressed') from None
+            raise DeployError('Host returned invalid response; output suppressed', diagnostic=build_diagnostic('ssh-python', 'invalid_response')) from None
 
     def tunnel_argv(self, local_port, remote_port):
         for port in (local_port, remote_port):
