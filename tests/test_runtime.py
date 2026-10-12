@@ -15,6 +15,7 @@ def test_operation_records_interruptions():
 
 def test_compute_deletion_retains_keys_until_all_resources_gone():
     state, cloud, host = Mock(), Mock(), Mock()
+    host.cleanup_keys.return_value = {}
     cloud.resource_kinds = {'digitalocean-droplet'}
     state.resources.return_value = [{'kind': 'digitalocean-droplet'}]
     with pytest.raises(DeployError, match='unfinished resources'):
@@ -23,6 +24,34 @@ def test_compute_deletion_retains_keys_until_all_resources_gone():
     state.resources.side_effect = [[{'kind': 'digitalocean-droplet'}], []]
     delete_compute({'compute-prevent-destroy': False}, state, cloud, host, 'op')
     host.cleanup_keys.assert_called_once()
+
+
+@pytest.mark.parametrize('failure', ['cloud', 'changed-key', None])
+def test_compute_deletion_with_unrecorded_authority(tmp_path, failure):
+    from pocketdeploy.host import Host
+    from pocketdeploy.state import State
+    with State(tmp_path / 'state.sqlite', 'test', {}, create=True) as state:
+        host = Host({}, state, tmp_path)
+        host.known.parent.mkdir()
+        host.known.write_text('synthetic pre-existing trust')
+        host.prepare_keys()
+        cloud = Mock(resource_kinds=set())
+        cloud.delete.return_value = {'deleted': True}
+        if failure == 'cloud':
+            cloud.delete.side_effect = DeployError('synthetic cloud failure')
+        elif failure == 'changed-key':
+            host.pub.write_text('changed')
+        if failure:
+            with pytest.raises(DeployError):
+                delete_compute({'compute-prevent-destroy': False}, state, cloud, host, 'op')
+            assert host.key.exists()
+            if failure == 'changed-key':
+                cloud.delete.assert_not_called()
+        else:
+            result = delete_compute({'compute-prevent-destroy': False}, state, cloud, host, 'op')
+            assert result['local_keys'] == {'deleted_key_files': 4, 'retained_key_files': 1}
+            assert not host.key.exists()
+        assert host.known.read_text() == 'synthetic pre-existing trust'
 
 
 def test_compute_deletion_rejects_services_before_cloud_calls():

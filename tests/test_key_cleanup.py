@@ -33,9 +33,24 @@ def test_unrecorded_files_never_adopted_or_deleted(tmp_path):
         host.prepare_keys()
         state.set_meta('ssh-generated-files', {})
         host.prepare_keys()
-        with pytest.raises(DeployError, match='ownership is unrecorded'):
-            host.cleanup_keys()
+        assert host.plan_key_cleanup()[1]['action'] == 'retain'
+        assert host.cleanup_keys() == {'deleted_key_files': 0, 'retained_key_files': 5}
+        assert state.get_meta('ssh-generated-files') == {}
         assert all(p.exists() for p in (host.key, host.pub, host.hostkey, host.hostpub, host.known))
+
+
+def test_mixed_authority_only_deletes_recorded_files(tmp_path):
+    host, state = fixture(tmp_path)
+    with state:
+        host.prepare_keys()
+        original = host.key.read_bytes()
+        records = state.get_meta('ssh-generated-files')
+        del records[str(host.key.relative_to(tmp_path))]
+        state.set_meta('ssh-generated-files', records)
+        assert len(host.plan_key_cleanup()[0]['files']) == 4
+        assert host.cleanup_keys() == {'deleted_key_files': 4, 'retained_key_files': 1}
+        assert host.key.read_bytes() == original
+        assert host.cleanup_keys() == {'deleted_key_files': 0, 'retained_key_files': 1}
 
 
 def test_changed_keys_block_before_any_unlink(tmp_path):

@@ -218,6 +218,10 @@ It also revokes the owned Resend sending key, deletes its sending domain,
 and deletes owned email and website DNS records by recorded provider identity.
 Generated operator, server and GitHub SSH keys and known hosts are removed only
 after remote cleanup succeeds. A failed remote deletion preserves recovery keys.
+Configured SSH files without generation ownership records are retained and
+reported rather than blocking deletion of verified cloud resources. They are
+never adopted. Changed recorded SSH keys and unsafe cleanup paths still block
+deletion before cloud mutations.
 
 Externally managed networking, management credentials, `.envrc.private`, Git
 configuration, local SQLite deletion receipts and Vault history remain. No backup

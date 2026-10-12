@@ -65,7 +65,9 @@ def delete_compute(config, state, cloud, host, operation, *, before_cleanup=None
         raise DeployError('Compute deletion has unfinished resources; preserving SSH authority.')
     if before_cleanup:
         before_cleanup()
-    host.cleanup_keys()
+    key_cleanup = host.cleanup_keys()
+    if key_cleanup.get('retained_key_files'):
+        result = {**result, 'local_keys': key_cleanup}
     return result
 
 

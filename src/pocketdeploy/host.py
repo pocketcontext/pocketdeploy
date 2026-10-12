@@ -99,6 +99,7 @@ class Host:
         for repo in repositories:
             key = self.root / '.ssh' / ('github-' + hashlib.sha256(repo.lower().encode()).hexdigest()[:20])
             reserved.update({key, Path(str(key) + '.pub')})
+        owned, retained = [], []
         for path in paths:
             local_path(self.root, path)  # Reject symlinks created since initialization.
             if path in reserved:
@@ -110,26 +111,39 @@ class Host:
                 raise DeployError('SSH cleanup requires owned regular files without hardlinks.')
             record = records.get(str(path.relative_to(self.root)))
             if not record:
-                raise DeployError('SSH key ownership is unrecorded; verify provenance before deletion.')
+                # Configuration selects authority to use, not authority to delete.
+                # Existing files are never adopted, even after successful SSH use.
+                retained.append(path)
+                continue
             if record.get('mutable'):
                 if path != self.known:
                     raise DeployError('Only the recorded SSH known-hosts file may have mutable contents.')
             elif record.get('sha256') != hashlib.sha256(path.read_bytes()).hexdigest():
                 raise DeployError('SSH key contents changed since generation; refusing deletion.')
-        return paths
+            owned.append(path)
+        return owned, retained
 
     def plan_key_cleanup(self):
-        files = [str(path.relative_to(self.root)) for path in self._cleanup_paths() if path.exists()]
-        return [{'resource': 'ssh-key-files', 'action': 'delete' if files else 'absent', 'files': files}]
+        owned, retained = self._cleanup_paths()
+        files = [str(path.relative_to(self.root)) for path in owned]
+        actions = [{'resource': 'ssh-key-files', 'action': 'delete' if files else 'absent', 'files': files}]
+        if retained:
+            actions.append({'resource': 'ssh-key-files', 'action': 'retain',
+                            'reason': 'ownership-unrecorded',
+                            'files': [str(path.relative_to(self.root)) for path in retained]})
+        return actions
 
     def cleanup_keys(self):
-        paths = self._cleanup_paths()
+        paths, retained = self._cleanup_paths()
         existing = sum(path.exists() for path in paths)
         for path in paths:
             path.unlink(missing_ok=True)
         self.state.set_meta('ssh-generated-files', {})
         self.state.set_meta('ssh-host-trust', {})
-        return {'deleted_key_files': existing}
+        result = {'deleted_key_files': existing}
+        if retained:
+            result['retained_key_files'] = len(retained)
+        return result
 
     def cloud_init(self):
         return '#cloud-config\n' + json.dumps({'ssh_deletekeys': True, 'ssh_keys': {
