@@ -369,7 +369,8 @@ class Services:
             # Refresh attributes even when the prior recorded address is stale.
             record_id = _identifier(current)
             self.state.put_resource(name, 'cloudflare-dns', record_id,
-                                    {'zone': self.c['cloudflare-zone-id'], **desired})
+                                    {'zone': self.c['cloudflare-zone-id'], **desired},
+                                    owned=saved['owned'] if saved else True)
         # A verified current desired record resolves earlier write uncertainty.
         # Keep unrelated deletion/adoption intents and other records untouched.
         for old in self.state.db.execute(
