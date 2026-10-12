@@ -1,6 +1,6 @@
 # PocketDeploy
 
-PocketDeploy provisions and operates OCI, DigitalOcean and Google Cloud servers
+PocketDeploy provisions and operates OCI, DigitalOcean, Google Cloud and Hetzner servers
 and ONCE applications, with
 explicit resource ownership, resumable operations, and encrypted deployment
 recovery through VaultContext. It manages compute, firewall rules, DNS, outbound
@@ -8,7 +8,7 @@ email configuration, and GitHub deployment access from versioned configuration.
 
 ## Scope and recovery
 
-PocketDeploy supports OCI, DigitalOcean Droplets and Google Compute Engine,
+PocketDeploy supports OCI, DigitalOcean Droplets, Google Compute Engine and Hetzner Cloud,
 existing provider networking, ONCE application
 delivery, Cloudflare DNS, Resend sending domains, and GitHub deployment
 environments. One active operator per deployment is supported; local locking
@@ -76,24 +76,32 @@ grant access beyond the dedicated NSG; an NSG does not subtract those permission
 
 ## Compute provider selection
 
-Set `provider-compute` to `oci` (the existing default), `digitalocean` or `gcp`.
+Set `provider-compute` to `oci` (the existing default), `digitalocean`, `gcp` or `hcloud`.
 Use [the provider configuration reference](skills/pocketdeploy/references/providers.md)
-and the corresponding `examples/colors-digitalocean.yml` or `examples/colors-gcp.yml`.
+and the corresponding `examples/colors-digitalocean.yml`, `examples/colors-gcp.yml`
+or `examples/colors-hcloud.yml`. Hetzner requires the official `hcloud` CLI
+on PATH, separately from the current development shell packages.
 Google Cloud and DigitalOcean have passed disposable live deployment checks,
-including HTTPS, updates, reboot and SMTP TLS connectivity; see
+including HTTPS, updates, reboot and SMTP TLS connectivity. Hetzner has passed
+initial live compute provisioning; its application validation is still pending. See
 [verification](docs/verification.md). Application email delivery and
 populated application backup recovery remain separate checks.
-The bundled portable launcher includes these provider adapters. Previously copied
-launchers retain their explicit package pins until deliberately updated.
+Portable launchers include the provider adapters available at their pinned
+package revision. Previously copied launchers retain that pin until deliberately updated.
 
 Existing VPCs/subnets, routing, cloud accounts/projects and API enablement remain
 operator-managed. PocketDeploy creates a single public IPv4 Ubuntu 24.04 server,
-its owned firewall resources and boot storage. Google Cloud also supports explicitly configured disposable Local SSD storage.
-Resizing, replacement, extra persistent disks, reserved addresses and cross-cloud data migration are outside this version.
+its owned firewall resources and boot storage. Hetzner also owns a separately
+recorded primary IPv4. Google Cloud supports explicitly configured disposable Local SSD storage.
+Resizing, replacement, extra persistent disks, adoption of existing reserved
+addresses and cross-cloud data migration are outside this version.
 Cloudflare, Resend, GitHub, ONCE and Vault workflows remain shared.
 
-Provider/account/project/network scope is bound to local state and checked during
-Vault restoration. Switching `provider-compute` cannot migrate an existing
+Provider scope is bound to local state and checked during Vault restoration.
+Hetzner binds location and network mode; its token API does not provide a stable
+project ID here, so retain the same project through token rotation and rely on
+recorded resource IDs and ownership labels. Other providers bind their configured
+account/project/network scope. Switching `provider-compute` cannot migrate an existing
 deployment: create a fresh deployment and separately restore application data and
 cut over DNS. Existing OCI state and checkpoints keep their original scope format.
 
@@ -311,7 +319,8 @@ parameter references can continue to point to existing R2 services.
 
 OCI resource names default to `<profile>-once-compute` and
 `<profile>-once-firewall`. New DigitalOcean Droplets use `<profile>-compute`;
-existing identities and names are preserved. A profile is durable; an ONCE upgrade does not rename
+Hetzner uses `<profile>-server`, `<profile>-firewall` and `<profile>-ipv4`.
+Existing identities and names are preserved. A profile is durable; an ONCE upgrade does not rename
 it. A separate UUID establishes controller identity and ownership tags. Exact
 resource IDs, provider scope and lifecycle are stored in SQLite. Names alone
 never authorize adoption or deletion. Existing application/shared resource names
@@ -757,6 +766,24 @@ local authority. `delete_compute(config, state, cloud, host, operation)` is for
 compute-only applications: it enforces destruction protection, refuses service
 resources and removes keys only after all recorded resources are gone. Callers
 must stop their application and finish data copying before deletion.
+
+`pocketdeploy.dns.CloudflareDNS(config, state, hosts)` manages explicit A-record
+hostnames independently of ONCE. Use `preflight()`, `plan(connection)`,
+`converge(connection, operation_id)`, `plan_delete()` and `delete(operation_id)`
+under the deployment lock. It shares record ownership, pagination, pending-write
+reconciliation and deletion checks with ONCE DNS. Proxying defaults to true with
+Auto TTL; constructor arguments `proxied` and `ttl` can select another policy.
+Without `cloudflare-zone-id`, zone discovery requires one unambiguous common
+zone. `COLORS_PAR_CLOUDFLARE_API_TOKEN` maps to the CLI token only in its child
+environment; the operator environment remains unchanged.
+
+For migration to new owned compute, `evidence(host)` returns allowlisted record
+identity and a routing-settings fingerprint. `adopt(connection, operation_id,
+evidence)` requires exact evidence and `previous_dns_manager_disabled: true`.
+It preserves the source address, record ID, proxy and TTL while transferring
+the ownership comment. A separate convergence updates routing to the target.
+Keep the previous manager disabled, preserve interrupted-operation state and
+coordinate application writers before switching production traffic.
 
 `Host.prepare_transport(connection)` prepares pinned SSH arguments once on the
 controller thread. Its immutable transport supports concurrent `run_python`,

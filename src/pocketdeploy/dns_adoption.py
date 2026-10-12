@@ -56,6 +56,13 @@ def adopt(config, state, connection, operation, evidence):
     if evidence.get('previous_dns_manager_disabled') is not True:
         raise DeployError('Disable and drain the previous DNS manager before adoption.')
     services = _context(config, state, connection, evidence)
+    return adopt_record(services, state, operation, evidence)
+
+
+def adopt_record(services, state, operation, evidence):
+    """Transfer exact routing evidence using an already validated DNS context."""
+    if evidence.get('previous_dns_manager_disabled') is not True:
+        raise DeployError('Disable and drain the previous DNS manager before adoption.')
     name = 'dns:A:' + evidence['host']
     key = 'dns-adoption:' + name
     pending = state.get_meta(key)

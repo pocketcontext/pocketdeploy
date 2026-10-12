@@ -1,0 +1,15 @@
+profile: example-hcloud
+provider-compute: hcloud
+hcloud-location: nbg1
+hcloud-server-type: cx23
+hcloud-image: ubuntu-24.04
+compute-network-mode: none
+compute-prevent-destroy: true
+compute-ssh-sources: ['192.0.2.1/32']
+compute-http-sources: ['0.0.0.0/0']
+compute-ingress:
+  - protocol: udp
+    ports: ['443']
+    sources: ['0.0.0.0/0']
+provider-dns: no-infra
+provider-smtp: no-infra

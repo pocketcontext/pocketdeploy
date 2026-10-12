@@ -39,6 +39,7 @@ ROOT_KEYS = set(DEFAULTS) | {
     'cloudflare-zone-id', 'smtp-domain', 'smtp-from', 'resend-region',
     'ssh-host-private-key-file', 'ssh-host-public-key-file',
     'smtp-port', 'smtp-security',
+    'hcloud-server-type', 'hcloud-location', 'hcloud-image', 'compute-network-mode',
     'digitalocean-account-id', 'digitalocean-token-env', 'digitalocean-region',
     'digitalocean-vpc-id', 'digitalocean-size', 'digitalocean-image',
     'gcp-project', 'gcp-zone', 'gcp-network', 'gcp-subnet', 'gcp-account', 'gcp-auth',
@@ -47,6 +48,7 @@ ROOT_KEYS = set(DEFAULTS) | {
 }
 
 PROVIDER_DEFAULTS = {
+    'hcloud': {'hcloud-server-type': 'cx23', 'hcloud-image': 'ubuntu-24.04', 'compute-network-mode': 'none'},
     'oci': {},  # Preserve existing resolved configuration and checkpoint identities.
     'digitalocean': {'digitalocean-token-env': 'COLORS_PAR_DIGITALOCEAN_ACCESS_TOKEN',
                      'digitalocean-size': 's-1vcpu-2gb',
@@ -109,10 +111,10 @@ def normalize(raw, *, path, env=None, resolve=True, aliases=None, defaults=None,
     overlaid = read_pars({**DEFAULTS, **raw}, environment)
     provider = overlaid.get('provider-compute')
     if not isinstance(provider, str) or provider not in PROVIDER_DEFAULTS:
-        raise DeployError('Supported compute providers are oci, digitalocean and gcp.')
+        raise DeployError('Supported compute providers are oci, digitalocean, gcp and hcloud.')
     # Apply defaults only to the selected provider, including environment overrides.
     defaults = PROVIDER_DEFAULTS[provider]
-    prefixes = ('oci-', 'digitalocean-', 'gcp-')
+    prefixes = ('oci-', 'digitalocean-', 'gcp-', 'hcloud-')
     foreign = tuple(prefix for prefix in prefixes if prefix != provider + '-')
     if any(key.startswith(foreign) for key in raw):
         raise DeployError('Compute configuration contains fields for a different provider.')
@@ -136,6 +138,8 @@ def normalize(raw, *, path, env=None, resolve=True, aliases=None, defaults=None,
 
 def scope(c):
     provider = c.get('provider-compute', 'oci')
+    if provider == 'hcloud':
+        return {'provider': provider, 'location': c['hcloud-location'], 'network': 'none'}
     if provider == 'digitalocean':
         return {'provider': provider, 'account': c['digitalocean-account-id'],
                 'region': c['digitalocean-region'], 'vpc': c.get('digitalocean-vpc-id', 'regional-default')}
@@ -154,10 +158,11 @@ def validate(c):
         raise DeployError('Only configuration schema 1 is supported.')
     provider = c['provider-compute']
     if provider not in PROVIDER_DEFAULTS:
-        raise DeployError('Supported compute providers are oci, digitalocean and gcp.')
+        raise DeployError('Supported compute providers are oci, digitalocean, gcp and hcloud.')
     if not re.fullmatch(r'[a-z][a-z0-9-]{0,39}', str(c.get('profile', ''))):
         raise DeployError('Profile must be a lowercase identifier of at most 40 characters.')
     required = {
+        'hcloud': ['hcloud-server-type', 'hcloud-location', 'hcloud-image'],
         'oci': ['oci-config-file-profile', 'oci-compartment-id', 'oci-subnet-id', 'oci-availability-domain'],
         'digitalocean': ['digitalocean-account-id', 'digitalocean-region',
                          'digitalocean-size', 'digitalocean-image', 'digitalocean-token-env'],
@@ -169,6 +174,8 @@ def validate(c):
             raise DeployError('Required compute provider configuration is missing or invalid.')
         if c[key].startswith('-') or any(ord(char) < 32 for char in c[key]):
             raise DeployError('Invalid compute provider identifier.')
+    if provider == 'hcloud' and c.get('compute-network-mode') != 'none':
+        raise DeployError('Hetzner supports compute-network-mode none only.')
     if 'digitalocean-vpc-id' in c and (not isinstance(c['digitalocean-vpc-id'], str) or not re.fullmatch(r'[A-Za-z0-9-]+', c['digitalocean-vpc-id'])):
         raise DeployError('Invalid DigitalOcean VPC identifier.')
     if provider == 'digitalocean' and not re.fullmatch(r'[A-Z_][A-Z0-9_]*', c['digitalocean-token-env']):
@@ -217,8 +224,8 @@ def validate(c):
                 int(port) > 65535 for port in ports) or len(set(ports)) != len(ports)):
         raise DeployError('compute-ssh-ports must contain unique quoted TCP ports from 1 to 65535.')
     ingress = c.get('compute-ingress', [])
-    if not isinstance(ingress, list) or (ingress and provider != 'digitalocean'):
-        raise DeployError('compute-ingress currently requires DigitalOcean and a list of rules.')
+    if not isinstance(ingress, list) or (ingress and provider not in ('digitalocean', 'hcloud')):
+        raise DeployError('compute-ingress currently requires DigitalOcean or Hetzner and a list of rules.')
     for rule in ingress:
         if (not isinstance(rule, dict) or set(rule) != {'protocol', 'ports', 'sources'}
                 or rule['protocol'] not in ('tcp', 'udp')

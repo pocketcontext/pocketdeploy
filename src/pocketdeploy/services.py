@@ -142,15 +142,15 @@ def _provider_error(tool, stderr):
     return failure(' request failed; provider output suppressed. Reconcile uncertain writes before retrying.', 'provider_request_failed')
 
 
-def _call(tool, args, *, timeout=90, deadline=None):
+def _call(tool, args, *, timeout=90, deadline=None, env=None):
     label = 'Cloudflare request' if tool == 'cf' else 'Resend request'
     read = ((tool == 'resend' and args[:2] in (['domains', 'get'], ['domains', 'list'], ['api-keys', 'list'])) or
-            (tool == 'cf' and (args[:2] == ['zones', 'get'] or args[:3] == ['dns', 'records', 'list'])))
+            (tool == 'cf' and (args[:2] in (['zones', 'get'], ['zones', 'list']) or args[:3] == ['dns', 'records', 'list'])))
 
     def attempt(remaining=None):
         cap = min(timeout, remaining) if remaining is not None else timeout
         with operation(label):
-            raw = run([tool, *args], timeout=cap, error_classifier=lambda stderr: _provider_error(tool, stderr))
+            raw = run([tool, *args], timeout=cap, **({'env': env} if env is not None else {}), error_classifier=lambda stderr: _provider_error(tool, stderr))
         if not raw.strip() and 'delete' in args:
             return {}
         try:

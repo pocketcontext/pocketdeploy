@@ -1,6 +1,6 @@
 ---
 name: pocketdeploy
-description: Configure and operate PocketDeploy OCI, DigitalOcean and Google Cloud VPS deployments from colors.yml using the portable Python CLI, including plans, convergence, SSH, deletion and VaultContext recovery. Use for deployment operations, not application business data.
+description: Configure and operate PocketDeploy OCI, DigitalOcean, Google Cloud and Hetzner VPS deployments from colors.yml using the portable Python CLI, including plans, convergence, SSH, deletion and VaultContext recovery. Use for deployment operations, not application business data.
 ---
 
 # PocketDeploy
@@ -35,9 +35,10 @@ deployment, start with the configuration reference's example and fresh state;
 do not copy the package repository's live test identity. A profile is durable;
 resource names are descriptive, while recorded IDs and deployment UUID tags
 establish ownership. Existing networks/subnets remain externally managed.
-For DigitalOcean or Google Cloud, read [providers.md](references/providers.md).
+For DigitalOcean, Google Cloud or Hetzner, read [providers.md](references/providers.md).
 Provider changes require fresh deployment state; they do not migrate applications.
-The bundled launcher includes all three provider backends. Google Cloud and
+Hetzner requires the official `hcloud` CLI on PATH. Newly published launchers
+include the provider backends available at their pinned commit. Google Cloud and
 DigitalOcean have disposable live verification receipts. Previously copied
 launchers retain their original package pins until deliberately updated.
 

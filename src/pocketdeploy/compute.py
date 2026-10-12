@@ -22,6 +22,9 @@ class ComputeProvider(Protocol):
 
 
 def provider_class(name):
+    if name == 'hcloud':
+        from .hcloud import HCloud
+        return HCloud
     if name == 'oci':
         from .oci import OCI
         return OCI

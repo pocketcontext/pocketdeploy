@@ -1,5 +1,32 @@
 # Deployment verification
 
+## Hetzner initial provisioning — 12 October 2026
+
+The separately authorized `rybbit-hcloud` deployment created its owned Hetzner
+server, firewall and primary IPv4 through the new Python adapter and `hcloud`
+CLI. The controller recorded exact resource identities in private SQLite state.
+The legacy `rybbit-hetzner` deployment remained the production source.
+
+This is compute-creation evidence only. Application preparation, public HTTPS,
+data restoration, ingestion, backup recovery and final production migration
+were still pending at this checkpoint. No Hetzner deletion or full lifecycle
+verification is claimed here. Rybbit's deployment verification record will carry
+its application-level results.
+
+The live run exposed cloud-init's deprecation-only exit code 2 during host-key
+rotation. The shared helper now requests JSON status and accepts that code only
+when initialization is done, fatal errors are absent and exported notices are
+exclusively DEPRECATED. Other warnings and malformed status remain failures;
+raw provider and cloud-init output stay suppressed. See the official
+[cloud-init return-code explanation](https://docs.cloud-init.io/en/latest/explanation/return_codes.html).
+
+Validation after this change: **901 synthetic tests passed** across PocketDeploy,
+including Hetzner ownership/lifecycle, application-independent DNS and narrow
+cloud-init acceptance/rejection tests. Published package and launcher pins are
+recorded by the subsequent release; this entry does not claim a copied-launcher
+or completed live application check.
+
+
 ## Application adoption and launcher release — 10 October 2026
 
 Published package commit `8de7fc0b2a3063c137b173e8f5e6fc4e8b8026c4` adds

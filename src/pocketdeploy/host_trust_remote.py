@@ -10,6 +10,20 @@ import tempfile
 def run(*argv):
     result = subprocess.run(argv, capture_output=True, text=True)
     if result.returncode:
+        if argv == ('cloud-init', 'status', '--wait', '--format', 'json') and result.returncode == 2:
+            # Since cloud-init 23.4, completed initialization with exported
+            # warnings returns 2. Only deprecation notices are tolerable here;
+            # other warnings can indicate incomplete bootstrap configuration.
+            try:
+                status = json.loads(result.stdout)
+                recoverable = status.get('recoverable_errors')
+                if (status.get('status') == 'done' and status.get('errors') == []
+                        and isinstance(recoverable, dict) and set(recoverable) == {'DEPRECATED'}
+                        and isinstance(recoverable['DEPRECATED'], list) and recoverable['DEPRECATED']
+                        and all(isinstance(message, str) for message in recoverable['DEPRECATED'])):
+                    return result.stdout
+            except (ValueError, AttributeError, TypeError):
+                pass
         raise RuntimeError('host trust setup failed')
     return result.stdout
 
@@ -36,7 +50,7 @@ def install(request):
     if os.geteuid() != 0:
         raise RuntimeError('host trust setup requires root')
     # Cloud-init must finish before replacing its bootstrap identity.
-    run('cloud-init', 'status', '--wait')
+    run('cloud-init', 'status', '--wait', '--format', 'json')
     key = Path('/etc/ssh/pocketdeploy_ed25519')
     public = request['public'].split()
     if len(public) < 2 or public[0] != 'ssh-ed25519':

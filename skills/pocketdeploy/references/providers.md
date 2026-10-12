@@ -1,6 +1,6 @@
 # Compute providers
 
-Select `provider-compute: oci`, `digitalocean` or `gcp`. Each deployment has one
+Select `provider-compute: oci`, `digitalocean`, `gcp` or `hcloud`. Each deployment has one
 provider and one server. Local state and Vault checkpoints bind provider scope;
 changing providers requires a new deployment, separate application-data restore
 and DNS cutover. Existing OCI scope and configuration defaults are preserved.
@@ -170,3 +170,37 @@ New Google resource names use `<profile>-<role>`, for example
 recorded provider identity and deployment labels/descriptions; a name grants no
 ownership. Empty `compute-http-sources` disables the HTTP/HTTPS firewall rule for
 SSH-only deployments.
+
+## Hetzner Cloud
+
+Set `provider-compute: hcloud`, `hcloud-location`, `hcloud-server-type` and
+`hcloud-image` (Ubuntu 24.04 image name or quoted ID). `compute-network-mode`
+accepts only `none`. Install the official `hcloud` CLI; the adapter uses its JSON
+output, waits for actions and suppresses raw output. Supply `COLORS_PAR_HCLOUD_TOKEN`
+(or `HCLOUD_TOKEN`) through the operator environment. Tokens never appear in
+arguments or deployment state. CLI contexts and endpoint/debug environment
+settings are ignored.
+
+The controller creates `<profile>-server`, `<profile>-firewall` and
+`<profile>-ipv4`, each bound to the deployment UUID with labels and recorded exact
+IDs. Cloud-init installs the operator public key; no account SSH-key registration
+is created. Public IPv6 is disabled and no private network is attached. Firewall
+sources are IPv4 CIDRs; `compute-ingress` supports additional TCP/UDP ports, such
+as UDP 443 for HTTP/3. Empty HTTP sources remove TCP HTTP access; applications must
+also omit their UDP HTTP/3 ingress when closing HTTP access.
+
+The primary IPv4 is independently owned with auto-delete disabled. Server deletion
+is followed by explicit firewall and IPv4 deletion, retaining receipts across
+interruptions. Server delete/rebuild protection is enabled at creation; authorized
+controller deletion first disables it on the exact owned server. Local
+`compute-prevent-destroy` remains authoritative. External attachments, missing
+recorded resources, ambiguous UUID labels, image/type/location drift and uncertain
+absent create outcomes fail closed. Names never authorize adoption.
+
+Hetzner's project-scoped token API does not expose a stable project identity here.
+Scope binds provider, location and network mode; retain credentials for the same
+project through token rotations. Every recorded resource must remain visible with
+its exact ID and UUID ownership label, so changing to another project fails closed
+once resources exist. Before first provisioning the operator must select the
+intended project. Checkpoint state and SSH authority; a fresh UUID must not be used
+to adopt existing production resources. No in-place ownership transfer is provided.

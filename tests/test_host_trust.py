@@ -149,7 +149,7 @@ def test_remote_rotation_waits_for_cloud_init_and_reloads_only_valid_identity():
 
     with patch.object(remote.os, 'geteuid', return_value=0), patch.object(remote, 'atomic'), patch.object(remote, 'run', side_effect=run) as calls:
         assert remote.install({'private': 'synthetic-private', 'public': 'ssh-ed25519 synthetic'}) == {'installed': True}
-    assert calls.call_args_list[0].args == ('cloud-init', 'status', '--wait')
+    assert calls.call_args_list[0].args == ('cloud-init', 'status', '--wait', '--format', 'json')
     assert calls.call_args_list[-1].args == ('systemctl', 'reload', 'ssh')
 
 
