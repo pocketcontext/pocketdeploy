@@ -364,10 +364,18 @@ class Services:
             if len(verified) != 1 or not all(verified[0].get(k) == v for k, v in body.items()):
                 raise DeployError('DNS change is not verified; retry reconciliation.')
             self.state.complete(step, {'id': record_id})
-        elif not saved:
-            # A UUID-marked record can recover a lost create response.
-            self.state.put_resource(name, 'cloudflare-dns', _identifier(current),
+        else:
+            # A verified UUID-marked record recovers lost create/update responses.
+            # Refresh attributes even when the prior recorded address is stale.
+            record_id = _identifier(current)
+            self.state.put_resource(name, 'cloudflare-dns', record_id,
                                     {'zone': self.c['cloudflare-zone-id'], **desired})
+        # A verified current desired record resolves earlier write uncertainty.
+        # Keep unrelated deletion/adoption intents and other records untouched.
+        for old in self.state.db.execute(
+                "SELECT id,payload FROM steps WHERE step=? AND status='pending'", (name,)).fetchall():
+            if json.loads(old['payload']) in ({'action': 'create'}, {'action': 'update'}):
+                self.state.complete(old['id'], {'id': record_id, 'reconciled': True})
         self.state.set_meta(pending, False)
         return result
 

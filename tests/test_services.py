@@ -65,6 +65,74 @@ def test_lost_dns_response_never_recreates(service, monkeypatch):
         service._dns(desired, op)
 
 
+@pytest.mark.parametrize('existing', [False, True])
+@pytest.mark.parametrize('failure', ['response', 'verification'])
+def test_dns_lost_write_reconciles_journal_and_attributes(service, monkeypatch, existing, failure):
+    desired = {'name': 'www.example.com', 'type': 'A', 'content': '192.0.2.2',
+               'proxied': True, 'ttl': 1}
+    name = 'dns:A:' + desired['name']
+    prior = {**desired, 'content': '192.0.2.1'}
+    records = [{'id': 'dns-id', **prior, 'comment': service.marker}] if existing else []
+    if existing:
+        service.state.put_resource(name, 'cloudflare-dns', 'dns-id', {'zone': 'zone', **prior})
+    reads_fail, writes = False, []
+    def read(host):
+        if reads_fail:
+            raise DeployError('verification unavailable')
+        return records
+    def mutate(args):
+        nonlocal reads_fail
+        writes.append(args)
+        records[:] = [{'id': 'dns-id', **json.loads(args[args.index('--body') + 1])}]
+        if failure == 'response':
+            raise DeployError('lost response')
+        reads_fail = True
+        return records[0]
+    monkeypatch.setattr(service, '_records', read)
+    monkeypatch.setattr(service, '_cf', mutate)
+    operation = service.state.begin_operation('converge', 'hash')
+    with pytest.raises(DeployError):
+        service._dns(desired, operation)
+    original = service.state.db.execute("SELECT id FROM steps WHERE step=? AND status='pending'", (name,)).fetchone()['id']
+    assert service.state.get_meta('pending:' + name) is True
+    unrelated = [service.state.intent(operation, name, {'action': 'delete', 'id': 'dns-id'}),
+                 service.state.intent(operation, name, {'action': 'adopt', 'record_id': 'dns-id'}),
+                 service.state.intent(operation, 'dns:A:other.example.com', {'action': 'update'})]
+    reads_fail = False
+    # Plans can observe successful routing, but must leave recovery state intact.
+    assert service._dns(desired)['action'] == 'noop'
+    assert service.state.get_meta('pending:' + name) is True
+    assert service.state.db.execute('SELECT status FROM steps WHERE id=?', (original,)).fetchone()['status'] == 'pending'
+    retry = service.state.begin_operation('converge', 'hash')
+    assert service._dns(desired, retry)['action'] == 'noop'
+    assert len(writes) == 1
+    saved = service.state.get_resource(name)
+    assert saved['provider_id'] == 'dns-id'
+    assert saved['attributes'] == {'zone': 'zone', **desired}
+    assert service.state.get_meta('pending:' + name) is False
+    recovered = service.state.db.execute('SELECT status,result FROM steps WHERE id=?', (original,)).fetchone()
+    assert recovered['status'] == 'complete'
+    assert json.loads(recovered['result']) == {'id': 'dns-id', 'reconciled': True}
+    for step in unrelated:
+        assert service.state.db.execute('SELECT status FROM steps WHERE id=?', (step,)).fetchone()['status'] == 'pending'
+
+
+def test_dns_changed_record_does_not_resolve_pending_journal(service, monkeypatch):
+    desired = {'name': 'www.example.com', 'type': 'A', 'content': '192.0.2.2'}
+    name = 'dns:A:' + desired['name']
+    service.state.put_resource(name, 'cloudflare-dns', 'dns-id', {'zone': 'zone', **desired})
+    operation = service.state.begin_operation('converge', 'hash')
+    step = service.state.intent(operation, name, {'action': 'update'})
+    service.state.set_meta('pending:' + name, True)
+    monkeypatch.setattr(service, '_records', lambda host: [
+        {'id': 'replacement', **desired, 'comment': service.marker, 'proxied': False, 'ttl': 300}])
+    monkeypatch.setattr(service, '_cf', lambda args: pytest.fail('must not mutate changed identity'))
+    with pytest.raises(DeployError, match='outside'):
+        service._dns(desired, operation)
+    assert service.state.get_meta('pending:' + name) is True
+    assert service.state.db.execute('SELECT status FROM steps WHERE id=?', (step,)).fetchone()['status'] == 'pending'
+
+
 def test_domain_existing_requires_recorded_identity(service, monkeypatch):
     monkeypatch.setattr(service, '_resend', lambda a: {'data': [{'id': 'old', 'name': service.c['smtp-domain']}]})
     with pytest.raises(DeployError, match='outside'):
