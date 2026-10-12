@@ -822,3 +822,12 @@ operation allowlist and explicit task/user allowlists if accepting attribution.
 `DeployError(diagnostic=...)` and `Reporter.failure(diagnostic=...)` preserve this
 allowlisted evidence. The diagnostics module uses only the standard library and
 can be injected into standalone remote programs before their source executes.
+
+`Host.run_python` and prepared transport accept optional `progress(stage, event)`
+and `allowed_stages` arguments. Remote programs may emit newline-delimited JSON
+objects containing exactly `stage` and `event` (`started`, `completed`, `failed`)
+on stderr. Only allowlisted events are delivered, on the calling thread; raw
+stderr is discarded and buffers are bounded. `output.remote_progress(stages)`
+provides a callback that maps these events to verbose timed spans and heartbeats.
+Final JSON and process status remain authoritative; events never complete durable
+state. This allows one remote lock to cover all provisioning stages.

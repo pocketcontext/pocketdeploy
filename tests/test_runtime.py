@@ -58,9 +58,9 @@ def test_prepared_transport_does_not_revisit_state_and_keeps_ssh_flags(tmp_path)
     assert 'ForwardAgent=no' in transport.argv
     host.trusted_public.side_effect = AssertionError('worker accessed controller')
     with patch('pocketdeploy.transport.subprocess.run', return_value=Mock(returncode=0, stdout='{"ok": true}')) as run:
-        assert transport.run_python(connection, 'trusted source', {'secret': 'private'}) == {'ok': True}
-        assert 'private' not in ' '.join(run.call_args.args[0])
-        assert 'private' in run.call_args.kwargs['input']
+        assert transport.run_python(connection, 'trusted source', {'secret': 'SYNTHETIC_CREDENTIAL_SENTINEL_7f19'}) == {'ok': True}
+        assert 'SYNTHETIC_CREDENTIAL_SENTINEL_7f19' not in ' '.join(run.call_args.args[0])
+        assert 'SYNTHETIC_CREDENTIAL_SENTINEL_7f19' in run.call_args.kwargs['input']
 
 
 @pytest.mark.parametrize('failure', [ValueError, OSError])

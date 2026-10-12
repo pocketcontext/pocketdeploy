@@ -29,6 +29,52 @@ def operation(label):
             yield
 
 
+
+@contextmanager
+def remote_progress(allowed_stages):
+    """Turn validated remote events into local timed spans without remote text.
+
+    Events are advisory and must never replace final response validation.
+    Only one remote span is active; unmatched or out-of-order events are ignored.
+    """
+    allowed = frozenset(allowed_stages)
+    active = None
+    active_name = None
+    failed = False
+
+    def close(error=None):
+        nonlocal active, active_name
+        manager, active = active, None
+        active_name = None
+        if manager is not None:
+            manager.__exit__(type(error) if error is not None else None, error, None)
+
+    def progress(stage, event):
+        nonlocal active, active_name, failed
+        if stage not in allowed or failed:
+            return
+        if event == 'started' and active is None:
+            active_name = stage
+            active = operation(stage)
+            active.__enter__()
+        elif stage == active_name and event in ('completed', 'failed'):
+            if event == 'failed':
+                failed = True
+                close(RuntimeError('Remote stage failed; output suppressed.'))
+            else:
+                close()
+
+    try:
+        yield progress
+    except BaseException as error:
+        close(error)
+        raise
+    finally:
+        # Missing terminal event is not proof of success. The caller still
+        # validates final JSON, and an incomplete span is reported as failed.
+        close(RuntimeError('Remote stage did not complete; output suppressed.'))
+
+
 def _actions(actions):
     return [f"  {item.get('resource', item.get('host', 'resource'))}: {item.get('action', 'unknown')}"
             + (f" ({', '.join(item['changed_fields'])})" if item.get('changed_fields') else '')

@@ -217,13 +217,17 @@ class Host:
     def _python_process(self, connection, source, payload, timeout):
         return self.prepare_transport(connection).python_process(source, payload, timeout)
 
-    def run_python(self, connection, source, payload, timeout=1200):
+    def run_python(self, connection, source, payload, timeout=1200, *, progress=None, allowed_stages=()):
         """Execute trusted Python as root with private JSON input and JSON output.
 
         Source must contain program text only; credentials belong in payload.
         Provider/remote output is never included in errors.
         """
-        result = self._python_process(connection, source, payload, timeout)
+        if progress is None:
+            result = self._python_process(connection, source, payload, timeout)
+        else:
+            result = self.prepare_transport(connection).python_process(
+                source, payload, timeout, progress=progress, allowed_stages=allowed_stages)
         if result.returncode:
             raise DeployError('Remote Python operation failed; output suppressed', diagnostic=build_diagnostic('ssh-python', 'nonzero_exit', returncode=result.returncode, elapsed_seconds=getattr(result, "elapsed_seconds", None)))
         try:

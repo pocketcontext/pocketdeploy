@@ -3,6 +3,8 @@ import base64
 from contextlib import contextmanager
 from dataclasses import dataclass
 import json
+import os
+import selectors
 import shlex
 import socket
 import subprocess
@@ -24,15 +26,100 @@ def python_command(source):
     return "sudo python3 -c '" + wrapper + "'"
 
 
+def _stream_python(argv, payload, timeout, progress, allowed_stages):
+    """Drain private output; forward only bounded, strictly allowlisted events.
+
+    Callbacks run on the caller thread. Progress is advisory, never evidence of
+    success: the final JSON response and process status remain authoritative.
+    """
+    data = memoryview(json.dumps(payload).encode())
+    stdout = bytearray()
+    pending = bytearray()
+    discarding = False
+    deadline = time.monotonic() + timeout
+    with subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE) as process:
+        try:
+            with selectors.DefaultSelector() as selector:
+                for stream, events in ((process.stdin, selectors.EVENT_WRITE),
+                                       (process.stdout, selectors.EVENT_READ),
+                                       (process.stderr, selectors.EVENT_READ)):
+                    os.set_blocking(stream.fileno(), False)
+                    selector.register(stream, events)
+                while selector.get_map():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired('ssh-python', timeout)
+                    for key, _ in selector.select(min(remaining, .2)):
+                        stream = key.fileobj
+                        if stream is process.stdin:
+                            try:
+                                written = os.write(stream.fileno(), data[:65536])
+                                data = data[written:]
+                            except BrokenPipeError:
+                                data = data[len(data):]
+                            if not data:
+                                selector.unregister(stream)
+                                stream.close()
+                            continue
+                        chunk = os.read(stream.fileno(), 65536)
+                        if not chunk:
+                            selector.unregister(stream)
+                            stream.close()
+                            continue
+                        if stream is process.stdout:
+                            stdout.extend(chunk)
+                            if len(stdout) > 8 * 1024 * 1024:
+                                raise DeployError('Host returned oversized response; output suppressed',
+                                                  diagnostic=build_diagnostic('ssh-python', 'invalid_response'))
+                            continue
+                        # Process each byte so even a newline-free hostile stream
+                        # cannot grow memory beyond one short event record.
+                        for byte in chunk:
+                            if byte == 10:
+                                if not discarding:
+                                    try:
+                                        event = json.loads(pending)
+                                    except (ValueError, UnicodeDecodeError):
+                                        event = None
+                                    if (isinstance(event, dict) and set(event) == {'stage', 'event'}
+                                            and isinstance(event['stage'], str)
+                                            and event['stage'] in allowed_stages
+                                            and event['event'] in ('started', 'completed', 'failed')):
+                                        progress(event['stage'], event['event'])
+                                pending.clear()
+                                discarding = False
+                            elif not discarding:
+                                pending.append(byte)
+                                if len(pending) > 1024:
+                                    pending.clear()
+                                    discarding = True
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired('ssh-python', timeout)
+                process.wait(timeout=remaining)
+                return subprocess.CompletedProcess(argv, process.returncode,
+                                                   stdout.decode('utf-8', errors='replace'), '')
+        except BaseException:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+            raise
+
+
 @dataclass(frozen=True)
 class SSHTransport:
     argv: tuple[str, ...]
 
-    def python_process(self, source, payload, timeout=1200):
+    def python_process(self, source, payload, timeout=1200, *, progress=None, allowed_stages=()):
         started = time.monotonic()
         try:
-            result = subprocess.run([*self.argv, python_command(source)],
-                                  input=json.dumps(payload), capture_output=True, text=True, timeout=timeout)
+            if progress is None:
+                result = subprocess.run([*self.argv, python_command(source)],
+                                      input=json.dumps(payload), capture_output=True, text=True, timeout=timeout)
+            else:
+                result = _stream_python([*self.argv, python_command(source)], payload, timeout,
+                                        progress, frozenset(allowed_stages))
             result.elapsed_seconds = time.monotonic() - started
             return result
         except subprocess.TimeoutExpired:
@@ -40,11 +127,11 @@ class SSHTransport:
         except OSError:
             raise DeployError('SSH could not be started; check OpenSSH installation.', code='command_unavailable', diagnostic=build_diagnostic('ssh-python', 'unavailable', elapsed_seconds=time.monotonic() - started)) from None
 
-    def run_python(self, connection, source, payload, timeout=1200):
+    def run_python(self, connection, source, payload, timeout=1200, *, progress=None, allowed_stages=()):
         # Connection is retained for the Host-compatible interface, never used to retarget trust.
         if connection.get('ip') != self.argv[-1] or connection.get('user', 'ubuntu') != self.argv[-3]:
             raise DeployError('Prepared SSH transport cannot change destination.')
-        result = self.python_process(source, payload, timeout)
+        result = self.python_process(source, payload, timeout, progress=progress, allowed_stages=allowed_stages)
         if result.returncode:
             raise DeployError('Remote Python operation failed; output suppressed', diagnostic=build_diagnostic('ssh-python', 'nonzero_exit', returncode=result.returncode, elapsed_seconds=getattr(result, "elapsed_seconds", None)))
         try:
