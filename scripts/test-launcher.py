@@ -173,6 +173,9 @@ def main():
         unsafe = root / 'unsafe'
         unsafe.mkdir()
         unsafe_config = unsafe / 'colors.yml'
+        unsafe_config.write_text((fresh / 'colors.yml').read_text() + '\ncompute-ssh-ports: ["2022"]\n')
+        invoke(unsafe, 'init', '--json', '--quiet', expected='must include port 22')
+        assert not list(unsafe.glob('.colors.sqlite*')), 'Invalid SSH ports initialized state.'
         unsafe_config.write_text((fresh / 'colors.yml').read_text() + '\nssh-private-key-file: colors.yml\n')
         original = unsafe_config.read_bytes()
         invoke(unsafe, 'init', '--json', '--quiet', expected='distinct paths')
@@ -248,7 +251,7 @@ def main():
         assert token.read_text() not in expired_run.stdout + expired_run.stderr
         print(f'Expired synthetic OCI token rejected locally in {elapsed:.2f}s; OCI was not invoked.')
 
-    print('Portable launcher: 36 checks passed (no cloud access).')
+    print('Portable launcher: 37 checks passed (no cloud access).')
 
 
 if __name__ == '__main__':

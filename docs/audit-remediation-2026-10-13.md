@@ -44,9 +44,12 @@ pass both checks, so use an application readiness endpoint.
 
 ## Validation and release
 
-Source and isolated installed-wheel suites each passed 953 tests and 4 subtests.
-The wheel and source archive built successfully. Validation uses synthetic
-isolated fixtures, without cloud access. The portable
-launcher must be pinned only after the implementation commit is published and
-verified outside the source checkout. Previously copied launchers remain pinned
-until their owners update them.
+Source, isolated installed-wheel and published-package suites each passed 953
+tests and 4 subtests. The wheel and source archive built successfully. The
+published package is `766d27e7159efa06b7b5c96a74e5117b22019a30`; its Test and
+verification-image workflows passed, including image smoke and shutdown checks.
+The portable launcher was then pinned to that commit and passed 37 checks from
+an unrelated directory, including rejection of an SSH port list without 22.
+Local validation used synthetic isolated fixtures without cloud access. CI
+published the disposable verification image; no deployment was changed.
+Previously copied launchers remain pinned until their owners update them.
