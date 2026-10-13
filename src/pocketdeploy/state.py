@@ -92,6 +92,11 @@ class State:
                           'SELECT id,workflow,desired_hash,status,started,finished FROM operations LIMIT 0',
                           'SELECT id,operation_id,step,payload,status,result FROM steps LIMIT 0'):
                 self.db.execute(query)
+            if not read_only:
+                # Retired snapshots included application secrets. secure_delete
+                # clears deleted SQLite cells, not historical files or backups.
+                with self.db:
+                    self.db.execute("DELETE FROM meta WHERE key='desired-config'")
             self.deployment_id = identity['deployment_id']
         except (sqlite3.Error, ValueError, KeyError, TypeError):
             self.db.close()
@@ -175,6 +180,10 @@ class State:
                 )
             ) DELETE FROM operations WHERE id IN (SELECT id FROM resolved)
                 AND id NOT IN (SELECT id FROM resolved ORDER BY sequence DESC LIMIT 100)''')
+            self.db.execute('''DELETE FROM meta
+                WHERE key GLOB 'operation-diagnostic:*'
+                AND NOT EXISTS (SELECT 1 FROM operations
+                    WHERE meta.key = 'operation-diagnostic:' || operations.id)''')
 
     def intent(self, operation_id, step, payload):
         self._writable()

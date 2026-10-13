@@ -83,7 +83,7 @@ def normalize(raw, *, path, env=None, resolve=True, aliases=None, defaults=None,
     ``aliases`` maps input names to PocketDeploy names; conflicting spellings fail.
     Application-only fields must be removed by the caller. Paths are rooted beside
     ``path``. ``desired`` adds application settings to the fingerprint; callers
-    must omit credentials. ONCE bindings retain their existing fingerprint policy.
+    must omit credentials. ONCE environment values are excluded from the fingerprint.
     """
     path = Path(path).absolute()
     if not isinstance(raw, dict):
@@ -128,8 +128,15 @@ def normalize(raw, *, path, env=None, resolve=True, aliases=None, defaults=None,
     validate(config)
     if resolve:
         resolve_env(config, environment)
-    config['_desired_hash'] = hashlib.sha256(json.dumps(
-        {k: v for k, v in config.items() if not k.startswith('_')}, sort_keys=True).encode()).hexdigest()
+    # This journal fingerprint is not used to reconcile applications. Keep
+    # secret values out of it; host reconciliation checks the actual settings.
+    fingerprint = copy.deepcopy({k: v for k, v in config.items() if not k.startswith('_')})
+    for app in fingerprint.get('once', {}).get('applications', []):
+        app.pop('resolved-env', None)
+        bindings = app.get('env')
+        if isinstance(bindings, list):
+            app['env'] = [binding.split('=', 1)[0] for binding in bindings if isinstance(binding, str)]
+    config['_desired_hash'] = hashlib.sha256(json.dumps(fingerprint, sort_keys=True).encode()).hexdigest()
     if desired is not None:
         config['_desired_hash'] = hashlib.sha256(json.dumps(
             {'compute': config['_desired_hash'], 'application': desired}, sort_keys=True).encode()).hexdigest()
@@ -223,6 +230,8 @@ def validate(c):
             any(not isinstance(port, str) or not re.fullmatch(r'[1-9][0-9]{0,4}', port) or
                 int(port) > 65535 for port in ports) or len(set(ports)) != len(ports)):
         raise DeployError('compute-ssh-ports must contain unique quoted TCP ports from 1 to 65535.')
+    if '22' not in ports:
+        raise DeployError('compute-ssh-ports must include port 22 for controller SSH access.')
     ingress = c.get('compute-ingress', [])
     if not isinstance(ingress, list) or (ingress and provider not in ('digitalocean', 'hcloud')):
         raise DeployError('compute-ingress currently requires DigitalOcean or Hetzner and a list of rules.')

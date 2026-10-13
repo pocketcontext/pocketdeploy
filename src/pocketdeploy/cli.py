@@ -335,7 +335,6 @@ def _execute(args, reporter=None):
             operation = state.begin_operation(args.command, config['_desired_hash'])
             try:
                 if args.command == 'converge':
-                    state.set_meta('desired-config', {k: v for k, v in config.items() if not k.startswith('_')})
                     result = asyncio.run(converge(config, state, cloud, host, operation, reporter,
                                                  rotate_github_keys=getattr(args, 'rotate_github_keys', False),
                                                  smtp_verification_timeout=600 if smtp_timeout is None else smtp_timeout))

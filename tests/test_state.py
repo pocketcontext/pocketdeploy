@@ -174,3 +174,59 @@ def test_delete_receipt_cannot_remove_different_record(tmp_path):
             state.complete_delete('compute', step, 'pending-delete')
         assert state.get_resource('compute')['provider_id'] == 'replacement'
         assert state.safe_status()['pending_steps'] == 1
+
+
+def test_legacy_desired_config_cleanup_preserves_identity_and_readonly_state(tmp_path):
+    path = tmp_path / 'state'
+    marker = 'synthetic-retired-application-secret-' * 100
+    with State(path, 'test', {}, create=True) as state:
+        identity = state.deployment_id
+        state.set_meta('desired-config', {'once': {'env': [marker]}})
+        state.set_meta('retained', {'value': 'keep'})
+    original = path.read_bytes()
+    assert marker.encode() in original
+    with State(path, 'test', {}, read_only=True) as state:
+        assert state.get_meta('desired-config') is not None
+    assert path.read_bytes() == original
+    with pytest.raises(DeployError, match='identity'):
+        State(path, 'wrong-profile', {})
+    assert path.read_bytes() == original
+    with State(path, 'test', {}) as state:
+        assert state.deployment_id == identity
+        assert state.get_meta('desired-config') is None
+        assert state.get_meta('retained') == {'value': 'keep'}
+        assert state.db.execute('PRAGMA secure_delete').fetchone()[0] == 1
+        state.snapshot(tmp_path / 'snapshot')
+    assert marker.encode() not in path.read_bytes()
+    with State(tmp_path / 'snapshot', 'test', {}, read_only=True) as state:
+        assert state.get_meta('desired-config') is None
+
+
+def test_operation_pruning_removes_only_orphan_diagnostics(tmp_path):
+    from pocketdeploy.diagnostics import build_diagnostic
+    diagnostic = build_diagnostic('application_deploy', 'unknown')
+    with State(tmp_path / 'state', 'test', {}, create=True) as state:
+        state.set_meta('operation-diagnostic:legacy-orphan', diagnostic)
+        state.set_meta('unrelated', {'keep': True})
+        running = state.begin_operation('converge', 'hash')
+        state.record_diagnostic(running, diagnostic)
+        pending = state.begin_operation('converge', 'hash')
+        step = state.intent(pending, 'create', {})
+        state.record_diagnostic(pending, diagnostic)
+        state.finish_operation(pending, 'failed')
+        pruned = state.begin_operation('converge', 'hash')
+        state.record_diagnostic(pruned, diagnostic)
+        state.finish_operation(pruned, 'failed')
+        for _ in range(100):
+            recent = state.begin_operation('converge', 'hash')
+            state.record_diagnostic(recent, diagnostic)
+            state.finish_operation(recent, 'failed')
+        assert state.get_meta('operation-diagnostic:legacy-orphan') is None
+        assert state.get_meta('operation-diagnostic:' + pruned) is None
+        for operation in (running, pending, recent):
+            assert state.get_meta('operation-diagnostic:' + operation) == diagnostic
+        assert state.get_meta('unrelated') == {'keep': True}
+        state.complete(step, {})
+        state.finish_operation(state.begin_operation('converge', 'hash'), 'succeeded')
+        assert state.get_meta('operation-diagnostic:' + pending) is None
+        assert state.get_meta('operation-diagnostic:' + running) == diagnostic

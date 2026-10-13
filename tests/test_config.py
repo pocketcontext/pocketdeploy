@@ -63,12 +63,13 @@ def test_symlink_private_path_rejected(tmp_path):
         load(p,env={})
 
 
-def test_only_declared_bindings_are_captured_and_env_changes_have_new_identity(tmp_path):
+def test_only_declared_bindings_are_captured_and_secrets_do_not_affect_journal_hash(tmp_path):
     p = tmp_path / 'colors.yml'; p.write_text(BASE)
     a = load(p, env={'COLORS_PAR_APP_TEST_TOKEN': 'first', 'COLORS_PAR_UNRELATED_TOKEN': 'unrelated'})
     b = load(p, env={'COLORS_PAR_APP_TEST_TOKEN': 'second'})
     assert 'unrelated-token' not in a
-    assert a['_desired_hash'] != b['_desired_hash']
+    assert a['_desired_hash'] == b['_desired_hash']
+    assert a['_desired_hash'] == load(p, env={}, resolve=False)['_desired_hash']
 
 
 @pytest.mark.parametrize('value', ['true', 'false'])
@@ -184,7 +185,7 @@ def test_implicit_cloudflare_dns_requires_tls(tmp_path, flag, allowed):
 
 
 @pytest.mark.parametrize('ports', [[], [22], ['0'], ['65536'], ['022'], ['22', '22'],
-                                    ['22-2022'], ['all'], '22', [None], [{}]])
+                                    ['22-2022'], ['all'], '22', [None], [{}], ['2022'], ['80', '443']])
 def test_invalid_ssh_ports(tmp_path, ports):
     import json
     path = tmp_path / 'colors.yml'
@@ -228,3 +229,17 @@ def test_invalid_extra_ingress_rejected(tmp_path, rule):
     with pytest.raises(DeployError, match='Ingress'):
         normalize({'profile':'test','provider-compute':'digitalocean','digitalocean-account-id':'account',
                    'digitalocean-region':'lon1','compute-ingress':[rule]}, path=tmp_path/'colors.yml', env={})
+
+
+@pytest.mark.parametrize('resolve', [True, False])
+def test_literal_secret_values_do_not_affect_journal_hash(tmp_path, resolve):
+    path = tmp_path / 'colors.yml'
+    literal = BASE.replace('        TOKEN: app-test-token', '        - TOKEN=synthetic-first')
+    path.write_text(literal)
+    first = load(path, env={}, resolve=resolve)
+    path.write_text(literal.replace('synthetic-first', 'synthetic-second'))
+    assert load(path, env={}, resolve=resolve)['_desired_hash'] == first['_desired_hash']
+    path.write_text(literal.replace('TOKEN=', 'OTHER='))
+    assert load(path, env={}, resolve=resolve)['_desired_hash'] != first['_desired_hash']
+    path.write_text(literal.replace('example/image', 'example/other'))
+    assert load(path, env={}, resolve=resolve)['_desired_hash'] != first['_desired_hash']

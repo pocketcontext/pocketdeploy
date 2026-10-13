@@ -65,6 +65,7 @@ def test_compute_deletion_rejects_services_before_cloud_calls():
 
 def test_transport_is_pinned_and_loopback_only():
     t = SSHTransport(('ssh', '-F', '/dev/null', '-l', 'ubuntu', '--', '192.0.2.1'))
+    assert '-N' in t.tunnel_argv(9091, 9091)
     assert t.tunnel_argv(9091, 9091)[-2:] == ['--', '192.0.2.1']
     assert '127.0.0.1:9091:127.0.0.1:9091' in t.tunnel_argv(9091, 9091)
     assert t.rsync_shell() == 'ssh -F /dev/null -l ubuntu'
@@ -94,19 +95,23 @@ def test_prepared_transport_does_not_revisit_state_and_keeps_ssh_flags(tmp_path)
 
 @pytest.mark.parametrize('failure', [ValueError, OSError])
 def test_tunnel_cleans_process_when_application_fails(failure):
+    import os
     from unittest.mock import patch
     transport = SSHTransport(('ssh', '-l', 'ubuntu', '--', '192.0.2.1'))
     process = Mock()
     process.poll.return_value = None
-    socket_context = Mock()
-    socket_context.__enter__ = Mock(return_value=socket_context)
-    socket_context.__exit__ = Mock(return_value=False)
-    with patch('pocketdeploy.transport.socket.socket', return_value=socket_context), patch('pocketdeploy.transport.socket.create_connection', return_value=socket_context), patch('pocketdeploy.transport.subprocess.Popen', return_value=process), patch('pocketdeploy.transport.time.sleep'):
+    read_fd, write_fd = os.pipe()
+    process.stdout = os.fdopen(read_fd, 'rb')
+    os.write(write_fd, b'a' * 64)
+    os.close(write_fd)
+    with patch('pocketdeploy.transport.secrets.token_hex', return_value='a' * 64), patch('pocketdeploy.transport.subprocess.Popen', return_value=process):
         with pytest.raises(failure):
             with transport.tunnel(9091, 9091):
                 raise failure('application failure')
     process.terminate.assert_called_once()
     process.wait.assert_called_once_with(timeout=5)
+    assert process.stdout.closed
+    process.stdin.close.assert_called_once()
 
 
 def test_tunnel_rejects_occupied_port_without_starting_ssh():
@@ -144,9 +149,86 @@ def test_tunnel_port_probe_accepts_previous_forward_time_wait():
             ordinary_probe.bind(('127.0.0.1', port))
     process = Mock()
     process.poll.return_value = 1
+    import os
+    read_fd, write_fd = os.pipe()
+    os.close(write_fd)
+    process.stdout = os.fdopen(read_fd, 'rb')
     with patch('pocketdeploy.transport.subprocess.Popen', return_value=process) as spawn:
         with pytest.raises(DeployError, match='failed or timed out'):
             with transport.tunnel(port, 9091):
                 pytest.fail('synthetic exited SSH accepted')
     # Getting as far as Popen proves the real TIME_WAIT probe succeeded.
     spawn.assert_called_once()
+
+
+@pytest.mark.parametrize('acknowledgement', [b'', b'wrong', b'a' * 63])
+def test_tunnel_requires_complete_authenticated_acknowledgement(acknowledgement):
+    import os
+    import socket
+    from unittest.mock import patch
+    transport = SSHTransport(('ssh', '-l', 'ubuntu', '--', '192.0.2.1'))
+    process = Mock()
+    process.poll.return_value = None
+    read_fd, write_fd = os.pipe()
+    process.stdout = os.fdopen(read_fd, 'rb')
+    os.write(write_fd, acknowledgement)
+    os.close(write_fd)
+    # An attacker binds after the preflight probe while SSH is still alive
+    # authenticating. Even a connectable port must never satisfy readiness.
+    with socket.socket() as attacker:
+        def spawn(*args, **kwargs):
+            attacker.bind(('127.0.0.1', port))
+            attacker.listen(1)
+            return process
+        with socket.socket() as reservation:
+            reservation.bind(('127.0.0.1', 0))
+            port = reservation.getsockname()[1]
+        with patch('pocketdeploy.transport.secrets.token_hex', return_value='a' * 64), patch('pocketdeploy.transport.subprocess.Popen', side_effect=spawn):
+            with pytest.raises(DeployError, match='failed or timed out'):
+                with transport.tunnel(port, 9091, timeout=.2):
+                    pytest.fail('unrelated listener accepted')
+    process.terminate.assert_called_once()
+    assert process.stdout.closed
+
+
+def test_tunnel_command_requests_acknowledgement_after_forwarding():
+    import os
+    from unittest.mock import patch
+    transport = SSHTransport(('ssh', '-F', '/dev/null', '-l', 'ubuntu', '--', '192.0.2.1'))
+    process = Mock()
+    process.poll.return_value = None
+    read_fd, write_fd = os.pipe()
+    process.stdout = os.fdopen(read_fd, 'rb')
+    os.write(write_fd, b'a' * 64)
+    os.close(write_fd)
+    with patch('pocketdeploy.transport.secrets.token_hex', return_value='a' * 64), patch('pocketdeploy.transport.subprocess.Popen', return_value=process) as spawn:
+        with transport.tunnel(9091, 9091):
+            argv = spawn.call_args.args[0]
+            assert '-N' not in argv
+            assert '-T' in argv
+            assert 'ExitOnForwardFailure=yes' in argv
+            assert argv[-3:-1] == ['--', '192.0.2.1']
+            assert argv[-1] == "printf '%s' " + 'a' * 64 + "; exec cat >/dev/null"
+
+
+def test_tunnel_acknowledgement_timeout_kills_unresponsive_ssh():
+    import os
+    import subprocess
+    from unittest.mock import patch
+    transport = SSHTransport(('ssh', '-l', 'ubuntu', '--', '192.0.2.1'))
+    process = Mock()
+    process.poll.return_value = None
+    process.wait.side_effect = [subprocess.TimeoutExpired('ssh', 5), 0]
+    read_fd, write_fd = os.pipe()
+    process.stdout = os.fdopen(read_fd, 'rb')
+    try:
+        with patch('pocketdeploy.transport.subprocess.Popen', return_value=process):
+            with pytest.raises(DeployError, match='failed or timed out'):
+                with transport.tunnel(9091, 9091, timeout=.01):
+                    pytest.fail('unacknowledged tunnel accepted')
+    finally:
+        os.close(write_fd)
+    process.terminate.assert_called_once()
+    process.kill.assert_called_once()
+    assert process.stdout.closed
+    process.stdin.close.assert_called_once()

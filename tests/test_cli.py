@@ -60,6 +60,9 @@ def test_converge_never_implicitly_saves_to_vault(tmp_path, monkeypatch, fail_co
         assert calls == ['keys', 'compute', 'host', 'applications', 'verify']
         assert 'vault' not in result
         assert result['profile'] == 'demo'
+    import sqlite3
+    with sqlite3.connect(tmp_path / '.colors.sqlite') as db:
+        assert db.execute("SELECT 1 FROM meta WHERE key='desired-config'").fetchone() is None
 
 
 SYNTHETIC_CONFIG = '''profile: demo

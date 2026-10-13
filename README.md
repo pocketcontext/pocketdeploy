@@ -183,7 +183,9 @@ An unchanged converge makes no compute-provider mutations and no application rep
 Host setup still verifies/enables services, and mutable image tags are pulled to
 check whether their immutable digest changed. Prefer digest-pinned app images
 for reproducibility. `plan` never creates cloud resources or keys; mutable image
-tags may need verification at converge time. Local lock files may be created.
+tags may need verification at converge time. Local lock files may be created,
+and taking the lock sets the state directory to mode 0700, including on a fresh
+`plan`. Use a dedicated deployment directory.
 
 `status` returns safe inventory, operation and host application status.
 It never prints resolved environments, credentials,
@@ -304,8 +306,11 @@ from 1 to 3600 seconds (default 60). `deploy-stop-timeout` independently bounds
 container graceful shutdown, from 1 to 3600 seconds (default 300). The SSH
 operation budget includes all configured applications' shutdown and readiness
 budgets. Readiness failure retains the pending marker; it does not automatically
-roll back a container that may have written data. Configure `health-path` to
-succeed only when the application is usable. The bundled portable launcher includes readiness budgets and explicit application
+roll back a container that may have written data. Host readiness requires a final
+HTTP 2xx response, following at most five
+redirects on the same origin within the probe budget. Redirect loops, missing
+locations and origin or scheme changes fail. This also applies to GitHub delivery.
+Configure `health-path` to succeed only when the application is usable. The bundled portable launcher includes readiness budgets and explicit application
 adoption. Previously copied launchers must be updated before using these features.
 
 The mapping references
@@ -342,6 +347,7 @@ from the Ubuntu distribution package repository; its package version is not pinn
 services, for example `["22", "2022"]`. These ports share `compute-ssh-sources`
 and the existing owned firewall lifecycle on every provider. This setting only
 controls firewall ingress; it does not configure SSH's listening or connection port.
+The list must include `"22"`, which the controller uses for SSH.
 An empty source list disables access to all configured ports.
 
 ## Adopting an existing application
@@ -397,8 +403,15 @@ save an encrypted deployment checkpoint. Application data recovery remains separ
 
 ## State, interruption and ownership
 
-The local database may contain secrets and is plaintext. Database, journals,
-keys and snapshots stay ignored and private; SQLite uses full synchronous
+The local database may contain secrets and is plaintext.
+The unused desired-configuration snapshot is no longer stored; a matching writable
+state open deletes legacy snapshots with SQLite secure deletion enabled. New
+operation fingerprints exclude resolved and literal application environment
+values. Actual application settings still drive reconciliation. Read-only opens
+leave old state untouched, and historical backups or filesystem snapshots can
+retain previous secret-bearing data; this cleanup does not erase those copies.
+
+Database, journals, keys and snapshots stay ignored and private; SQLite uses full synchronous
 rollback journaling. Schema/profile/provider scope are checked on open. Resolved
 operation history is bounded; operations with pending steps remain until
 reconciled. CLI output is independently allowlisted.
@@ -533,6 +546,11 @@ needs domain and API-key management. Use authenticated `gh` with repository
 administrator access for environment provisioning. These management credentials
 are not sent to GitHub Actions or the VPS. A domain-scoped sending key is stored
 privately in SQLite and transmitted to the host via SSH stdin.
+
+On the VPS, ONCE deploy/update receives application environment values and SMTP
+credentials as command-line arguments. Processes permitted to inspect host
+process arguments can read them while ONCE runs; controller-side stdin transport
+does not prevent this host-side exposure.
 
 The first implementation supports one Cloudflare zone and one sending domain per
 deployment. Existing unowned DNS records, Resend domains and GitHub environments

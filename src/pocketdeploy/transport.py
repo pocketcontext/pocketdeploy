@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import json
 import os
 import selectors
+import secrets
 import shlex
 import socket
 import subprocess
@@ -139,16 +140,21 @@ class SSHTransport:
         except ValueError:
             raise DeployError('Host returned invalid response; output suppressed', diagnostic=build_diagnostic('ssh-python', 'invalid_response')) from None
 
-    def tunnel_argv(self, local_port, remote_port):
+    def tunnel_argv(self, local_port, remote_port, *, session=False):
         for port in (local_port, remote_port):
             if type(port) is not int or not 1 <= port <= 65535:
                 raise DeployError('Tunnel ports must be integers between 1 and 65535.')
-        return [*self.argv[:-2], '-N', '-o', 'ExitOnForwardFailure=yes', '-L',
+        return [*self.argv[:-2], '-T' if session else '-N', '-o', 'ExitOnForwardFailure=yes', '-L',
                 f'127.0.0.1:{local_port}:127.0.0.1:{remote_port}', *self.argv[-2:]]
 
     @contextmanager
     def tunnel(self, local_port, remote_port, *, timeout=20):
-        argv = self.tunnel_argv(local_port, remote_port)
+        marker = secrets.token_hex(32).encode('ascii')
+        # OpenSSH starts the remote command only after installing forwarding;
+        # ExitOnForwardFailure prevents this acknowledgement on a bind failure.
+        # Keep stdin open so cat holds the authenticated session until cleanup.
+        argv = [*self.tunnel_argv(local_port, remote_port, session=True),
+                "printf '%s' " + marker.decode('ascii') + "; exec cat >/dev/null"]
         # Refuse an already occupied port before starting SSH; readiness must
         # never silently route application credentials to an existing listener.
         try:
@@ -162,26 +168,31 @@ class SSHTransport:
             raise DeployError('Local tunnel port is unavailable.') from None
         try:
             process = subprocess.Popen(argv,
-                                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         except OSError:
             raise DeployError('SSH tunnel could not start; output suppressed.') from None
         try:
             deadline = time.monotonic() + timeout
-            while process.poll() is None:
-                ready = False
-                try:
-                    with socket.create_connection(('127.0.0.1', local_port), timeout=.2):
-                        ready = True
-                except OSError:
-                    pass
-                if ready:
-                    time.sleep(.05)
-                    if process.poll() is None:
-                        yield local_port
-                        return
-                if time.monotonic() >= deadline:
-                    break
-                time.sleep(.05)
+            received = bytearray()
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ)
+                while process.poll() is None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    if not selector.select(min(remaining, .2)):
+                        continue
+                    chunk = os.read(process.stdout.fileno(), len(marker) - len(received))
+                    if not chunk:
+                        break
+                    received.extend(chunk)
+                    if not marker.startswith(received):
+                        break
+                    if received == marker:
+                        if process.poll() is None:
+                            yield local_port
+                            return
+                        break
             raise DeployError('SSH tunnel failed or timed out; output suppressed.')
         finally:
             if process.poll() is None:
@@ -191,6 +202,8 @@ class SSHTransport:
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
+            process.stdin.close()
+            process.stdout.close()
 
     def rsync_shell(self):
         """Pinned SSH options; rsync supplies the destination and remote command."""

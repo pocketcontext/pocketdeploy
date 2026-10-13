@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+import urllib.parse
 
 if 'build_diagnostic' not in globals():
     from pocketdeploy.diagnostics import build_diagnostic, CommandError
@@ -217,16 +218,48 @@ class LocalTLS(http.client.HTTPSConnection):
 
 
 def health(app, timeout=15):
-    """Probe only this host's reverse proxy; never return content or follow redirects."""
+    """Probe the local proxy, allowing at most five same-origin redirects."""
     connection = None
+    status = None
+    deadline = time.monotonic() + timeout
+    scheme = 'http' if app.get('disable_tls', False) or app['host'].endswith('.localhost') else 'https'
+    url = scheme + '://' + app['host'] + app.get('health-path', '/')
+    visited = set()
     try:
-        if app.get('disable_tls', False) or app['host'].endswith('.localhost'):
-            connection = http.client.HTTPConnection('127.0.0.1', 80, timeout=timeout)
-        else:
-            connection = LocalTLS(app['host'], 443, timeout=timeout, context=ssl.create_default_context())
-        connection.request('GET', app.get('health-path', '/'), headers={'Host': app['host']})
-        response = connection.getresponse()
-        return {'healthy': 200 <= response.status < 400, 'http_status': response.status}
+        for _ in range(6):
+            parsed = urllib.parse.urlsplit(url)
+            if parsed.scheme != scheme or parsed.netloc != app['host']:
+                break
+            target = urllib.parse.urlunsplit(('', '', parsed.path or '/', parsed.query, ''))
+            remaining = deadline - time.monotonic()
+            if target in visited or remaining <= 0:
+                break
+            visited.add(target)
+            if scheme == 'http':
+                connection = http.client.HTTPConnection('127.0.0.1', 80, timeout=remaining)
+            else:
+                connection = LocalTLS(app['host'], 443, timeout=remaining, context=ssl.create_default_context())
+            connection.request('GET', target, headers={'Host': app['host'], 'Cache-Control': 'no-cache, no-store'})
+            # Connection setup and sending the request consume this probe's budget.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if connection.sock is not None:
+                connection.sock.settimeout(remaining)
+            response = connection.getresponse()
+            status = response.status
+            if 200 <= status < 300:
+                return {'healthy': time.monotonic() < deadline, 'http_status': status}
+            if status not in (301, 302, 303, 307, 308):
+                break
+            location = response.getheader('Location')
+            if not location:
+                break
+            url = urllib.parse.urljoin(url, location)
+            # Close without reading an untrusted response body before following.
+            connection.close()
+            connection = None
+        return {'healthy': False, 'http_status': status}
     except Exception:
         return {'healthy': False, 'http_status': None}
     finally:
