@@ -86,6 +86,12 @@ def main():
         assert incomplete_adoption.returncode == 2
         assert json.loads(incomplete_adoption.stdout)['error']['code'] == 'invalid_usage'
         assert not list(empty.iterdir()), 'Incomplete application adoption created files.'
+        assert 'resolve-step' in bare.stdout and 'clear-pending-marker' in bare.stdout
+        for arguments in (['resolve-step'], ['clear-pending-marker', '--app-host', 'Bad_Host']):
+            incomplete_recovery = invoke(empty, *arguments, '--json', '--quiet', expected='')
+            assert incomplete_recovery.returncode == 2
+            assert json.loads(incomplete_recovery.stdout)['error']['code'] == 'invalid_usage'
+            assert not list(empty.iterdir()), 'Incomplete recovery command created files.'
         assert 'smtp-test' in bare.stdout
         assert '--smtp-verification-timeout' in bare.stdout
         assert '--provider-read-timeout' in bare.stdout
@@ -251,7 +257,7 @@ def main():
         assert token.read_text() not in expired_run.stdout + expired_run.stderr
         print(f'Expired synthetic OCI token rejected locally in {elapsed:.2f}s; OCI was not invoked.')
 
-    print('Portable launcher: 37 checks passed (no cloud access).')
+    print('Portable launcher: 38 checks passed (no cloud access).')
 
 
 if __name__ == '__main__':
