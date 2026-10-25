@@ -403,3 +403,66 @@ def test_ci_release_keeps_configured_tag_after_replacement(tmp_path, monkeypatch
                                   'registry.example:5000/team/app@sha256:' + 'a' * 64])
 def test_image_repository_preserves_registry_port(image):
     assert remote.image_repository(image) == 'registry.example:5000/team/app'
+
+
+def marker(tmp_path, entry):
+    path = tmp_path / (remote.hashlib.sha256(b'new.example.com').hexdigest() + '.pending')
+    remote.save(path, entry)
+    return path
+
+
+def inspect_once(hosts):
+    records = [{'Config': {'Labels': {'once': json.dumps({'host': host, 'name': 'x'})}}} for host in hosts]
+    return lambda *args, **kwargs: ' '.join(hosts) if args[1] == 'ps' else json.dumps(records)
+
+
+def test_clear_pending_removes_marker_without_container_or_manifest(tmp_path, monkeypatch):
+    setup(tmp_path, monkeypatch)
+    path = marker(tmp_path, {'host': 'new.example.com', 'deployment_id': 'test'})
+    monkeypatch.setattr(remote.shutil, 'which', lambda _: '/usr/bin/docker')
+    with patch.object(remote, 'run', side_effect=inspect_once(['demo.example.com'])):
+        assert remote.clear_pending({'deployment_id': 'test', 'host': 'new.example.com'}) == {
+            'host': 'new.example.com', 'cleared': True}
+    assert not path.exists()
+    assert remote.clear_pending({'deployment_id': 'test', 'host': 'new.example.com'})['cleared'] is False
+
+
+@pytest.mark.parametrize('case', ['container', 'manifest', 'retained', 'remove', 'foreign', 'retired', 'other-deployment'])
+def test_clear_pending_refuses_deployed_or_foreign_state(tmp_path, monkeypatch, case):
+    setup(tmp_path, monkeypatch)
+    entry = {'host': 'new.example.com', 'deployment_id': 'other' if case == 'foreign' else 'test'}
+    if case == 'remove':
+        entry['action'] = 'remove'
+    path = marker(tmp_path, entry)
+    manifest = json.loads(remote.MANIFEST.read_text())
+    if case == 'manifest':
+        manifest['apps']['new.example.com'] = {}
+    if case == 'retained':
+        manifest['retained'] = {'new.example.com': {}}
+    if case == 'other-deployment':
+        manifest['deployment_id'] = 'other'
+    remote.save(remote.MANIFEST, manifest)
+    if case == 'retired':
+        remote.save(tmp_path / 'retirement.json', {'deployment_id': 'test'})
+    monkeypatch.setattr(remote.shutil, 'which', lambda _: '/usr/bin/docker')
+    hosts = ['new.example.com'] if case == 'container' else []
+    with patch.object(remote, 'run', side_effect=inspect_once(hosts)):
+        with pytest.raises(RuntimeError, match='deployed application state|another deployment|retired'):
+            remote.clear_pending({'deployment_id': 'test', 'host': 'new.example.com'})
+    assert path.exists()
+
+
+def test_clear_pending_refuses_while_host_lock_is_held(tmp_path, monkeypatch):
+    import fcntl
+    import io
+    setup(tmp_path, monkeypatch)
+    path = marker(tmp_path, {'host': 'new.example.com', 'deployment_id': 'test'})
+    monkeypatch.setattr(remote.os, 'geteuid', lambda: 0)
+    monkeypatch.setattr(remote.sys, 'stdin', io.StringIO(json.dumps(
+        {'action': 'clear-pending', 'deployment_id': 'test', 'host': 'new.example.com'})))
+    with open(tmp_path / 'lock', 'a') as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        with patch.object(remote, 'clear_pending', side_effect=AssertionError('must not inspect')):
+            with pytest.raises(RuntimeError, match='host operation in progress'):
+                remote.main()
+    assert path.exists()

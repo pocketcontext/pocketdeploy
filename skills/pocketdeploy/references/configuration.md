@@ -134,6 +134,9 @@ deployment automatically saves state. Save after mutations and after failures
 that changed local state; until then, the last remote checkpoint may be stale.
 Keep local state and reconcile cloud observations before recovery from an older
 snapshot. The state document and version identify the exact saved checkpoint.
+Failed idempotent host steps are recorded as `failed`; `steps`, `resolve-step
+--step-id ID` and `clear-pending-marker --app-host HOST` settle stale steps and
+failed ONCE markers under the checks described in the README.
 `colors.yml` and `.envrc` come from Git; Vault excludes configuration and GitHub
 keys. Snapshots record configuration SHA256 and Git commit when available.
 Restore requires matching selected and destination `colors.yml`; it never

@@ -193,6 +193,8 @@ class Host:
             applications = [{'smtp': any(app.get('smtp') for app in applications)}]
         elif action in ('plan', 'converge', 'adopt-app'):
             applications = [self.resolved_app(app) for app in applications]
+        elif action == 'clear-pending':
+            applications = []
         request = {'action': action, 'deployment_id': self.state.deployment_id,
                    'user': connection.get('user', 'ubuntu'),
                    'applications': applications}
@@ -275,6 +277,8 @@ class Host:
         if connection.get('instance_id') and connection['instance_id'] != compute['provider_id']:
             raise DeployError('SSH connection belongs to another instance.')
         payload = {'instance_id': compute['provider_id']}
+        # The host may hold the replacement key after a failure; this step stays
+        # pending until a verified rotation for the same instance settles it.
         step = self.state.intent(operation_id, 'host-key-rotation', payload)
         with operation('SSH: readiness'):
             deadline = time.monotonic() + 360
@@ -303,23 +307,43 @@ class Host:
                 self.state.complete(row['id'], result)
         return result
 
-    def bootstrap(self, connection, operation_id):
-        step = self.state.intent(operation_id, 'host-bootstrap', {})
-        self.rotate_key(connection, operation_id)
-        result = self._remote(connection, 'bootstrap')
+    def _settled(self, step, call):
+        """Fail idempotent host steps on error. ONCE pending markers on the host,
+        not this local step, guard uncertain application delivery."""
+        try:
+            result = call()
+        except BaseException as exc:
+            from .state import failure_class
+            self.state.fail(step, failure_class(exc))
+            raise
         self.state.complete(step, result)
         return result
+
+    def bootstrap(self, connection, operation_id):
+        step = self.state.intent(operation_id, 'host-bootstrap', {})
+        def run():
+            # Rotation keeps its own pending step for reconciliation on retry.
+            self.rotate_key(connection, operation_id)
+            return self._remote(connection, 'bootstrap')
+        return self._settled(step, run)
 
     def plan(self, connection):
         return self._remote(connection, 'plan')['actions']
 
     def converge(self, connection, operation_id):
         step = self.state.intent(operation_id, 'applications-converge', {})
-        result = self._remote(connection, 'converge')
-        self.state.complete(step, result)
-        return result
+        return self._settled(step, lambda: self._remote(connection, 'converge'))
+
+    def clear_pending_marker(self, connection, operation_id, app_host):
+        """Remove one failed delivery marker after the host proves nothing was deployed."""
+        step = self.state.intent(operation_id, 'application-marker-clear', {'host': app_host})
+        with operation('SSH: application marker recovery'):
+            return self._settled(step, lambda: {'host': app_host, 'cleared': self._remote_request(
+                connection, 'clear-pending', {'host': app_host}, timeout=120).get('cleared') is True})
 
     def adopt_app(self, connection, operation_id, evidence):
+        # Ownership may commit remotely before a lost response; a pending step
+        # remains until an identical verified retry reconciles it.
         step = self.state.intent(operation_id, 'application-adoption', evidence)
         result = self._remote_request(connection, 'adopt-app', {'adoption': evidence})
         self.state.complete(step, result)
@@ -336,6 +360,8 @@ class Host:
         timeout = 120 + sum(item['timeout'] + 60 for item in readiness['actions'])
         compute = self.state.get_resource('compute')
         payload = {'instance_id': compute['provider_id'] if compute else None}
+        # Stops may have happened before a failure; deletion relies on this
+        # pending step until a clean retry for the same instance settles it.
         step = self.state.intent(operation_id, 'host-quiesce', payload)
         with operation('SSH: retire delivery and stop applications'):
             result = self._remote_request(connection, 'quiesce', timeout=timeout)
@@ -362,7 +388,8 @@ SAFE_ERRORS = {'unfinished deployment; operator recovery required',
                'host is retired; convergence is disabled',
                'application did not stop cleanly',
                'host retirement ownership verification failed', 'application adoption evidence does not match',
-               'application already has managed ownership'}
+               'application already has managed ownership',
+               'host operation in progress', 'pending marker has deployed application state'}
 
 
 def validate_config(config):

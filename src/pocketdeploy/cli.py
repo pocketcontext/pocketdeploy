@@ -47,6 +47,9 @@ def parser():
   adopt-app      Transfer a verified existing application after draining prior delivery
   adopt          Recover an existing instance with matching deployment UUID tags
   rotate-host-key  Finish bootstrap host-key migration without application changes
+  steps          List pending recorded steps and whether they may be resolved
+  resolve-step   Mark one stale idempotent pending step failed using --step-id
+  clear-pending-marker  Remove a failed ONCE delivery marker for --app-host after host checks
 
 Vault commands (explicit checkpoints):
   vault-save     Save private bindings, recovery keys and SQLite to Vault
@@ -62,14 +65,15 @@ Examples:
 
 Configuration defaults to colors.yml in the current working directory.
 Use -f to select a deployment. Run without arguments to show this help.''')
-    p.add_argument('command', metavar='COMMAND', choices=['init', 'plan', 'converge', 'status', 'ssh', 'delete', 'adopt', 'adopt-app', 'adopt-dns', 'dns-evidence', 'smtp-test', 'rotate-host-key', 'vault-save', 'vault-restore'], help='Deployment or Vault command listed below')
+    p.add_argument('command', metavar='COMMAND', choices=['init', 'plan', 'converge', 'status', 'ssh', 'delete', 'adopt', 'adopt-app', 'adopt-dns', 'dns-evidence', 'smtp-test', 'rotate-host-key', 'steps', 'resolve-step', 'clear-pending-marker', 'vault-save', 'vault-restore'], help='Deployment or Vault command listed below')
     p.add_argument('-f', '--file', help='Configuration file (default: ./colors.yml in the current working directory)')
     p.add_argument('--json', action='store_true', help='Emit one versioned JSON result on stdout')
     p.add_argument('--verbose', action='store_true', help='Show safe request timings and waiting progress on stderr')
     p.add_argument('--quiet', action='store_true', help='Suppress progress on stderr')
     p.add_argument('--dry-run', action='store_true', help='Plan converge/delete without applying changes')
     p.add_argument('--instance-id', help='Exact owned provider instance identity for explicit recovery/adoption')
-    p.add_argument('--app-host', help='Exact configured host for explicit application adoption')
+    p.add_argument('--app-host', help='Exact application host for adopt-app or clear-pending-marker')
+    p.add_argument('--step-id', help='Exact pending step ID from steps for resolve-step')
     p.add_argument('--container-id', help='Full existing Docker container ID from status')
     p.add_argument('--image-id', help='Existing immutable Docker image ID from status')
     p.add_argument('--volume', action='append', help='Exact existing named volume and mount destination, NAME:/PATH (repeatable)')
@@ -227,8 +231,15 @@ def _execute(args, reporter=None):
                 or not re.fullmatch(r'[0-9a-f]{64}', args.dns_settings_sha256 or '')):
             raise DeployError('adopt-dns requires exact host, zone/record IDs, IPv4, settings fingerprint and disabled previous DNS manager.', code='invalid_usage')
     adoption_options = ('app_host', 'container_id', 'image_id', 'volume', 'settings_sha256', 'previous_delivery_disabled')
-    if args.command != 'adopt-app' and any(getattr(args, key, None) for key in adoption_options):
+    if args.command == 'clear-pending-marker':
+        import re
+        if (any(getattr(args, key, None) for key in adoption_options[1:])
+                or not re.fullmatch(r'(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}', getattr(args, 'app_host', None) or '')):
+            raise DeployError('clear-pending-marker requires only an exact lowercase --app-host.', code='invalid_usage')
+    elif args.command != 'adopt-app' and any(getattr(args, key, None) for key in adoption_options):
         raise DeployError('Application adoption options require adopt-app.', code='invalid_usage')
+    if bool(getattr(args, 'step_id', None)) != (args.command == 'resolve-step'):
+        raise DeployError('resolve-step requires --step-id; --step-id is only supported for resolve-step.', code='invalid_usage')
     if args.command == 'adopt-app':
         import re
         if (not all(getattr(args, key, None) for key in adoption_options)
@@ -255,11 +266,11 @@ def _execute(args, reporter=None):
     if smtp_timeout is not None and (args.command != 'converge' or args.dry_run
                                     or not 0 <= smtp_timeout <= 3600):
         raise DeployError('--smtp-verification-timeout requires converge without --dry-run and 0–3600 seconds.', code='invalid_usage')
-    read_only = args.command in ('plan', 'status', 'dns-evidence') or args.dry_run
+    read_only = args.command in ('plan', 'status', 'dns-evidence', 'steps') or args.dry_run
     config_file = args.file if args.file is not None else 'colors.yml'
     if args.file is None and not Path(config_file).exists():
         raise DeployError('No colors.yml found in the current directory; use -f to select a configuration.')
-    config = load(config_file, resolve=args.command not in ('init', 'ssh', 'delete', 'vault-save', 'vault-restore', 'status', 'smtp-test', 'rotate-host-key'))
+    config = load(config_file, resolve=args.command not in ('init', 'ssh', 'delete', 'vault-save', 'vault-restore', 'status', 'smtp-test', 'rotate-host-key', 'steps', 'resolve-step', 'clear-pending-marker'))
     # Reject unsupported application behavior before any cloud mutation.
     from .host import validate_config
     if args.command != 'rotate-host-key':
@@ -287,6 +298,17 @@ def _execute(args, reporter=None):
             if args.command == 'init':
                 with output_operation('init: local preparation'):
                     return initialize(config, state, host, root)
+            if args.command == 'steps':
+                return {'profile': config['profile'], 'pending_steps': state.pending_steps()}
+            if args.command == 'resolve-step':
+                operation = state.begin_operation(args.command, config['_desired_hash'])
+                try:
+                    result = state.resolve_step(args.step_id, operation)
+                except BaseException:
+                    state.finish_operation(operation, 'failed')
+                    raise
+                state.finish_operation(operation, 'succeeded')
+                return {**result, 'operation_id': operation}
             if args.command != 'rotate-host-key' and state and config.get('provider-dns') != 'cloudflare' and any(r['kind'] == 'cloudflare-dns' and r['attributes'].get('type') == 'A' for r in state.resources()):
                 raise DeployError('Restore the managed DNS configuration before operating its deployment.')
             cloud_type = OCI if config['provider-compute'] == 'oci' else provider_class(config['provider-compute'])
@@ -369,6 +391,12 @@ def _execute(args, reporter=None):
                         'host': args.app_host, 'container_id': args.container_id, 'image_id': args.image_id,
                         'volumes': [v.split(':', 1) for v in args.volume],
                         'settings_sha256': args.settings_sha256, 'previous_delivery_disabled': True})
+                elif args.command == 'clear-pending-marker':
+                    recorded = state.get_resource('compute')
+                    if not recorded or not recorded['owned']:
+                        raise DeployError('Marker recovery requires recorded owned compute.')
+                    with reporter.stage('clear-pending-marker'):
+                        result = host.clear_pending_marker(cloud.connection(), operation, args.app_host)
                 elif args.command == 'adopt':
                     if not args.instance_id:
                         raise DeployError('Adoption requires --instance-id and matching ownership tags.')

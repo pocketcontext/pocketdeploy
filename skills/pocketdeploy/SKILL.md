@@ -121,6 +121,13 @@ For SQLite/stateful apps, use `stop-first` and an adequate stop timeout. A durab
 host pending marker blocks blind retries after uncertain delivery. Inspect the
 application and data within the authorized recovery scope before intervention;
 never bypass the marker or restart old code against a potentially migrated DB.
+When the failed deploy left no container, manifest entry or data to recover,
+`./pocketdeploy clear-pending-marker --app-host HOST` removes the marker after the
+host verifies that and that no operation holds its lock; it refuses otherwise.
+`./pocketdeploy steps` lists pending recorded steps; `./pocketdeploy resolve-step
+--step-id ID` marks a stale idempotent one (`applications-converge`,
+`host-bootstrap`) failed with a receipt and refuses steps guarding uncertain
+provider mutations. Never edit SQLite or host files to clear either.
 No automatic rollback or cross-host fencing is provided. Use one active operator
 per deployment; the local lock does not coordinate different machines.
 

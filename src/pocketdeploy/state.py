@@ -2,6 +2,7 @@
 import fcntl
 import json
 import os
+import re
 import sqlite3
 import stat
 import uuid
@@ -37,6 +38,20 @@ def deployment_lock(path):
         yield
     finally:
         os.close(fd)
+
+
+# Settled kinds: idempotent host requests whose uncertainty is guarded host-side
+# by ONCE pending markers. Provider mutations, ownership transfers, host-key
+# rotation and quiescence stay pending until a verified retry reconciles them.
+RESOLVABLE_STEPS = frozenset({'applications-converge', 'host-bootstrap', 'application-marker-clear'})
+
+
+def failure_class(exc):
+    """Fixed non-secret classification; exception text is never stored."""
+    if isinstance(exc, KeyboardInterrupt):
+        return 'interrupted'
+    code = getattr(exc, 'code', None) if isinstance(exc, DeployError) else None
+    return code if isinstance(code, str) and re.fullmatch(r'[a-z][a-z0-9_]{0,63}', code) else 'unexpected_error'
 
 
 class State:
@@ -198,6 +213,38 @@ class State:
         with self.db:
             self.db.execute('UPDATE steps SET status=?,result=? WHERE id=?', ('complete', json.dumps(result), step_id))
 
+    def fail(self, step_id, error):
+        """Settle a pending step whose call raised; only safe classifications are stored."""
+        self._writable()
+        if not isinstance(error, str) or not re.fullmatch(r'[a-z][a-z0-9_]{0,63}', error):
+            raise DeployError('Invalid step failure classification.')
+        with self.db:
+            self.db.execute("UPDATE steps SET status='failed',result=? WHERE id=? AND status='pending'",
+                            (json.dumps({'error': error}), step_id))
+
+    def pending_steps(self):
+        return [{**dict(r), 'resolvable': r['step'] in RESOLVABLE_STEPS} for r in self.db.execute(
+            '''SELECT steps.id,steps.operation_id,operations.workflow,steps.step,operations.started
+            FROM steps JOIN operations ON operations.id=steps.operation_id
+            WHERE steps.status='pending' ORDER BY operations.rowid,steps.rowid''')]
+
+    def resolve_step(self, step_id, operation_id):
+        """Operator settlement of a stale idempotent step, with a receipt in one transaction."""
+        self._writable()
+        with self.db:
+            row = self.db.execute("SELECT step,status FROM steps WHERE id=?", (step_id,)).fetchone()
+            if not row or row['status'] != 'pending':
+                raise DeployError('Step is not pending; nothing to resolve.')
+            if row['step'] not in RESOLVABLE_STEPS:
+                raise DeployError('Step guards an uncertain mutation; reconcile it with a verified retry instead.')
+            self.db.execute("UPDATE steps SET status='failed',result=? WHERE id=?",
+                            (json.dumps({'error': 'operator_resolved', 'resolved_by': operation_id}), step_id))
+            result = {'step_id': step_id, 'step': row['step'], 'status': 'failed'}
+            self.db.execute('INSERT INTO steps VALUES(?,?,?,?,?,?)',
+                            (str(uuid.uuid4()), operation_id, 'step-resolution', json.dumps({'step_id': step_id}),
+                             'complete', json.dumps(result)))
+        return result
+
     def complete_delete(self, name, step_id, pending_key):
         """Publish verified remote deletion as one local transaction.
 
@@ -244,4 +291,5 @@ class State:
                 'last_vault_backup': backup or None,
                 'resource_count': self.db.execute('SELECT count(*) FROM resources').fetchone()[0],
                 'pending_steps': self.db.execute("SELECT count(*) FROM steps WHERE status='pending'").fetchone()[0],
+                'failed_steps': self.db.execute("SELECT count(*) FROM steps WHERE status='failed'").fetchone()[0],
                 'operations': operations}

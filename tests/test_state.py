@@ -230,3 +230,53 @@ def test_operation_pruning_removes_only_orphan_diagnostics(tmp_path):
         state.finish_operation(state.begin_operation('converge', 'hash'), 'succeeded')
         assert state.get_meta('operation-diagnostic:' + pending) is None
         assert state.get_meta('operation-diagnostic:' + running) == diagnostic
+
+
+def test_fail_settles_pending_step_with_safe_classification(tmp_path):
+    from pocketdeploy.state import failure_class
+    with State(tmp_path / 'state', 'test', {}, create=True) as state:
+        operation = state.begin_operation('converge', 'hash')
+        step = state.intent(operation, 'applications-converge', {})
+        assert failure_class(DeployError('private detail', code='application_deploy')) == 'application_deploy'
+        assert failure_class(DeployError('private detail', code='Not Safe!')) == 'unexpected_error'
+        assert failure_class(ValueError('private detail')) == 'unexpected_error'
+        assert failure_class(KeyboardInterrupt()) == 'interrupted'
+        with pytest.raises(DeployError, match='classification'):
+            state.fail(step, 'raw provider output')
+        state.fail(step, 'application_deploy')
+        row = state.db.execute('SELECT status,result FROM steps WHERE id=?', (step,)).fetchone()
+        assert (row['status'], json.loads(row['result'])) == ('failed', {'error': 'application_deploy'})
+        state.complete(state.intent(operation, 'other', {}), {})
+        state.fail(step, 'interrupted')  # Settled steps are never rewritten.
+        assert json.loads(state.db.execute('SELECT result FROM steps WHERE id=?', (step,)).fetchone()[0]) == {'error': 'application_deploy'}
+        status = state.safe_status()
+        assert (status['pending_steps'], status['failed_steps']) == (0, 1)
+        state.finish_operation(operation, 'failed')
+        for _ in range(101):
+            state.finish_operation(state.begin_operation('converge', 'hash'), 'succeeded')
+        assert state.db.execute('SELECT id FROM operations WHERE id=?', (operation,)).fetchone() is None
+
+
+def test_resolve_step_only_settles_whitelisted_pending_kinds_with_receipt(tmp_path):
+    with State(tmp_path / 'state', 'test', {}, create=True) as state:
+        failed = state.begin_operation('converge', 'hash')
+        stale = state.intent(failed, 'applications-converge', {})
+        guarded = state.intent(failed, 'smtp-domain', {'action': 'create'})
+        state.finish_operation(failed, 'failed')
+        listed = state.pending_steps()
+        assert [(s['id'], s['step'], s['workflow'], s['resolvable']) for s in listed] == [
+            (stale, 'applications-converge', 'converge', True), (guarded, 'smtp-domain', 'converge', False)]
+        assert 'payload' not in listed[0]
+        receipt = state.begin_operation('resolve-step', 'hash')
+        with pytest.raises(DeployError, match='uncertain mutation'):
+            state.resolve_step(guarded, receipt)
+        assert state.resolve_step(stale, receipt) == {'step_id': stale, 'step': 'applications-converge', 'status': 'failed'}
+        with pytest.raises(DeployError, match='not pending'):
+            state.resolve_step(stale, receipt)
+        with pytest.raises(DeployError, match='not pending'):
+            state.resolve_step('missing', receipt)
+        assert json.loads(state.db.execute('SELECT result FROM steps WHERE id=?', (stale,)).fetchone()[0]) == {
+            'error': 'operator_resolved', 'resolved_by': receipt}
+        row = state.db.execute("SELECT status,payload FROM steps WHERE operation_id=? AND step='step-resolution'", (receipt,)).fetchone()
+        assert (row['status'], json.loads(row['payload'])) == ('complete', {'step_id': stale})
+        assert [s['id'] for s in state.pending_steps()] == [guarded]

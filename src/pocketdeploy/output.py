@@ -119,6 +119,8 @@ def text_result(command, result):
             lines.append(f"Deployment: {state['deployment_id']}.")
         if 'pending_steps' in state:
             lines.append(f"Pending recorded steps: {state['pending_steps']}.")
+        if state.get('failed_steps'):
+            lines.append(f"Failed recorded steps: {state['failed_steps']}.")
         lines.extend(_health(result.get('applications', {})))
         backup = state.get('last_vault_backup')
         lines.append(f"Last acknowledged Vault backup: {backup.get('saved_at', 'time unknown')} (document {backup.get('document', 'unknown')}, version {backup.get('version', 'unknown')})." if backup else 'Last acknowledged Vault backup: none.')
@@ -134,6 +136,17 @@ def text_result(command, result):
             lines.append('No application changes.')
         lines.extend(_health(result.get('status', {})))
         return lines
+    if command == 'steps':
+        steps = result.get('pending_steps', [])
+        lines = [f"Pending recorded steps{suffix}: {len(steps)}."]
+        lines.extend(f"  {item['id']}: {item['step']} ({item['workflow']}, {item['started']}); "
+                     + ('resolvable' if item['resolvable'] else 'requires verified reconciliation') for item in steps)
+        return lines
+    if command == 'resolve-step':
+        return [f"Resolved step {result['step_id']} ({result['step']}) as failed.", f"Receipt operation: {result['operation_id']}."]
+    if command == 'clear-pending-marker':
+        return [f"Cleared pending marker for {result['host']}." if result.get('cleared')
+                else f"No pending marker for {result['host']}."]
     if command == 'rotate-host-key':
         return ['Host-key migration verified. Save a new Vault recovery checkpoint.']
     if command == 'smtp-test':

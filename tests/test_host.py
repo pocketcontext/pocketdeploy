@@ -198,3 +198,77 @@ def test_generic_python_suppresses_remote_failure(tmp_path):
         with pytest.raises(DeployError, match='output suppressed') as error:
             host.run_python({'ip': '192.0.2.1'}, 'pass', {})
     assert 'synthetic-secret' not in str(error.value)
+
+
+def recording_state(tmp_path):
+    from pocketdeploy.state import State
+    state = State(tmp_path / 'state.sqlite', 'test', {}, create=True)
+    return state, state.begin_operation('converge', 'hash')
+
+
+def test_failed_application_converge_settles_step_without_remote_output(tmp_path):
+    import pytest
+    from pocketdeploy.common import DeployError
+    state, operation = recording_state(tmp_path)
+    host = Host({}, state, tmp_path)
+    failure = DeployError('secret-value', code='application_deploy')
+    with patch.object(host, '_remote', side_effect=failure):
+        with pytest.raises(DeployError) as caught:
+            host.converge({'ip': '192.0.2.1'}, operation)
+    assert caught.value is failure
+    rows = state.db.execute('SELECT step,status,result FROM steps').fetchall()
+    assert [tuple(r) for r in rows] == [('applications-converge', 'failed', '{"error": "application_deploy"}')]
+    with patch.object(host, '_remote', return_value={'actions': []}):
+        assert host.converge({'ip': '192.0.2.1'}, operation) == {'actions': []}
+    assert state.safe_status()['pending_steps'] == 0
+    state.db.close()
+
+
+def test_bootstrap_failure_fails_its_step_but_keeps_rotation_reconciliation(tmp_path):
+    import pytest
+    state, operation = recording_state(tmp_path)
+    host = Host({}, state, tmp_path)
+    def rotate(connection, operation_id):
+        state.intent(operation_id, 'host-key-rotation', {'instance_id': 'synthetic'})
+        raise KeyboardInterrupt
+    with patch.object(host, 'rotate_key', side_effect=rotate):
+        with pytest.raises(KeyboardInterrupt):
+            host.bootstrap({'ip': '192.0.2.1'}, operation)
+    assert {r['step']: r['status'] for r in state.db.execute('SELECT step,status FROM steps')} == {
+        'host-bootstrap': 'failed', 'host-key-rotation': 'pending'}
+    state.db.close()
+
+
+def test_uncertain_adoption_keeps_pending_step_for_verified_retry(tmp_path):
+    import pytest
+    from pocketdeploy.common import DeployError
+    state, operation = recording_state(tmp_path)
+    host = Host({}, state, tmp_path)
+    with patch.object(host, '_remote_request', side_effect=DeployError('lost response')):
+        with pytest.raises(DeployError):
+            host.adopt_app({'ip': '192.0.2.1'}, operation, {'host': 'app.example.com'})
+    assert state.safe_status()['pending_steps'] == 1
+    state.db.close()
+
+
+def test_clear_pending_marker_sends_only_host_and_allowlists_result(tmp_path):
+    import pytest
+    from pocketdeploy.common import DeployError
+    state, operation = recording_state(tmp_path)
+    host = Host({'once': {'applications': [{'host': 'app.example.com', 'resolved-env': {'SECRET': 'synthetic-value'}}]}}, state, tmp_path)
+    host.prepare_keys()
+    host.trusted_public = lambda connection=None: 'ssh-ed25519 c3ludGhldGlj'
+    response = SimpleNamespace(returncode=0, stdout=json.dumps({'host': 'other', 'cleared': True, 'private': 'x'}))
+    with patch('pocketdeploy.host.subprocess.run', return_value=response) as call:
+        assert host.clear_pending_marker({'ip': '192.0.2.1'}, operation, 'app.example.com') == {
+            'host': 'app.example.com', 'cleared': True}
+    request = json.loads(call.call_args.kwargs['input'])
+    assert (request['action'], request['host'], request['applications']) == ('clear-pending', 'app.example.com', [])
+    assert 'synthetic-value' not in call.call_args.kwargs['input']
+    refusal = SimpleNamespace(returncode=1, stdout=json.dumps({'error': 'host operation in progress', 'stage': 'application-recovery'}))
+    with patch('pocketdeploy.host.subprocess.run', return_value=refusal):
+        with pytest.raises(DeployError, match='host operation in progress'):
+            host.clear_pending_marker({'ip': '192.0.2.1'}, operation, 'app.example.com')
+    assert [tuple(r) for r in state.db.execute('SELECT status,result FROM steps ORDER BY rowid')] == [
+        ('complete', '{"host": "app.example.com", "cleared": true}'), ('failed', '{"error": "operation_failed"}')]
+    state.db.close()

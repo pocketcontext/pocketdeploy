@@ -165,6 +165,11 @@ pocketdeploy status
 pocketdeploy ssh
 pocketdeploy ssh --ssh-command 'uname -m'
 pocketdeploy delete --dry-run
+
+# Recovery after failed convergence
+pocketdeploy steps
+pocketdeploy resolve-step --step-id STEP_ID
+pocketdeploy clear-pending-marker --app-host app.example.com
 ```
 
 `init` prepares the local deployment UUID, SQLite state, SSH client and host
@@ -305,7 +310,7 @@ once:
 from 1 to 3600 seconds (default 60). `deploy-stop-timeout` independently bounds
 container graceful shutdown, from 1 to 3600 seconds (default 300). The SSH
 operation budget includes all configured applications' shutdown and readiness
-budgets. Readiness failure retains the pending marker; it does not automatically
+budgets. Readiness failure retains the pending marker (see `clear-pending-marker`); it does not automatically
 roll back a container that may have written data. Host readiness requires a final
 HTTP 2xx response, following at most five
 redirects on the same origin within the probe budget. Redirect loops, missing
@@ -441,6 +446,30 @@ Inspection alone does not clear a pending addition. After confirming the origina
 request has settled, an authorized operator can restore the pending desired rules
 on that same owned NSG through OCI and rerun convergence. Do not clear the local
 intent to force another request while its outcome remains unknown.
+
+A failed idempotent host request (`host-bootstrap`, `applications-converge`)
+marks its step `failed` with a fixed error code, never provider output; the ONCE
+pending marker on the host guards any uncertain delivery. Provider mutations,
+`adopt-app`, host-key rotation and quiescence keep their pending steps until a
+verified retry reconciles them. `status` reports `pending_steps` and `failed_steps`.
+
+```sh
+pocketdeploy steps
+pocketdeploy resolve-step --step-id STEP_ID
+pocketdeploy clear-pending-marker --app-host app.example.com
+```
+
+`steps` lists pending step IDs, kinds and whether they are resolvable, without
+payloads or provider calls. `resolve-step` marks one stale pending step of an
+idempotent kind failed and records a `resolve-step` operation receipt; it refuses
+steps that guard uncertain provider mutations. `clear-pending-marker` removes one
+host's failed ONCE delivery marker only when the host lock is free (no running
+converge or CI deploy), the marker belongs to this deployment and is not a
+removal/retirement marker, the host is not retired, and no manifest entry,
+retained entry or ONCE-labelled container exists for the host. Otherwise it
+refuses and leaves the marker. It does not inspect or remove Docker volumes;
+confirm that no data needs recovery first. Repeating it after success reports
+that no marker remains.
 
 One active operator per deployment is supported. A local advisory lock prevents
 overlap on one filesystem; Vault snapshots do not coordinate different machines.

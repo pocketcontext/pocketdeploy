@@ -529,6 +529,35 @@ def authorized_keys(account, lines=None):
         os.close(home)
 
 
+def clear_pending(request):
+    """Remove a failed delivery marker only when the host shows nothing was deployed."""
+    global STAGE
+    STAGE = 'application-recovery'
+    deployment, host = request['deployment_id'], request['host']
+    manifest = json.loads(MANIFEST.read_text()) if MANIFEST.exists() else {'deployment_id': deployment, 'apps': {}}
+    if manifest.get('deployment_id') != deployment:
+        raise RuntimeError('host belongs to another deployment')
+    if (BASE / 'retirement.json').exists():
+        raise RuntimeError('host is retired; convergence is disabled')
+    pending = BASE / (hashlib.sha256(host.encode()).hexdigest() + '.pending')
+    if not pending.exists():
+        return {'host': host, 'cleared': False}
+    entry = json.loads(pending.read_text())
+    if entry.get('deployment_id') != deployment:
+        raise RuntimeError('host belongs to another deployment')
+    if (entry.get('host') != host or entry.get('action') or host in manifest['apps']
+            or host in manifest.get('retained', {})):
+        raise RuntimeError('pending marker has deployed application state')
+    # Inspect every ONCE-labelled container, including names containers() skips.
+    ids = run('docker', 'ps', '-a', '--filter', 'label=once', '--format', '{{.ID}}').split() if shutil.which('docker') else []
+    for record in json.loads(run('docker', 'inspect', *ids)) if ids else []:
+        settings = json.loads(record.get('Config', {}).get('Labels', {}).get('once', '{}'))
+        if settings.get('host') == host:
+            raise RuntimeError('pending marker has deployed application state')
+    pending.unlink()
+    return {'host': host, 'cleared': True}
+
+
 def retire(request, mutate=False):
     """Retirement is permanent on this host; retries only finish clean stops."""
     global STAGE
@@ -701,6 +730,13 @@ def main():
         return reconcile(request)
     BASE.mkdir(parents=True, exist_ok=True, mode=0o700)
     with open(BASE / 'lock', 'a') as lock:
+        if request['action'] == 'clear-pending':
+            # Never wait behind a running converge or CI deploy: refuse instead.
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise RuntimeError('host operation in progress') from None
+            return clear_pending(request)
         fcntl.flock(lock, fcntl.LOCK_EX)
         if request['action'] == 'quiesce':
             return retire(request, mutate=True)
@@ -726,6 +762,7 @@ if __name__ == '__main__':
                 'cannot clear final environment binding with pinned ONCE CLI',
                 'host is retired; convergence is disabled', 'application did not stop cleanly',
                 'host retirement ownership verification failed', 'application adoption evidence does not match',
-                'application already has managed ownership'}
+                'application already has managed ownership', 'host operation in progress',
+                'pending marker has deployed application state'}
         print(json.dumps({'error': str(exc) if str(exc) in safe else 'operation failed; output suppressed', 'stage': STAGE, 'diagnostic': getattr(exc, 'diagnostic', None)}))
         sys.exit(1)

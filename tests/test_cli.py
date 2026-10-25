@@ -594,3 +594,83 @@ def test_rotate_host_key_readable_result_is_allowlisted():
     from pocketdeploy.output import text_result
     result = text_result('rotate-host-key', {'private': 'secret-sentinel', 'verified': True})
     assert result == ['Host-key migration verified. Save a new Vault recovery checkpoint.']
+
+
+def stale_state(tmp_path, compute=True):
+    from pocketdeploy.config import load, scope
+    (tmp_path / 'colors.yml').write_text(SYNTHETIC_CONFIG)
+    config = load(tmp_path / 'colors.yml', env={}, resolve=False)
+    with cli.State(tmp_path / '.colors.sqlite', 'demo', scope(config), create=True) as state:
+        if compute:
+            state.put_resource('compute', 'oci-compute', 'compute-id', {}, owned=True)
+        operation = state.begin_operation('converge', 'hash')
+        stale = state.intent(operation, 'applications-converge', {})
+        guarded = state.intent(operation, 'smtp-key', {'action': 'create'})
+        state.finish_operation(operation, 'failed')
+    return stale, guarded
+
+
+def test_steps_lists_and_resolve_step_settles_only_idempotent_kinds_without_providers(tmp_path, monkeypatch):
+    stale, guarded = stale_state(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, 'OCI', lambda *a, **kw: pytest.fail('provider created'))
+    listed = cli.execute(cli.parser().parse_args(['steps']))['pending_steps']
+    assert [(s['id'], s['resolvable']) for s in listed] == [(stale, True), (guarded, False)]
+    with pytest.raises(DeployError, match='uncertain mutation'):
+        cli.execute(cli.parser().parse_args(['resolve-step', '--step-id', guarded]))
+    result = cli.execute(cli.parser().parse_args(['resolve-step', '--step-id', stale]))
+    assert result['step'] == 'applications-converge' and result['status'] == 'failed'
+    assert [s['id'] for s in cli.execute(cli.parser().parse_args(['steps']))['pending_steps']] == [guarded]
+    import sqlite3
+    with sqlite3.connect(tmp_path / '.colors.sqlite') as db:
+        assert db.execute('SELECT workflow,status FROM operations WHERE id=?', (result['operation_id'],)).fetchone() == ('resolve-step', 'succeeded')
+        assert sorted(db.execute("SELECT workflow,status FROM operations WHERE workflow='resolve-step'").fetchall()) == [
+            ('resolve-step', 'failed'), ('resolve-step', 'succeeded')]
+
+
+@pytest.mark.parametrize('arguments', [
+    ['resolve-step'], ['steps', '--step-id', 'x'], ['converge', '--step-id', 'x'],
+    ['clear-pending-marker'], ['clear-pending-marker', '--app-host', 'App.Example.com'],
+    ['clear-pending-marker', '--app-host', 'app.example.com', '--container-id', 'a' * 64],
+    ['status', '--app-host', 'app.example.com'],
+])
+def test_recovery_command_usage_rejected_before_state(tmp_path, monkeypatch, arguments):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, 'deployment_lock', lambda *args: pytest.fail('Must reject before locking'))
+    with pytest.raises(DeployError) as caught:
+        cli.execute(cli.parser().parse_args(arguments))
+    assert caught.value.code == 'invalid_usage'
+
+
+@pytest.mark.parametrize('compute', [False, True])
+def test_clear_pending_marker_dispatch_requires_owned_compute(tmp_path, monkeypatch, compute):
+    stale_state(tmp_path, compute=compute)
+    monkeypatch.chdir(tmp_path)
+    calls = []
+    class Host:
+        def __init__(self, *args): pass
+        def clear_pending_marker(self, connection, operation, app_host):
+            calls.append((connection, app_host))
+            return {'host': app_host, 'cleared': True}
+    class Cloud:
+        def __init__(self, *args): pass
+        def connection(self): return {'instance_id': 'compute-id'}
+    monkeypatch.setattr(cli, 'Host', Host)
+    monkeypatch.setattr(cli, 'OCI', Cloud)
+    args = cli.parser().parse_args(['clear-pending-marker', '--app-host', 'app.example.com'])
+    if compute:
+        assert cli.execute(args) == {'host': 'app.example.com', 'cleared': True}
+        assert calls == [({'instance_id': 'compute-id'}, 'app.example.com')]
+    else:
+        with pytest.raises(DeployError, match='recorded owned compute'):
+            cli.execute(args)
+        assert calls == []
+
+
+def test_recovery_readable_results_are_allowlisted():
+    from pocketdeploy.output import text_result
+    lines = text_result('steps', {'profile': 'demo', 'pending_steps': [
+        {'id': 'step-1', 'step': 'applications-converge', 'workflow': 'converge', 'started': 't', 'resolvable': True, 'payload': 'secret-sentinel'}]})
+    assert lines == ['Pending recorded steps for demo: 1.', '  step-1: applications-converge (converge, t); resolvable']
+    assert text_result('clear-pending-marker', {'host': 'a.example.com', 'cleared': False}) == ['No pending marker for a.example.com.']
+    assert 'Failed recorded steps: 2.' in text_result('status', {'state': {'pending_steps': 0, 'failed_steps': 2}})
