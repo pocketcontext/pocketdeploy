@@ -87,7 +87,6 @@ Use -f to select a deployment. Run without arguments to show this help.''')
     p.add_argument('--destination', help='Recovery directory containing matching Git configuration')
     p.add_argument('--overwrite', action='store_true', help='Explicitly replace recovery destinations')
     p.add_argument('--ssh-command', help='Explicit remote command; otherwise open an interactive shell')
-    p.add_argument('--rotate-github-keys', action='store_true', help='Rotate disposable GitHub deployment keys during converge')
     p.add_argument('--smtp-verification-timeout', type=int, metavar='SECONDS',
                    help='Wait for SMTP verification during converge (0–3600 seconds; default: 600; 0 checks once)')
     p.add_argument('--provider-read-timeout', type=int, metavar='SECONDS',
@@ -99,8 +98,7 @@ Use -f to select a deployment. Run without arguments to show this help.''')
 from .runtime import initialize
 
 
-async def converge(config, state, cloud, host, operation, reporter=None, rotate_github_keys=False,
-                   smtp_verification_timeout=600):
+async def converge(config, state, cloud, host, operation, reporter=None, smtp_verification_timeout=600):
     """Blue schedules named steps; mutable secrets/state stay in closure objects."""
     results = {}
     reporter = reporter or Reporter()
@@ -139,7 +137,12 @@ async def converge(config, state, cloud, host, operation, reporter=None, rotate_
 
     def publish_github(opts):
         if github:
-            results['github'] = github.converge(results['connection'], operation, rotate_keys=rotate_github_keys)
+            results['github'] = github.converge(results['connection'], operation)
+        return dict(opts)
+
+    def delete_github_keys(opts):
+        if github:
+            results['github'] = {**(results.get('github') or {}), **github.delete_keys()}
         return dict(opts)
 
     def keys(opts):
@@ -168,7 +171,8 @@ async def converge(config, state, cloud, host, operation, reporter=None, rotate_
 
     steps = {'preflight': [preflight, 'keys'], 'keys': [keys, 'compute'], 'compute': [compute, 'host'],
              'host': [bootstrap, 'services'], 'services': [infrastructure_services, 'applications'],
-             'applications': [applications, 'verify'], 'verify': [verify, 'github'], 'github': [publish_github]}
+             'applications': [applications, 'verify'], 'verify': [verify, 'github'], 'github': [publish_github, 'github-keys'],
+             'github-keys': [delete_github_keys]}
     if config.get('provider-smtp') == 'resend':
         steps['services'] = [infrastructure_services, 'smtp-verification']
         steps['smtp-verification'] = [smtp_verification, 'smtp-credentials']
@@ -260,8 +264,6 @@ def _execute(args, reporter=None):
         raise DeployError('--overwrite is supported only for vault-restore.', code='invalid_usage')
     if bool(getattr(args, 'to', None)) != (args.command == 'smtp-test'):
         raise DeployError('smtp-test requires --to; --to is only supported for smtp-test.', code='invalid_usage')
-    if getattr(args, 'rotate_github_keys', False) and (args.command != 'converge' or args.dry_run):
-        raise DeployError('--rotate-github-keys requires converge without --dry-run.', code='invalid_usage')
     smtp_timeout = getattr(args, 'smtp_verification_timeout', None)
     if smtp_timeout is not None and (args.command != 'converge' or args.dry_run
                                     or not 0 <= smtp_timeout <= 3600):
@@ -358,7 +360,6 @@ def _execute(args, reporter=None):
             try:
                 if args.command == 'converge':
                     result = asyncio.run(converge(config, state, cloud, host, operation, reporter,
-                                                 rotate_github_keys=getattr(args, 'rotate_github_keys', False),
                                                  smtp_verification_timeout=600 if smtp_timeout is None else smtp_timeout))
                 elif args.command == 'rotate-host-key':
                     recorded = state.get_resource('compute')

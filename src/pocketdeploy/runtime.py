@@ -98,9 +98,6 @@ def initialize(config, state, host, root):
         if private.exists() != public.exists():
             raise DeployError('SSH key pair is incomplete; restore the complete identity before initialization.')
     host.prepare_keys()
-    if any(a.get('github') for a in config.get('once', {}).get('applications', [])):
-        from .github import GitHub
-        GitHub(config, state, root, host).prepare_keys()
     try:
         descriptor = os.open(bindings, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
     except FileExistsError:

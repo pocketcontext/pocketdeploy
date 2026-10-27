@@ -30,7 +30,8 @@ def dependencies(tmp_path, events):
                                ensure_smtp_credentials=event('smtp-credentials', {'actions': []}),
                                smtp_settings=event('smtp-settings', {
                                    'server': 'smtp.resend.com', 'password': 'synthetic-secret'}))
-    github = SimpleNamespace(preflight=event('github-preflight'), converge=event('github', {'environments': []}))
+    github = SimpleNamespace(preflight=event('github-preflight'), converge=event('github', {'environments': []}),
+                             delete_keys=event('github-keys', {'deleted_key_files': 2}))
     return config, cloud, host, services, github, event
 
 
@@ -41,7 +42,7 @@ def test_services_order_and_secret_exclusion(tmp_path, capsys):
         result = asyncio.run(converge(config, object(), cloud, host, 'operation', Reporter()))
     assert events == ['service-preflight', 'service-plan', 'github-preflight', 'keys', 'cloud-init',
                       'compute', 'host', 'services', 'smtp-verification', 'smtp-credentials',
-                      'smtp-settings', 'apps', 'status', 'https', 'github']
+                      'smtp-settings', 'apps', 'status', 'https', 'github', 'github-keys']
     assert host.smtp_settings['password'] == 'synthetic-secret'
     output = capsys.readouterr()
     assert 'synthetic-secret' not in json.dumps(result) + output.out + output.err
@@ -75,7 +76,7 @@ def test_dns_only_configuration_skips_smtp_stages(tmp_path):
     with patch('pocketdeploy.services.Services', return_value=services), patch('pocketdeploy.github.GitHub', return_value=github), patch('pocketdeploy.health.verify', side_effect=event('https')):
         asyncio.run(converge(config, object(), cloud, host, 'operation', Reporter(quiet=True)))
     assert events == ['service-preflight', 'service-plan', 'github-preflight', 'keys', 'cloud-init',
-                      'compute', 'host', 'services', 'apps', 'status', 'https', 'github']
+                      'compute', 'host', 'services', 'apps', 'status', 'https', 'github', 'github-keys']
     assert host.smtp_settings is None
 
 
@@ -125,7 +126,7 @@ def test_smtp_pending_then_verified_continues_same_dag(tmp_path, monkeypatch, ca
     assert polls == [0, 10, 20]
     assert events == ['service-preflight', 'service-plan', 'github-preflight', 'keys', 'cloud-init',
                       'compute', 'host', 'dns', 'domain', 'dns', 'trigger-verification', 'poll', 'wait',
-                      'poll', 'wait', 'poll', 'smtp-key', 'apps', 'status', 'https', 'github']
+                      'poll', 'wait', 'poll', 'smtp-key', 'apps', 'status', 'https', 'github', 'github-keys']
     assert host.smtp_settings['password'] == 'synthetic-smtp-secret'
     assert result['services']['actions'][-1]['action'] == 'verified'
     output = capsys.readouterr()
@@ -152,7 +153,54 @@ def test_https_failure_blocks_environment_publication(tmp_path):
         with pytest.raises(DeployError, match='HTTPS failed'):
             asyncio.run(converge(config, object(), cloud, host, 'operation', Reporter(quiet=True)))
     assert 'apps' in events
-    assert 'github' not in events
+    assert 'github' not in events and 'github-keys' not in events
+
+
+def test_github_key_deletion_runs_only_after_publication(tmp_path):
+    events = []
+    config, cloud, host, services, github, event = dependencies(tmp_path, events)
+    with patch('pocketdeploy.services.Services', return_value=services), patch('pocketdeploy.github.GitHub', return_value=github), patch('pocketdeploy.health.verify', side_effect=event('https')):
+        result = asyncio.run(converge(config, object(), cloud, host, 'operation', Reporter(quiet=True)))
+    assert events[-2:] == ['github', 'github-keys']
+    assert result['github'] == {'environments': [], 'deleted_key_files': 2}
+    events.clear()
+    def failed(*args, **kwargs):
+        events.append('github')
+        raise DeployError('synthetic secret failure')
+    github.converge = failed
+    with patch('pocketdeploy.services.Services', return_value=services), patch('pocketdeploy.github.GitHub', return_value=github), patch('pocketdeploy.health.verify', side_effect=event('https')):
+        with pytest.raises(DeployError, match='synthetic secret') as error:
+            asyncio.run(converge(config, object(), cloud, host, 'operation', Reporter(quiet=True)))
+    assert error.value.stage == 'github'
+    assert events[-1] == 'github' and 'github-keys' not in events
+
+
+def test_failed_publication_leaves_pending_key_for_resumption(tmp_path):
+    from pocketdeploy.common import run as real_run
+    from pocketdeploy.github import GitHub
+    from pocketdeploy.state import State
+    events = []
+    config, cloud, host, services, _, event = dependencies(tmp_path, events)
+    config['once']['applications'][0]['image'] = 'ghcr.io/example/site:latest'
+    host.install_github = event('host-github')
+    host.trusted_public = lambda connection: 'ssh-ed25519 c3ludGhldGlj'
+    def gh(args, **kwargs):
+        if args[0] == 'ssh-keygen':
+            return real_run(args, **kwargs)
+        if args[1] == 'secret':
+            raise DeployError('synthetic secret failure')
+        return ''
+    with State(tmp_path / 'state', 'test', {}, create=True) as state:
+        github = GitHub(config, state, tmp_path, host)
+        github.preflight = event('github-preflight')
+        operation = state.begin_operation('converge', 'test')
+        with patch.object(github, '_pages', return_value=[]), patch.object(github, '_api', return_value={'id': 42}), \
+                patch('pocketdeploy.github.run', side_effect=gh), patch('pocketdeploy.services.Services', return_value=services), \
+                patch('pocketdeploy.github.GitHub', return_value=github), patch('pocketdeploy.health.verify', side_effect=event('https')):
+            with pytest.raises(DeployError, match='synthetic secret'):
+                asyncio.run(converge(config, state, cloud, host, operation, Reporter(quiet=True)))
+        assert state.get_meta('github-key-pending:example/site') is True
+        assert all(path.is_file() for path in github.key_paths(github.apps[0]))
 
 
 def test_removed_github_config_still_checks_recorded_environment(tmp_path):
@@ -256,6 +304,20 @@ def test_init_refuses_github_key_aliasing_host_authority(tmp_path):
     with pytest.raises(DeployError, match='distinct paths'):
         initialize(config, None, host, tmp_path)
     assert not list(tmp_path.iterdir())
+
+
+def test_init_creates_no_github_keys(tmp_path):
+    from pocketdeploy.cli import initialize
+    from pocketdeploy.host import Host
+    from pocketdeploy.state import State
+    config = {'profile': 'test', 'state-file': '.colors.sqlite', 'workdir': '.colors',
+              '_file': str(tmp_path / 'colors.yml'),
+              'once': {'applications': [{'github': 'example/site', 'host': 'www.example.test',
+                                         'image': 'ghcr.io/example/site:latest'}]}}
+    with State(tmp_path / '.colors.sqlite', 'test', {}, create=True) as state:
+        initialize(config, state, Host(config, state, tmp_path), tmp_path)
+        assert state.get_meta('github-key-pending:example/site') is None
+    assert not list((tmp_path / '.ssh').glob('github-*'))
 
 
 def test_github_external_dns_still_requires_public_https():

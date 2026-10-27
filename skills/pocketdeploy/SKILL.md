@@ -77,8 +77,8 @@ time. It makes no Vault call and does not establish freshness. A restored
 snapshot may contain a prior receipt. A plan is not proof of completed convergence.
 
 `converge` runs the DAG: preflight → keys → compute → host → service DNS →
-SMTP verification → SMTP credentials → applications → HTTPS verification → GitHub.
-SMTP stages are skipped when Resend is disabled. `create` is removed; there is no compatibility alias. Cloud/app mutations must stay within the user's authorized scope;
+SMTP verification → SMTP credentials → applications → HTTPS verification → GitHub
+→ GitHub keys. SMTP stages are skipped when Resend is disabled. `create` is removed; there is no compatibility alias. Cloud/app mutations must stay within the user's authorized scope;
 existing authorization applies without repeated permission requests. Expired
 provider authentication requires renewal through the configured CLI identity,
 not a different account or operator credentials. Report the failing stage and
@@ -187,11 +187,15 @@ uploads last with exact references. `colors.yml`, `.envrc` and code come from Gi
 The snapshot records the configuration content SHA256 and Git commit when
 available. Commit desired configuration before saving or preserve local edits
 separately; content hashes must match during recovery.
-GitHub deployment keys are excluded. `converge` recreates missing pairs; use
-`converge --rotate-github-keys` for deliberate rotation. Old host authority stays
-until the new GitHub secret is accepted, then it is removed. Interrupted rotations
-resume; queued jobs holding an old secret may need retrying. Read-only commands
-never rotate keys.
+GitHub deployment keys are excluded. Every `converge` rotates every configured
+GitHub deployment key: new host key alongside the old, then the `SSH_PRIVATE_KEY`
+secret, then removal of the old host authority. Interrupted rotations resume with
+the same pending key. The final `github-keys` step deletes the local
+`.ssh/github-<repository-hash>` pair (and leftovers from older versions) after the
+`github` step succeeds; if `github` fails, pending keys stay for the retry. `init`
+creates no GitHub keys; `plan`, `status` and dry runs never generate, rotate or
+delete them. Converge is never a no-op for GitHub targets; CI jobs that read the
+old secret before it and connect after it may need a re-run.
 Vault encrypts remote copies, not local files. Only explicit `vault-save` uploads
 a checkpoint; provisioning, convergence, deletion and failed workflows never
 back up automatically. Remove the retired `vault-save-after-run` field, even if

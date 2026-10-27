@@ -181,10 +181,11 @@ when encrypted recovery is configured. The first snapshot preserves authority
 before provisioning; the second records the resulting resource identities.
 
 `converge` runs a DAG: preflight → keys → compute → host → service DNS →
-SMTP verification → SMTP credentials → applications → HTTPS verification → GitHub.
-SMTP stages are skipped when Resend is disabled.
+SMTP verification → SMTP credentials → applications → HTTPS verification → GitHub
+→ GitHub keys. SMTP stages are skipped when Resend is disabled.
 Each external mutation records intent first and the verified result afterward.
 An unchanged converge makes no compute-provider mutations and no application replacement.
+It still rotates every GitHub deployment key.
 Host setup still verifies/enables services, and mutable image tags are pulled to
 check whether their immutable digest changed. Prefer digest-pinned app images
 for reproducibility. `plan` never creates cloud resources or keys; mutable image
@@ -505,7 +506,7 @@ existing instance require restoration; they are not silently regenerated.
 When a private key path is customized, its public key defaults to that path plus
 `.pub`, including in Vault recovery sets. An explicit public key path overrides
 this default. The `.ssh/github-<repository-hash>` key paths are reserved for
-disposable GitHub authority and cannot be used for other deployment files.
+transient GitHub authority and cannot be used for other deployment files.
 
 Application environment and configuration updates are reconciled, including
 changes to an existing hostname. Secrets travel to the host over SSH stdin; ONCE's
@@ -622,15 +623,20 @@ GitHub environment names equal the durable deployment `profile`, with one app pe
 GitHub repository per deployment. The controller installs a restricted separate
 SSH key, main-only branch policy, `SSH_PRIVATE_KEY` environment secret and
 `SERVER_IP`, `SERVER_USER`, `SSH_KNOWN_HOSTS`, `SITE_URL`,
-`POCKETDEPLOY_PROFILE`, `POCKETDEPLOY_DEPLOYMENT_ID` variables. SSH keys remain in
-ignored `.ssh/github-<repository-hash>` files. `init` prepares these local keys,
-but Vault snapshots exclude them. Missing or incomplete GitHub key pairs are
-recreated by `converge`; unchanged runs reuse them. To rotate deliberately, run
-`pocketdeploy converge --rotate-github-keys`. Rotation installs the new public key
-alongside the old one, updates the GitHub secret, then removes the old authority.
-Interrupted rotations resume with the pending key. Queued jobs that already read
-the old secret may need retrying after rotation. `plan` and `status` never rotate
-keys. Provisioning an environment and its
+`POCKETDEPLOY_PROFILE`, `POCKETDEPLOY_DEPLOYMENT_ID` variables. Every `converge`
+rotates every configured GitHub deployment key: it installs a new restricted public
+key alongside the old one, updates the `SSH_PRIVATE_KEY` secret, then removes the
+old host authority. The pending key is kept in ignored
+`.ssh/github-<repository-hash>` files only while rotation is pending; an
+interrupted rotation resumes with the same key. After the `github` step succeeds,
+the final `github-keys` step deletes both local files, including files left by
+older versions. If the `github` step fails, `github-keys` does not run and pending
+keys stay for the retry. `init` creates no GitHub keys, and Vault snapshots exclude
+them. `plan`, `status` and dry runs never generate, rotate or delete keys. Every
+converge therefore updates GitHub secrets and host `authorized_keys`, repairs a
+secret changed manually on GitHub, and invalidates a leaked deployment key. CI jobs
+that read the old secret before a converge and connect after it may fail and need
+a re-run. Provisioning an environment and its
 settings is not atomic; a release during setup may fail until convergence completes.
 
 The website workflow discovers all existing environments after publishing its

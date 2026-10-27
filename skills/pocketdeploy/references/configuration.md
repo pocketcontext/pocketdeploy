@@ -208,10 +208,12 @@ version or a global fixed prefix.
 Example sending identity: `smtp-domain: notifications.bigconfig.online` and
 `smtp-from: mail@notifications.bigconfig.online`. Existing resources are not
 adopted by name. SQLite stores provider IDs and sending credentials; `.ssh/`
-stores operator, host and per-repository deployment keys. GitHub deployment keys
-are excluded from Vault and recreated during convergence when missing. Use
-`converge --rotate-github-keys` for explicit rotation; normal runs reuse keys.
-`plan` and `status` never rotate them.
+stores operator and host keys, plus per-repository GitHub deployment keys only
+while a rotation is pending. Every `converge` rotates every configured GitHub
+deployment key; its final `github-keys` step deletes the local
+`.ssh/github-<repository-hash>` files after the `github` step succeeds. GitHub
+deployment keys are excluded from Vault. `init` creates none; `plan`, `status` and
+dry runs never generate, rotate or delete them.
 
 `converge` reconciles service DNS, waits for SMTP verification in a separate DAG
 stage, then provisions SMTP credentials, applications and HTTPS before publishing

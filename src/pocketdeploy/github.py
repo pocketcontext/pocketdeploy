@@ -66,25 +66,39 @@ class GitHub:
         private = local_path(self.root, '.ssh/github-' + token)
         return private, Path(str(private) + '.pub')
 
-    def _key(self, app):
-        validate_local_paths(self.config, self.root, state_path=self.state.path)
-        private, public = self.key_paths(app)
-        # Missing or partial local credentials are disposable. Validate every
-        # surviving file before replacement; never follow a symlink.
-        for path in (private, public):
+    def _check_files(self, paths):
+        for path in paths:
             if path.is_symlink():
                 raise DeployError('GitHub keys must not be symlinks.')
             if path.exists():
-                info = path.stat()
+                info = path.lstat()
                 if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
                     raise DeployError('GitHub keys must be owned regular files without hardlinks.')
+
+    def _matches(self, private, public):
+        if not private.exists() or not public.exists():
+            return False
+        private.chmod(0o600)
+        public.chmod(0o600)
+        try:
+            derived = run(['ssh-keygen', '-y', '-P', '', '-f', str(private)]).split()
+        except DeployError:
+            return False
+        return len(derived) >= 2 and derived[:2] == public.read_text().split()[:2]
+
+    def _key(self, app):
+        """Return this run's key: the pending pair of an interrupted rotation, otherwise a fresh pair."""
+        validate_local_paths(self.config, self.root, state_path=self.state.path)
+        private, public = self.key_paths(app)
+        # Validate every surviving file before replacement; never follow a symlink.
+        self._check_files((private, public))
         pending = 'github-key-pending:' + app['github']
-        if self.state.get_meta(pending) == 'replace' or private.exists() != public.exists():
+        if self.state.get_meta(pending) is not True or not self._matches(private, public):
+            # Record intent before removing local authority. An interrupted
+            # retry reuses the pending key instead of rotating it again.
             self.state.set_meta(pending, 'replace')
             private.unlink(missing_ok=True)
             public.unlink(missing_ok=True)
-        if not private.exists():
-            self.state.set_meta(pending, 'replace')
             private.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(prefix='.colors-github-key-', dir=self.root) as directory:
                 generated = Path(directory) / 'key'
@@ -96,21 +110,26 @@ class GitHub:
                     except FileExistsError:
                         raise DeployError('GitHub key destination appeared; existing files were preserved.') from None
             self.state.set_meta(pending, True)
-        for path in (private, public):
-            info = path.stat()
-            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
-                raise DeployError('GitHub keys must be owned regular files without hardlinks.')
-        private.chmod(0o600)
-        public.chmod(0o600)
-        derived = run(['ssh-keygen', '-y', '-P', '', '-f', str(private)]).split()
-        if derived[:2] != public.read_text().split()[:2] or len(derived) < 2:
+        self._check_files((private, public))
+        if not self._matches(private, public):
             raise DeployError('GitHub deployment key pair does not match; remove the disposable pair and retry convergence.')
         self.state.set_meta('github-key:' + app['github'], {'path': str(private.relative_to(self.root))})
         return private, public.read_text().strip()
 
-    def prepare_keys(self):
-        for app in self.apps:
-            self._key(app)
+    def delete_keys(self):
+        """Remove used local key pairs; pending pairs stay for resumption."""
+        self._cleanup_paths()
+        deleted = 0
+        for repo in self._cleanup_repositories():
+            if self.state.get_meta('github-key-pending:' + repo, False):
+                continue
+            for path in self.key_paths({'github': repo}):
+                if path.exists():
+                    path.unlink()
+                    deleted += 1
+            if self.state.get_meta('github-key:' + repo):
+                self.state.set_meta('github-key:' + repo, None)
+        return {'deleted_key_files': deleted}
 
     def preflight(self):
         if self.state is not None:
@@ -261,7 +280,7 @@ class GitHub:
                 self.state.set_meta('github-pending:' + repo, False)
         return {'deleted_environments': removed}
 
-    def converge(self, connection, operation_id, rotate_keys=False):
+    def converge(self, connection, operation_id):
         results = []
         for app in self.apps:
             repo = app['github']
@@ -281,11 +300,6 @@ class GitHub:
                 if variables.get('POCKETDEPLOY_DEPLOYMENT_ID') != self.state.deployment_id and not (variables.get('POCKETDEPLOY_DEPLOYMENT_ID') is None and self.state.get_meta('github-pending:' + repo, False)):
                     raise DeployError('GitHub environment deployment ownership does not match.')
             pending = 'github-key-pending:' + repo
-            if rotate_keys and not self.state.get_meta(pending, False):
-                # Record intent before removing local authority. An interrupted
-                # retry reuses the pending key instead of rotating it again.
-                self._key(app)  # validate existing paths before unlinking
-                self.state.set_meta(pending, 'replace')
             private, public = self._key(app)
             # Install and verify host authority before making a new CI target visible.
             self.host.install_github(connection, [{'app': app, 'public_key': public, 'repository': repo, 'preserve_existing_keys': True}])

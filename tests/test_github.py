@@ -38,16 +38,30 @@ def test_unmanaged_environment_never_mutated(tmp_path):
         github.host.install_github.assert_not_called()
 
 
-def test_converge_publishes_secret_only_on_stdin_and_reuses_authority(tmp_path):
+def keygen_only(args, **kwargs):
+    return real_run(args, **kwargs) if args[0] == 'ssh-keygen' else ''
+
+
+def owned_pages(state):
+    existing = {'name': 'test-profile', 'id': 42, 'deployment_branch_policy':
+                {'protected_branches': False, 'custom_branch_policies': True}}
+    def pages(endpoint, field):
+        return {'environments': [existing], 'variables': [
+            {'name': 'POCKETDEPLOY_DEPLOYMENT_ID', 'value': state.deployment_id}],
+            'branch_policies': [{'name': 'main', 'type': 'branch'}]}[field]
+    return pages
+
+
+def test_converge_publishes_secret_only_on_stdin(tmp_path):
     github, state = fixture(tmp_path)
     with state:
         private, public = github._key(github.apps[0])
         first = private.read_bytes()
-        with patch('pocketdeploy.github.run', side_effect=lambda args, **kwargs: real_run(args, **kwargs) if '-y' in args else (_ for _ in ()).throw(AssertionError('must reuse'))):
+        with patch('pocketdeploy.github.run', side_effect=lambda args, **kwargs: real_run(args, **kwargs) if '-y' in args else (_ for _ in ()).throw(AssertionError('must resume pending key'))):
             assert github._key(github.apps[0])[1] == public
         assert private.read_bytes() == first
         operation = state.begin_operation('converge', 'test')
-        with patch.object(github, '_pages', side_effect=[[], []]), patch.object(github, '_api', return_value={'id': 42}), patch('pocketdeploy.github.run', side_effect=lambda args, **kwargs: real_run(args, **kwargs) if args[0] == 'ssh-keygen' else '') as run:
+        with patch.object(github, '_pages', side_effect=[[], []]), patch.object(github, '_api', return_value={'id': 42}), patch('pocketdeploy.github.run', side_effect=keygen_only) as run:
             result = github.converge({'ip': '192.0.2.1', 'user': 'ubuntu'}, operation)
         assert result == {'environments': [{'repository': 'example/site', 'environment': 'test-profile'}]}
         calls = run.call_args_list
@@ -58,10 +72,33 @@ def test_converge_publishes_secret_only_on_stdin_and_reuses_authority(tmp_path):
         assert known_hosts.kwargs['input'] == '192.0.2.1 ssh-ed25519 cm90YXRlZA=='
         github.host.trusted_public.assert_called_once_with({'ip': '192.0.2.1', 'user': 'ubuntu'})
         assert state.get_resource('github:example/site')['provider_id'] == '42'
-        private.unlink()
-        recovered, recovered_public = github._key(github.apps[0])
-        assert recovered.read_bytes() != first
-        assert recovered_public != public
+
+
+def test_every_converge_rotates_with_two_phase_host_install(tmp_path):
+    github, state = fixture(tmp_path)
+    with state:
+        state.put_resource('github:example/site', 'github-environment', '42', {})
+        published = []
+        def record(args, **kwargs):
+            if args[0] != 'ssh-keygen' and args[1] == 'secret':
+                published.append(kwargs['input'])
+            return keygen_only(args, **kwargs)
+        operation = state.begin_operation('converge', 'test')
+        for _ in range(2):
+            calls = []
+            github.host.install_github.side_effect = lambda connection, targets: calls.append(('host', targets[0]['preserve_existing_keys']))
+            def tracked(args, **kwargs):
+                if args[0] == 'gh' and args[1] == 'secret':
+                    calls.append(('secret',))
+                return record(args, **kwargs)
+            with patch.object(github, '_pages', side_effect=owned_pages(state)), patch('pocketdeploy.github.run', side_effect=tracked):
+                github.converge({'ip': '192.0.2.1'}, operation)
+            assert calls == [('host', True), ('secret',), ('host', False)]
+            assert state.get_meta('github-key-pending:example/site') is False
+            assert github.delete_keys() == {'deleted_key_files': 2}
+        assert len(published) == 2 and published[0] != published[1]
+        assert not any(path.exists() for path in github.key_paths(github.apps[0]))
+        assert state.get_meta('github-key:example/site') is None
 
 
 def test_paginated_environments(tmp_path):
@@ -127,13 +164,7 @@ def test_rotation_preserves_old_authority_until_secret_success_and_retries(tmp_p
         original = private.read_bytes()
         state.set_meta('github-key-pending:example/site', False)
         state.put_resource('github:example/site', 'github-environment', '42', {})
-        existing = {'name': 'test-profile', 'id': 42, 'deployment_branch_policy':
-                    {'protected_branches': False, 'custom_branch_policies': True}}
-        def pages(endpoint, field):
-            return {'environments': [existing], 'variables': [
-                {'name': 'POCKETDEPLOY_DEPLOYMENT_ID', 'value': state.deployment_id}],
-                'branch_policies': [{'name': 'main', 'type': 'branch'}]}[field]
-        from pocketdeploy.common import run as real_run
+        pages = owned_pages(state)
         def fail_secret(args, **kwargs):
             if args[0] == 'ssh-keygen':
                 return real_run(args, **kwargs)
@@ -143,14 +174,16 @@ def test_rotation_preserves_old_authority_until_secret_success_and_retries(tmp_p
         operation = state.begin_operation('converge', 'test')
         with patch.object(github, '_pages', side_effect=pages), patch('pocketdeploy.github.run', side_effect=fail_secret):
             with pytest.raises(DeployError, match='uncertain'):
-                github.converge({'ip': '192.0.2.1'}, operation, rotate_keys=True)
+                github.converge({'ip': '192.0.2.1'}, operation)
         rotated = private.read_bytes()
         assert rotated != original
         assert state.get_meta('github-key-pending:example/site') is True
         assert github.host.install_github.call_count == 1
         assert github.host.install_github.call_args.args[1][0]['preserve_existing_keys'] is True
-        with patch.object(github, '_pages', side_effect=pages), patch('pocketdeploy.github.run', side_effect=lambda args, **kwargs: real_run(args, **kwargs) if args[0] == 'ssh-keygen' else ''):
-            github.converge({'ip': '192.0.2.1'}, operation, rotate_keys=True)
+        assert github.delete_keys() == {'deleted_key_files': 0}
+        assert private.read_bytes() == rotated
+        with patch.object(github, '_pages', side_effect=pages), patch('pocketdeploy.github.run', side_effect=keygen_only):
+            github.converge({'ip': '192.0.2.1'}, operation)
         assert private.read_bytes() == rotated
         assert github.host.install_github.call_args.args[1][0]['preserve_existing_keys'] is False
         assert state.get_meta('github-key-pending:example/site') is False
@@ -206,22 +239,60 @@ def test_failed_prune_reuses_published_candidate(tmp_path):
                     {'protected_branches': False, 'custom_branch_policies': True}}
         with patch.object(github, '_pages', side_effect=[[existing], [
                 {'name': 'POCKETDEPLOY_DEPLOYMENT_ID', 'value': state.deployment_id}], [{'name': 'main'}]]), patch('pocketdeploy.github.run', side_effect=lambda args, **kwargs: real_run(args, **kwargs) if args[0] == 'ssh-keygen' else ''):
-            github.converge({'ip': '192.0.2.1'}, operation, rotate_keys=True)
+            github.converge({'ip': '192.0.2.1'}, operation)
         assert private.read_bytes() == candidate
         assert state.get_meta('github-key-pending:example/site') is False
 
 
-def test_mismatched_key_pair_fails_before_remote_changes(tmp_path):
+def test_mismatched_pending_pair_is_replaced_before_remote_changes(tmp_path):
     github, state = fixture(tmp_path)
     with state:
         private, _ = github._key(github.apps[0])
+        original = private.read_bytes()
         public = github.key_paths(github.apps[0])[1]
         public.write_text('ssh-ed25519 c3ludGhldGlj mismatched')
+        github.host.install_github.side_effect = DeployError('synthetic host failure')
         operation = state.begin_operation('converge', 'test')
         with patch.object(github, '_pages', return_value=[]):
-            with pytest.raises(DeployError, match='does not match'):
+            with pytest.raises(DeployError, match='synthetic host'):
                 github.converge({'ip': '192.0.2.1'}, operation)
-        github.host.install_github.assert_not_called()
+        assert private.read_bytes() != original
+        assert 'mismatched' not in github.host.install_github.call_args.args[1][0]['public_key']
+
+
+def test_key_deletion_skips_pending_and_removes_leftovers(tmp_path):
+    github, state = fixture(tmp_path)
+    with state:
+        github._key(github.apps[0])
+        private, public = github.key_paths(github.apps[0])
+        for value in (True, 'replace'):
+            state.set_meta('github-key-pending:example/site', value)
+            assert github.delete_keys() == {'deleted_key_files': 0}
+            assert private.exists() and public.exists()
+        # Pairs from older versions were reused with pending False.
+        state.set_meta('github-key-pending:example/site', False)
+        assert github.delete_keys() == {'deleted_key_files': 2}
+        assert not private.exists() and not public.exists()
+        assert state.get_meta('github-key:example/site') is None
+        assert github.delete_keys() == {'deleted_key_files': 0}
+
+
+def test_key_deletion_refuses_unsafe_files(tmp_path):
+    import os
+    github, state = fixture(tmp_path)
+    with state:
+        github._key(github.apps[0])
+        private, public = github.key_paths(github.apps[0])
+        state.set_meta('github-key-pending:example/site', False)
+        os.link(private, tmp_path / 'extra-link')
+        with pytest.raises(DeployError, match='hardlinks'):
+            github.delete_keys()
+        assert private.exists() and public.exists()
+        (tmp_path / 'extra-link').unlink()
+        github.config['ssh-private-key-file'] = str(private)
+        with pytest.raises(DeployError):
+            github.delete_keys()
+        assert private.exists() and public.exists()
 
 
 def test_delete_recovery_preserves_cleanup_until_explicit_finish(tmp_path):
@@ -310,7 +381,7 @@ def test_key_preparation_preserves_colliding_state(tmp_path, public, configured)
         identity = state.deployment_id
         with patch('pocketdeploy.github.run') as run:
             with pytest.raises(DeployError, match='GitHub authority'):
-                github.prepare_keys()
+                github._key(github.apps[0])
             run.assert_not_called()
         assert target.read_bytes() == before
         assert state.deployment_id == identity

@@ -138,6 +138,11 @@ def test_smtp_timeout_forwarded_to_workflow(tmp_path, monkeypatch, value, expect
     assert calls == [expected]
 
 
+def test_rotate_github_keys_option_removed():
+    with pytest.raises(cli.UsageError):
+        cli.parser().parse_args(['converge', '--rotate-github-keys'])
+
+
 def init_offline(tmp_path, monkeypatch, extra=''):
     from pocketdeploy.config import load, scope
     (tmp_path / 'colors.yml').write_text(SYNTHETIC_CONFIG + extra)
