@@ -3,7 +3,7 @@ name = "pocketdeploy"
 version = "0.1.0"
 description = "Recoverable OCI, DigitalOcean, Google Cloud, Hetzner and ONCE deployments with private SQLite state"
 requires-python = ">=3.11"
-dependencies = ["blue @ git+https://github.com/getcolors/blue.git@784018bb586882efbd91affd42139582a40ea1d1"]
+dependencies = ["blue @ git+https://github.com/getcolors/blue.git@9a8ef82373205a7a3c4f543e7f76fa2ca748172d"]
 
 [project.scripts]
 pocketdeploy = "pocketdeploy.cli:main"
