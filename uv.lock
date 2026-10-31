@@ -5,7 +5,7 @@ requires-python = ">=3.11"
 [[package]]
 name = "blue"
 version = "0.1.0"
-source = { git = "https://github.com/getcolors/blue.git?rev=9a8ef82373205a7a3c4f543e7f76fa2ca748172d#9a8ef82373205a7a3c4f543e7f76fa2ca748172d" }
+source = { git = "https://github.com/getcolors/blue.git?rev=0c5ee6a279a61cf247c9af2a0621d715c848efd4#0c5ee6a279a61cf247c9af2a0621d715c848efd4" }
 dependencies = [
     { name = "pyyaml" },
 ]
@@ -61,7 +61,7 @@ test = [
 
 [package.metadata]
 requires-dist = [
-    { name = "blue", git = "https://github.com/getcolors/blue.git?rev=9a8ef82373205a7a3c4f543e7f76fa2ca748172d" },
+    { name = "blue", git = "https://github.com/getcolors/blue.git?rev=0c5ee6a279a61cf247c9af2a0621d715c848efd4" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8,<10" },
 ]
 provides-extras = ["test"]
