@@ -10,6 +10,7 @@ from pocketdeploy.state import State
 
 @pytest.fixture
 def kms(tmp_path, monkeypatch):
+    monkeypatch.setenv('COLORS_PAR_APP_IDENTITYCONTEXT_OCI_USER_EMAIL', 'signer@example.test')
     config = {'profile': 'test', '_root': str(tmp_path), 'provider-compute': 'oci',
               'oci-compartment-id': 'ocid1.compartment.oc1.example', 'oci-region': 'eu-frankfurt-1',
               'oci-kms': {'name': 'identitycontext', 'tenancy-id': 'ocid1.tenancy.oc1.example',
@@ -64,6 +65,9 @@ def kms(tmp_path, monkeypatch):
             if role == 'key':
                 row.update({'key-shape': body['keyShape'], 'protection-mode': body['protectionMode'],
                             'current-key-version': adapter.version, 'lifecycle-state': 'ENABLED'})
+            if role == 'user':
+                row['email'] = body['email']
+                row['name'] = body['name']
             if role == 'policy':
                 row['statements'] = body['statements']
             adapter.rows[role].append(row)
@@ -292,3 +296,65 @@ def test_provisioning_key_reports_readiness_before_shape(kms):
     kms.rows['key'][0].pop('key-shape')
     with pytest.raises(DeployError, match='not ready'):
         kms.converge(operation(kms))
+
+
+def test_missing_runtime_email_blocks_before_cloud_mutations(kms, monkeypatch):
+    monkeypatch.delenv('COLORS_PAR_APP_IDENTITYCONTEXT_OCI_USER_EMAIL')
+    with pytest.raises(DeployError, match='runtime user email'):
+        kms.converge(operation(kms))
+    assert kms.calls == []
+
+
+def rejected_creation(kms):
+    op = operation(kms)
+    step = kms.state.intent(op, 'kms-create-user', {'role': 'user'})
+    kms.state.set_meta('kms-pending-user', {'step': step, 'operation': op})
+    event = {'event-id': '10e57db6-1023-4233-98fb-c9c28af1be62', 'data': {
+        'event-name': 'CreateUser', 'resource-name': 'identitycontext-signer', 'request': {'parameters': {'name': 'identitycontext-signer',
+        'freeformTags': {'pocketdeploy-operation': op}}},
+        'response': {'status': '400', 'message': 'Email is required'}}}
+    return step, event
+
+
+def test_audit_reconciles_only_definite_exact_user_rejection(kms, monkeypatch):
+    step, event = rejected_creation(kms)
+    original = kms._call
+    monkeypatch.setattr(kms, '_call', lambda *a, **kw: [event] if a[:3] == ('audit', 'event', 'list') else original(*a, **kw))
+    result = kms.resolve_user_create(event['event-id'], operation(kms))
+    assert result['provider_rejected'] and result['user_absent']
+    assert kms.state.get_meta('kms-pending-user') is None
+    assert kms.state.db.execute('SELECT status FROM steps WHERE id=?', (step,)).fetchone()[0] == 'failed'
+    assert not any('create' in args for args, _ in kms.calls)
+
+
+@pytest.mark.parametrize('change', ['operation', 'name', 'status', 'event', 'message'])
+def test_uncorrelated_audit_cannot_clear_pending(kms, monkeypatch, change):
+    step, event = rejected_creation(kms)
+    if change == 'operation': event['data']['request']['parameters']['freeformTags'] = {}
+    elif change == 'name': event['data']['resource-name'] = 'other'
+    elif change == 'status': event['data']['response']['status'] = '500'
+    elif change == 'event': event['data']['event-name'] = 'UpdateUser'
+    else: event['data']['response']['message'] = 'Unknown failure'
+    original = kms._call
+    monkeypatch.setattr(kms, '_call', lambda *a, **kw: [event] if a[:3] == ('audit', 'event', 'list') else original(*a, **kw))
+    with pytest.raises(DeployError): kms.resolve_user_create(event['event-id'], operation(kms))
+    assert kms.state.get_meta('kms-pending-user') is not None
+    assert kms.state.db.execute('SELECT status FROM steps WHERE id=?', (step,)).fetchone()[0] == 'pending'
+
+
+def test_existing_user_prevents_repeat_create_even_after_rejection(kms, monkeypatch):
+    step, event = rejected_creation(kms)
+    kms.rows['user'] = [{'name': 'identitycontext-signer', 'freeform-tags': {}}]
+    original = kms._call
+    monkeypatch.setattr(kms, '_call', lambda *a, **kw: [event] if a[:3] == ('audit', 'event', 'list') else original(*a, **kw))
+    with pytest.raises(DeployError, match='matching runtime user exists'):
+        kms.resolve_user_create(event['event-id'], operation(kms))
+    assert kms.state.get_meta('kms-pending-user') is not None
+
+
+def test_identity_domain_audit_metadata_correlates_rejection(kms, monkeypatch):
+    step, event = rejected_creation(kms)
+    event['data']['additional-details'] = {'adminValuesAdded': event['data'].pop('request')['parameters']}
+    original = kms._call
+    monkeypatch.setattr(kms, '_call', lambda *a, **kw: [event] if a[:3] == ('audit', 'event', 'list') else original(*a, **kw))
+    assert kms.resolve_user_create(event['event-id'], operation(kms))['provider_rejected']

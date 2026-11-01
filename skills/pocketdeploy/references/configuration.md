@@ -261,3 +261,9 @@ after an uncertain rotation; it never creates a version. Ordinary deletion retai
 all signing authority and private recovery files. No automatic key deletion or
 untagged resource adoption exists. See the repository README's OCI KMS section
 for ownership, credential and recovery details.
+
+KMS convergence also requires private `COLORS_PAR_<binding-prefix>_OCI_USER_EMAIL`
+for the dedicated runtime IAM user's unique mailbox/alias; planning does not.
+If an older create failed for missing email, `kms-resolve-user-create
+--kms-event-id EVENT_ID` settles only a correlated OCI Audit HTTP400 email
+rejection after proving user absence. Never clear uncertain mutations manually.

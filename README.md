@@ -902,6 +902,12 @@ oci-kms:
   binding-prefix: APP_IDENTITYCONTEXT
 ```
 
+Provide the dedicated runtime identity's existing mailbox/alias privately as
+`COLORS_PAR_APP_IDENTITYCONTEXT_OCI_USER_EMAIL` (the prefix follows
+`binding-prefix`). OCI identity-domain tenancies require a unique email for user
+creation. Convergence validates this binding before making cloud changes; plans
+do not require it. The mailbox is not an application signing credential.
+
 After `init` (or restoring the existing deployment checkpoint), use
 `pocketdeploy kms-plan`, then `pocketdeploy kms-converge`. These commands do not
 converge applications, rotate GitHub keys, or require application environment
@@ -938,6 +944,13 @@ using deployment UUID/role tags. A lost response is recovered only by matching
 those tags and the pending operation. Names never establish ownership. A missing
 recorded resource or an uncertain create with no matching resource blocks retries.
 A still-provisioning vault/key is left pending; retry after OCI reports readiness.
+For an older pending user creation rejected for missing email, use
+`kms-resolve-user-create --kms-event-id EVENT_ID`. It re-reads OCI Audit, requires
+the exact pending operation tag and runtime user name with HTTP 400/email
+rejection, and verifies no matching user exists before atomically settling that
+intent. It never retries the create. Supply the dedicated email binding and run
+`kms-converge` afterward. Network failures and uncorrelated audit events remain
+blocked. Audit read permissions are required only for this recovery command.
 Existing untagged infrastructure is not adopted by name. An ownership transfer
 requires a separately reviewed procedure; restoring this deployment's checkpoint
 recovers its already-owned resources.

@@ -135,7 +135,7 @@ class OCI:
                              ('kms', 'management', 'key', 'list'),
                              ('iam', 'user', 'list'), ('iam', 'group', 'list'),
                              ('iam', 'policy', 'list'), ('iam', 'group', 'list-users'),
-                             ('iam', 'user', 'list-groups'), ('iam', 'user', 'api-key', 'list'))
+                             ('iam', 'user', 'list-groups'), ('iam', 'user', 'api-key', 'list'), ('audit', 'event', 'list'))
             return [] if any(tuple(args[:len(prefix)]) == prefix for prefix in list_commands) else None
         try:
             return json.loads(output).get('data')

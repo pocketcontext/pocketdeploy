@@ -38,6 +38,7 @@ def parser():
   kms-plan       Inspect signing vault/key and runtime identity changes
   kms-converge   Provision retained OCI signing infrastructure
   kms-rotate     Explicitly rotate the recorded HSM signing key
+  kms-resolve-user-create  Reconcile rejected user creation using --kms-event-id
   kms-resolve-rotation  Verify a pending rotation using --kms-version-id
   init           Prepare local state and SSH keys; no cloud or Vault calls
   plan           Read live resources and report proposed changes
@@ -69,12 +70,13 @@ Examples:
 
 Configuration defaults to colors.yml in the current working directory.
 Use -f to select a deployment. Run without arguments to show this help.''')
-    p.add_argument('command', metavar='COMMAND', choices=['kms-resolve-rotation', 'kms-plan', 'kms-converge', 'kms-rotate', 'init', 'plan', 'converge', 'status', 'ssh', 'delete', 'adopt', 'adopt-app', 'adopt-dns', 'dns-evidence', 'smtp-test', 'rotate-host-key', 'steps', 'resolve-step', 'clear-pending-marker', 'vault-save', 'vault-restore'], help='Deployment or Vault command listed below')
+    p.add_argument('command', metavar='COMMAND', choices=['kms-resolve-user-create', 'kms-resolve-rotation', 'kms-plan', 'kms-converge', 'kms-rotate', 'init', 'plan', 'converge', 'status', 'ssh', 'delete', 'adopt', 'adopt-app', 'adopt-dns', 'dns-evidence', 'smtp-test', 'rotate-host-key', 'steps', 'resolve-step', 'clear-pending-marker', 'vault-save', 'vault-restore'], help='Deployment or Vault command listed below')
     p.add_argument('-f', '--file', help='Configuration file (default: ./colors.yml in the current working directory)')
     p.add_argument('--json', action='store_true', help='Emit one versioned JSON result on stdout')
     p.add_argument('--verbose', action='store_true', help='Show safe request timings and waiting progress on stderr')
     p.add_argument('--quiet', action='store_true', help='Suppress progress on stderr')
     p.add_argument('--dry-run', action='store_true', help='Plan converge/delete without applying changes')
+    p.add_argument('--kms-event-id', help='Exact OCI rejection audit event ID for kms-resolve-user-create')
     p.add_argument('--kms-version-id', help='Exact observed key-version OCID for kms-resolve-rotation')
     p.add_argument('--instance-id', help='Exact owned provider instance identity for explicit recovery/adoption')
     p.add_argument('--app-host', help='Exact application host for adopt-app or clear-pending-marker')
@@ -222,6 +224,8 @@ def execute(args, reporter=None):
 
 def _execute(args, reporter=None):
     reporter = reporter or Reporter(quiet=getattr(args, "quiet", False), command=args.command)
+    if bool(getattr(args, 'kms_event_id', None)) != (args.command == 'kms-resolve-user-create'):
+        raise DeployError('kms-resolve-user-create requires --kms-event-id; other commands do not accept it.', code='invalid_usage')
     if bool(getattr(args, 'kms_version_id', None)) != (args.command == 'kms-resolve-rotation'):
         raise DeployError('kms-resolve-rotation requires --kms-version-id; other commands do not accept it.')
     dns_options = ('dns_host', 'dns_zone_id', 'dns_record_id', 'dns_ipv4', 'dns_settings_sha256', 'previous_dns_manager_disabled')
@@ -279,7 +283,7 @@ def _execute(args, reporter=None):
     config_file = args.file if args.file is not None else 'colors.yml'
     if args.file is None and not Path(config_file).exists():
         raise DeployError('No colors.yml found in the current directory; use -f to select a configuration.')
-    config = load(config_file, resolve=args.command not in ('kms-resolve-rotation', 'kms-plan', 'kms-converge', 'kms-rotate', 'init', 'ssh', 'delete', 'vault-save', 'vault-restore', 'status', 'smtp-test', 'rotate-host-key', 'steps', 'resolve-step', 'clear-pending-marker'))
+    config = load(config_file, resolve=args.command not in ('kms-resolve-user-create', 'kms-resolve-rotation', 'kms-plan', 'kms-converge', 'kms-rotate', 'init', 'ssh', 'delete', 'vault-save', 'vault-restore', 'status', 'smtp-test', 'rotate-host-key', 'steps', 'resolve-step', 'clear-pending-marker'))
     # Reject unsupported application behavior before any cloud mutation.
     from .host import validate_config
     if args.command != 'rotate-host-key':
@@ -316,7 +320,9 @@ def _execute(args, reporter=None):
                     return kms.plan()
                 operation = state.begin_operation(args.command, config['_desired_hash'])
                 try:
-                    if args.command == 'kms-resolve-rotation':
+                    if args.command == 'kms-resolve-user-create':
+                        result = kms.resolve_user_create(args.kms_event_id, operation)
+                    elif args.command == 'kms-resolve-rotation':
                         result = kms.resolve_rotation(args.kms_version_id)
                     else:
                         result = kms.rotate(operation) if args.command == 'kms-rotate' else kms.converge(operation)

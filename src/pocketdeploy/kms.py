@@ -1,6 +1,9 @@
 """Explicit OCI signing infrastructure. No application deletion owns its lifetime."""
 import base64
 import hashlib
+import datetime
+import json
+import uuid
 import os
 from pathlib import Path
 import re
@@ -47,6 +50,12 @@ class KMS(OCI):
         if previous is not None and previous != expected:
             raise DeployError('KMS scope changed; restore its recorded configuration before recovery.')
         self.scope = expected
+
+    def _runtime_email(self):
+        value = os.environ.get('COLORS_PAR_' + self.settings['binding-prefix'] + '_OCI_USER_EMAIL', '')
+        if not re.fullmatch(r'[^@\s<>]{1,64}@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,63}', value) or len(value) > 254:
+            raise DeployError('Set the dedicated runtime user email in COLORS_PAR_<binding-prefix>_OCI_USER_EMAIL before KMS convergence.')
+        return value.lower()
 
     def _endpoint(self, field):
         value = self.vault.get(field) if self.vault else None
@@ -250,6 +259,7 @@ class KMS(OCI):
         return path, fingerprint
 
     def converge(self, operation):
+        runtime_email = self._runtime_email()
         self.state.set_meta('kms-scope', self.scope)
         name = self.settings['name']
         self.vault = self._ensure('vault', operation, {'compartmentId': self.compartment,
@@ -260,7 +270,9 @@ class KMS(OCI):
         group = self._ensure('group', operation, {'compartmentId': self.tenancy,
             'name': name + '-signer', 'description': 'Dedicated PocketDeploy KMS signer'})
         user = self._ensure('user', operation, {'compartmentId': self.tenancy,
-            'name': name + '-signer', 'description': 'Dedicated PocketDeploy KMS signer'})
+            'name': name + '-signer', 'description': 'Dedicated PocketDeploy KMS signer', 'email': runtime_email})
+        if (user.get('email') or '').lower() != runtime_email:
+            raise DeployError('KMS runtime user email differs from the configured dedicated identity.')
         policy = self._ensure('policy', operation, {'compartmentId': self.compartment,
             'name': name + '-signer', 'description': 'Sign and read one PocketDeploy key only',
             'statements': self._statements(group, key)})
@@ -340,3 +352,56 @@ class KMS(OCI):
         self.state.complete(pending['step'], {'version': version_id, 'previous': pending['previous'], 'recovered': True})
         self.state.set_meta('kms-pending-rotation', None)
         return {'key_version_id': version_id, 'recovered': True}
+
+    def resolve_user_create(self, event_id, operation):
+        """Only a correlated, definitive provider rejection permits another create."""
+        if not re.fullmatch(r'[a-f0-9-]{36}', event_id or ''):
+            raise DeployError('User creation recovery requires an exact OCI audit event ID.')
+        pending = self.state.get_meta('kms-pending-user')
+        if not isinstance(pending, dict) or not pending.get('step') or not pending.get('operation'):
+            raise DeployError('No pending KMS user creation exists.')
+        row = self.state.db.execute(
+            "SELECT s.status,s.step,s.operation_id,o.started,o.finished FROM steps s JOIN operations o ON o.id=s.operation_id WHERE s.id=?",
+            (pending['step'],)).fetchone()
+        if not row or row['status'] != 'pending' or row['step'] != 'kms-create-user' or row['operation_id'] != pending['operation']:
+            raise DeployError('KMS user creation intent is inconsistent; restore its checkpoint.')
+        start = datetime.datetime.fromisoformat(row['started']).replace(tzinfo=datetime.timezone.utc) - datetime.timedelta(minutes=1)
+        end = datetime.datetime.now(datetime.timezone.utc)
+        if row['finished']:
+            end = min(end, datetime.datetime.fromisoformat(row['finished']).replace(tzinfo=datetime.timezone.utc) + datetime.timedelta(minutes=5))
+        events = self._list('audit', 'event', 'list', '--compartment-id', self.tenancy,
+                            '--start-time', start.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                            '--end-time', end.strftime('%Y-%m-%dT%H:%M:%SZ'), '--all')
+        matches = [event for event in events if event.get('event-id') == event_id]
+        if len(matches) != 1:
+            raise DeployError('Exact OCI rejection audit event was not found.')
+        data = matches[0].get('data') or {}
+        response = data.get('response') or {}
+        # Identity-domain audit events carry original creation metadata in
+        # additional-details/state-change, while classic IAM uses request.
+        correlation = json.dumps({key: data.get(key) for key in
+            ('request', 'additional-details', 'state-change', 'freeform-tags')}, sort_keys=True)
+        # Match the unpredictable recorded operation tag and exact resource name.
+        if (data.get('event-name') != 'CreateUser' or str(response.get('status')) != '400'
+                or pending['operation'] not in correlation
+                or data.get('resource-name') != self.settings['name'] + '-signer'
+                or 'email' not in json.dumps(response).lower()):
+            raise DeployError('Audit event does not prove rejection of this exact KMS user creation.')
+        users = self._list_role('user')
+        if self.state.get_resource('kms-user') or any(self._owned(user, 'kms-user') or user.get('name') == self.settings['name'] + '-signer' for user in users):
+            raise DeployError('A matching runtime user exists; recover ownership instead of repeating creation.')
+        # The supported recovery operation settles intent and records evidence atomically.
+        with self.state.db:
+            current = self.state.get_meta('kms-pending-user')
+            if current != pending:
+                raise DeployError('Pending user creation changed during reconciliation.')
+            settled = self.state.db.execute("UPDATE steps SET status='failed',result=? WHERE id=? AND status='pending'",
+                (json.dumps({'error': 'oci_email_required', 'audit_event_id': event_id}), pending['step']))
+            if settled.rowcount != 1:
+                raise DeployError('Pending user creation status changed during reconciliation.')
+            self.state.db.execute("UPDATE meta SET value='null' WHERE key='kms-pending-user'")
+            self.state.db.execute('INSERT INTO steps VALUES(?,?,?,?,?,?)', (str(uuid.uuid4()), operation,
+                'kms-resolve-user-create', json.dumps({'step_id': pending['step']}), 'complete',
+                json.dumps({'audit_event_id': event_id, 'status': 'rejected', 'user_absent': True})))
+        return {'profile': self.config['profile'], 'resolved_step_id': pending['step'],
+                'audit_event_id': event_id, 'provider_rejected': True, 'user_absent': True}
