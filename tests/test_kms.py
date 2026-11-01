@@ -45,8 +45,15 @@ def kms(tmp_path, monkeypatch):
             adapter.rows['key'][0]['current-key-version'] = 'ocid1.keyversion.oc1.second'
             return {'id': 'ocid1.keyversion.oc1.second'}
         role, action = args[2:4] if args[0] == 'kms' else args[1:3]
+        if action == 'get' and role == 'key':
+            return copy.deepcopy(adapter.rows[role][0])
         if action == 'list':
-            return copy.deepcopy(adapter.rows[role])
+            rows = copy.deepcopy(adapter.rows[role])
+            if role == 'key':
+                for row in rows:
+                    row.pop('key-shape', None)
+                    row.pop('current-key-version', None)
+            return rows
         if action == 'create':
             row = {'id': 'ocid1.' + role + '.oc1.example', 'freeform-tags': body['freeformTags'],
                    'compartment-id': body['compartmentId'], 'lifecycle-state': 'ACTIVE'}
@@ -264,3 +271,24 @@ def test_explicit_rotation_can_export_new_bindings(kms):
     result = kms.converge(operation(kms))
     assert result['key_version_id'] == 'ocid1.keyversion.oc1.second'
     assert kms.state.get_meta('kms-signing-version') == 'ocid1.keyversion.oc1.second'
+
+
+def test_key_summary_requires_verified_detail(kms, monkeypatch):
+    kms.converge(operation(kms))
+    original = kms._call
+    def altered(*args, **kwargs):
+        value = original(*args, **kwargs)
+        if args[:4] == ('kms', 'management', 'key', 'get'):
+            value['freeform-tags'] = {}
+        return value
+    monkeypatch.setattr(kms, '_call', altered)
+    with pytest.raises(DeployError, match='ownership'):
+        kms.converge(operation(kms))
+
+
+def test_provisioning_key_reports_readiness_before_shape(kms):
+    kms.converge(operation(kms))
+    kms.rows['key'][0]['lifecycle-state'] = 'CREATING'
+    kms.rows['key'][0].pop('key-shape')
+    with pytest.raises(DeployError, match='not ready'):
+        kms.converge(operation(kms))

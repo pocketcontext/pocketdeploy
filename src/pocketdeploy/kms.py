@@ -78,6 +78,12 @@ class KMS(OCI):
         item = matches[0] if matches else None
         if recorded and (not recorded['owned'] or not item or item.get('id') != recorded['provider_id']):
             raise DeployError('Recorded KMS resource is missing or ownership changed; restore explicitly.')
+        if item and role == 'key':
+            # OCI ListKeys returns KeySummary without shape/version fields.
+            detail = self._call('kms', 'management', 'key', 'get', '--key-id', item['id'], *self._options(role))
+            if not isinstance(detail, dict) or detail.get('id') != item['id'] or not self._owned(detail, name):
+                raise DeployError('KMS key detail identity or ownership changed.')
+            item = detail
         if item:
             self._verify(role, item)
         return item
@@ -87,6 +93,8 @@ class KMS(OCI):
             raise DeployError('Invalid OCI KMS resource identity.')
         if item.get('compartment-id') != (self.tenancy if role in ('user', 'group') else self.compartment):
             raise DeployError('KMS resource compartment changed.')
+        if item.get('lifecycle-state') != ('ENABLED' if role == 'key' else 'ACTIVE'):
+            raise DeployError('KMS resource is not ready; retain intent and retry after provisioning completes.')
         if role == 'vault':
             if item.get('vault-type') != 'DEFAULT':
                 raise DeployError('Only standard shared DEFAULT KMS vaults are supported.')
@@ -97,8 +105,6 @@ class KMS(OCI):
                 or item.get('key-shape') != {'algorithm': 'RSA', 'length': 384, 'curve-id': None}
                 and item.get('key-shape') != {'algorithm': 'RSA', 'length': 384}):
             raise DeployError('KMS signing key must be RSA3072 with HSM protection.')
-        if item.get('lifecycle-state') != ('ENABLED' if role == 'key' else 'ACTIVE'):
-            raise DeployError('KMS resource is not ready; retain intent and retry after provisioning completes.')
 
     def _remember_role(self, role, item):
         self.state.put_resource('kms-' + role, 'oci-kms-' + role, item['id'], {}, owned=True)
