@@ -248,3 +248,19 @@ once:
     monkeypatch.setattr(KMS, 'plan', lambda self: {'actions': [], 'safe': True})
     result = execute(parser().parse_args(['kms-plan', '-f', str(path), '--quiet']))
     assert result['safe']
+
+
+def test_external_rotation_is_not_silently_adopted(kms):
+    kms.converge(operation(kms))
+    kms.rows['key'][0]['current-key-version'] = 'ocid1.keyversion.oc1.external'
+    with pytest.raises(DeployError, match='outside the recorded rotation'):
+        kms.converge(operation(kms))
+    assert kms.state.get_meta('kms-signing-version') == 'ocid1.keyversion.oc1.first'
+
+
+def test_explicit_rotation_can_export_new_bindings(kms):
+    kms.converge(operation(kms))
+    kms.rotate(operation(kms))
+    result = kms.converge(operation(kms))
+    assert result['key_version_id'] == 'ocid1.keyversion.oc1.second'
+    assert kms.state.get_meta('kms-signing-version') == 'ocid1.keyversion.oc1.second'

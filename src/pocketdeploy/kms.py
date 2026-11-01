@@ -266,6 +266,10 @@ class KMS(OCI):
         version = key.get('current-key-version')
         if not isinstance(version, str) or not re.fullmatch(r'ocid1\.keyversion\.[a-zA-Z0-9._-]+', version):
             raise DeployError('KMS key lacks a valid current version.')
+        previous = self.state.get_meta('kms-signing-version')
+        approved = self.state.get_meta('kms-next-version')
+        if previous and version not in (previous, approved):
+            raise DeployError('KMS key version changed outside the recorded rotation; review explicitly before adoption.')
         bindings = {'OCI_TENANCY_ID': self.tenancy, 'OCI_USER_ID': user['id'],
                     'OCI_FINGERPRINT': fingerprint, 'OCI_REGION': self.config['oci-region'],
                     'OCI_PRIVATE_KEY': path.read_text(), 'KMS_KEY_ID': key['id'],
@@ -280,6 +284,8 @@ class KMS(OCI):
             os.replace(temporary, destination)
         finally:
             Path(temporary).unlink(missing_ok=True)
+        self.state.set_meta('kms-signing-version', version)
+        self.state.set_meta('kms-next-version', None)
         return {'profile': self.config['profile'], 'vault_id': self.vault['id'], 'key_id': key['id'],
                 'key_version_id': version, 'bindings_file': FILES[1], 'algorithm': 'RS256',
                 'retained_on_delete': True}
@@ -303,6 +309,7 @@ class KMS(OCI):
         if (not isinstance(version, dict) or not version.get('id')
                 or version['id'] == before or observed['current-key-version'] != version['id']):
             raise DeployError('KMS rotation not verified; pending intent retained.')
+        self.state.set_meta('kms-next-version', version['id'])
         self.state.complete(step, {'version': version['id'], 'previous': before})
         self.state.set_meta('kms-pending-rotation', None)
         return {'previous_version_id': before, 'key_version_id': version['id'],
@@ -323,6 +330,7 @@ class KMS(OCI):
                              '--key-id', key['id'], '--key-version-id', version_id)
         if not isinstance(version, dict) or version.get('id') != version_id or version.get('key-id') != key['id']:
             raise DeployError('Selected key-version ownership could not be verified.')
+        self.state.set_meta('kms-next-version', version_id)
         self.state.complete(pending['step'], {'version': version_id, 'previous': pending['previous'], 'recovered': True})
         self.state.set_meta('kms-pending-rotation', None)
         return {'key_version_id': version_id, 'recovered': True}
