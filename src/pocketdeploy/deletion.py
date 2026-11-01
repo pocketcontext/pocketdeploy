@@ -21,7 +21,8 @@ class Deletion:
     def plan(self):
         # Cloud authentication/ownership is checked before any external writes,
         # including DNS and GitHub retirement. No provisioning planner is used.
-        supported = self.cloud.resource_kinds | {'cloudflare-dns', 'resend-domain',
+        from .kms import KINDS
+        supported = KINDS | self.cloud.resource_kinds | {'cloudflare-dns', 'resend-domain',
                                                  'resend-api-key', 'github-environment'}
         if any(r['owned'] and r['kind'] not in supported for r in self.state.resources()):
             raise DeployError('Deployment contains an unsupported owned resource; reconcile it before deletion.')
@@ -50,7 +51,9 @@ class Deletion:
         key_actions = [a for a in github_actions if a['resource'] == 'github-deployment-keys']
         actions = [*[a for a in github_actions if a['resource'] != 'github-deployment-keys'],
                    *[{'resource': a['host'], **a} for a in host_actions],
-                   *service_actions, *cloud_actions, *key_actions, *host_key_actions]
+                   *service_actions, *cloud_actions, *key_actions, *host_key_actions,
+                   *[{'resource': r['name'], 'action': 'retain', 'reason': 'signing-authority'}
+                     for r in self.state.resources() if r['kind'] in KINDS]]
         self.prepared = {'profile': self.config['profile'], 'dry_run': True,
                          'protected': self.config.get('compute-prevent-destroy', True),
                          'actions': actions,
@@ -85,7 +88,8 @@ class Deletion:
             results['infrastructure'] = self.cloud.delete(operation)
 
         def cleanup():
-            if any(resource['owned'] for resource in self.state.resources()):
+            from .kms import KINDS
+            if any(resource['owned'] and resource['kind'] not in KINDS for resource in self.state.resources()):
                 raise DeployError('Owned remote resources remain; SSH recovery keys were preserved.')
             # Validate both groups before unlinking either one.
             self.github.plan_delete()

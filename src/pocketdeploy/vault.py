@@ -41,7 +41,8 @@ def _save_file(config, path, name, document=None):
 def _files(config):
     private_key = config.get('ssh-private-key-file', '.ssh/id_ed25519')
     host_private_key = config.get('ssh-host-private-key-file', '.ssh/host_ed25519')
-    names = ['.envrc.private',
+    from .kms import FILES
+    names = [*(FILES if config.get('oci-kms') else []), '.envrc.private',
             private_key,
             config.get('ssh-public-key-file', f'{private_key}.pub'),
             config.get('ssh-known-hosts-file', '.ssh/known_hosts'),

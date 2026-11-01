@@ -888,3 +888,80 @@ stderr is discarded and buffers are bounded. `output.remote_progress(stages)`
 provides a callback that maps these events to verbose timed spans and heartbeats.
 Final JSON and process status remain authoritative; events never complete durable
 state. This allows one remote lock to cover all provisioning stages.
+
+## OCI KMS signing authority
+
+Signing infrastructure has a separate lifetime from applications and compute.
+Configure one authority per OCI scaffold:
+
+```yaml
+oci-region: eu-frankfurt-1
+oci-kms:
+  name: identitycontext
+  tenancy-id: ocid1.tenancy.oc1.example
+  binding-prefix: APP_IDENTITYCONTEXT
+```
+
+After `init` (or restoring the existing deployment checkpoint), use
+`pocketdeploy kms-plan`, then `pocketdeploy kms-converge`. These commands do not
+converge applications, rotate GitHub keys, or require application environment
+bindings. The controller creates a **standard shared `DEFAULT` vault**, an
+HSM-protected RSA3072 key, and a dedicated IAM user/group. Its policy grants only
+`KEY_SIGN` and `KEY_READ` on the exact key; the user has API-key capability only.
+The controller rejects unexpected group members, user group memberships, API
+keys and policy changes. Tenancy-wide policies remain the operator's authority;
+these checks cannot prove that no other policy grants additional access.
+The operator needs OCI permissions to create these KMS and IAM resources.
+
+`kms-converge` writes an API authentication key to `.ssh/kms-runtime.pem` and
+shell exports to `.ssh/kms-runtime.env`, with 0600 files in a 0700 directory.
+Neither file contains the HSM signing private key, which stays in OCI. Do not
+print or commit these files. Source the generated exports in a trusted shell,
+then transfer the app-specific bindings into the scaffold's ignored
+`.envrc.private` using a private-file operation. The prefix above produces
+`COLORS_PAR_APP_IDENTITYCONTEXT_` bindings with these suffixes:
+
+- `OCI_TENANCY_ID`, `OCI_USER_ID`, `OCI_FINGERPRINT`, `OCI_REGION`, `OCI_PRIVATE_KEY`
+- `KMS_KEY_ID`, `KMS_KEY_VERSION_ID`, `KMS_CRYPTO_ENDPOINT`, `KMS_MANAGEMENT_ENDPOINT`
+
+The service uses OCI `SHA_256_RSA_PKCS1_V1_5` for JWT RS256 and the configured key
+version as its JWKS `kid`. It must select an explicit version and retain the old
+public keys throughout token expiry and verification-cache overlap. Runtime
+metadata and public key retrieval use the management endpoint; signing uses the
+crypto endpoint. Credentials grant no key rotation, export, encryption or
+deletion authority. Save a `vault-save` checkpoint after provisioning; it includes
+both runtime credential files. Missing local API credentials require checkpoint
+recovery and are never silently replaced.
+
+Provisioning records intent before each mutation and records verified ownership
+using deployment UUID/role tags. A lost response is recovered only by matching
+those tags and the pending operation. Names never establish ownership. A missing
+recorded resource or an uncertain create with no matching resource blocks retries.
+A still-provisioning vault/key is left pending; retry after OCI reports readiness.
+Existing untagged infrastructure is not adopted by name. An ownership transfer
+requires a separately reviewed procedure; restoring this deployment's checkpoint
+recovers its already-owned resources.
+
+`pocketdeploy kms-rotate` creates one new key version and retains every old
+version. It does not update exported bindings or running applications. Publish
+both public keys, then run `kms-converge`, deliberately select the new version,
+and deploy the service. If the rotation response is lost, inspect the exact
+current version and use `kms-resolve-rotation --kms-version-id OCID`; this verifies
+its key relationship and completes the pending intent without creating another
+version. Never retry an uncertain rotation by editing controller state.
+
+Ordinary `delete` retains all KMS and IAM signing resources, their private
+credentials and their state. No KMS deletion command is provided. Retirement
+requires a separate explicit OCI procedure after consumers and retained tokens
+are accounted for; preserve recovery metadata and use OCI's scheduled-deletion
+and cancellation process. Restoring a checkpoint never rotates or recreates
+signing material. OCI KMS outage fails signing closed; application fallback is
+an independently authorized application feature.
+
+The implementation is validated with synthetic provider responses and local
+credential-generation tests. A live disposable provisioning/signing/rotation
+check remains required before claiming provider verification.
+
+Provider references: [vault types](https://docs.oracle.com/en-us/iaas/tools/oci-cli/latest/oci_cli_docs/cmdref/kms/management/vault/create.html),
+[key permissions](https://docs.oracle.com/en-us/iaas/Content/Identity/Reference/keypolicyreference.htm),
+[signing algorithms](https://docs.oracle.com/en-us/iaas/tools/python/latest/api/key_management/models/oci.key_management.models.SignDataDetails.html).

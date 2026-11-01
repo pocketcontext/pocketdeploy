@@ -98,7 +98,7 @@ def text_result(command, result):
     suffix = f" for {profile}" if profile else ''
     if command == 'init':
         return [f"Initialized{suffix}.", f"Deployment: {result['deployment_id']}."]
-    if 'actions' in result and command in ('plan', 'converge', 'delete'):
+    if 'actions' in result and command in ('plan', 'kms-plan', 'converge', 'delete'):
         lines = [f"{'Deletion plan' if command == 'delete' else 'Plan'}{suffix}."]
         actions = result['actions'] + result.get('applications', []) + [dict(a, resource=a.get('name', 'service')) for a in result.get('services', [])]
         github = result.get('github') or {}
@@ -110,6 +110,14 @@ def text_result(command, result):
         if 'protected' in result:
             lines.append('Deletion protection: ' + ('enabled.' if result['protected'] else 'disabled.'))
         return lines
+    if command == 'kms-converge':
+        return [f"KMS signing authority ready{suffix}.",
+                f"Private bindings: {result['bindings_file']}.",
+                f"Signing version: {result['key_version_id']}.",
+                'Signing resources are retained on ordinary deletion. Save a Vault checkpoint.']
+    if command in ('kms-rotate', 'kms-resolve-rotation'):
+        return [f"Signing version: {result['key_version_id']}.",
+                result.get('next_step', 'Pending rotation verified without another key creation.')]
     if command == 'status':
         lines = [f"Status{suffix}."]
         for name, resource in result.get('resources', {}).items():

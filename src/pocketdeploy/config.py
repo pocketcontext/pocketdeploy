@@ -29,6 +29,7 @@ DEFAULTS = {
     'once-version': 'v0.3.3',
 }
 ROOT_KEYS = set(DEFAULTS) | {
+    'oci-kms',
     'compute-ingress',
     'compute-ssh-ports',  # Implicit ['22'] preserves existing desired-state hashes.
     'profile', 'oci-config-file-profile', 'oci-region', 'oci-compartment-id',
@@ -161,6 +162,8 @@ def scope(c):
 
 
 def validate(c):
+    from .kms import validate as validate_kms
+    validate_kms(c)
     if c['schema-version'] != 1:
         raise DeployError('Only configuration schema 1 is supported.')
     provider = c['provider-compute']

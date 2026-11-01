@@ -35,6 +35,10 @@ def parser():
         prog='pocketdeploy', description='Deploy and operate an OCI, DigitalOcean or Google Cloud VPS from colors.yml.',
         allow_abbrev=False, formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''Deployment commands:
+  kms-plan       Inspect signing vault/key and runtime identity changes
+  kms-converge   Provision retained OCI signing infrastructure
+  kms-rotate     Explicitly rotate the recorded HSM signing key
+  kms-resolve-rotation  Verify a pending rotation using --kms-version-id
   init           Prepare local state and SSH keys; no cloud or Vault calls
   plan           Read live resources and report proposed changes
   converge       Reconcile the deployment with desired configuration
@@ -65,12 +69,13 @@ Examples:
 
 Configuration defaults to colors.yml in the current working directory.
 Use -f to select a deployment. Run without arguments to show this help.''')
-    p.add_argument('command', metavar='COMMAND', choices=['init', 'plan', 'converge', 'status', 'ssh', 'delete', 'adopt', 'adopt-app', 'adopt-dns', 'dns-evidence', 'smtp-test', 'rotate-host-key', 'steps', 'resolve-step', 'clear-pending-marker', 'vault-save', 'vault-restore'], help='Deployment or Vault command listed below')
+    p.add_argument('command', metavar='COMMAND', choices=['kms-resolve-rotation', 'kms-plan', 'kms-converge', 'kms-rotate', 'init', 'plan', 'converge', 'status', 'ssh', 'delete', 'adopt', 'adopt-app', 'adopt-dns', 'dns-evidence', 'smtp-test', 'rotate-host-key', 'steps', 'resolve-step', 'clear-pending-marker', 'vault-save', 'vault-restore'], help='Deployment or Vault command listed below')
     p.add_argument('-f', '--file', help='Configuration file (default: ./colors.yml in the current working directory)')
     p.add_argument('--json', action='store_true', help='Emit one versioned JSON result on stdout')
     p.add_argument('--verbose', action='store_true', help='Show safe request timings and waiting progress on stderr')
     p.add_argument('--quiet', action='store_true', help='Suppress progress on stderr')
     p.add_argument('--dry-run', action='store_true', help='Plan converge/delete without applying changes')
+    p.add_argument('--kms-version-id', help='Exact observed key-version OCID for kms-resolve-rotation')
     p.add_argument('--instance-id', help='Exact owned provider instance identity for explicit recovery/adoption')
     p.add_argument('--app-host', help='Exact application host for adopt-app or clear-pending-marker')
     p.add_argument('--step-id', help='Exact pending step ID from steps for resolve-step')
@@ -217,6 +222,8 @@ def execute(args, reporter=None):
 
 def _execute(args, reporter=None):
     reporter = reporter or Reporter(quiet=getattr(args, "quiet", False), command=args.command)
+    if bool(getattr(args, 'kms_version_id', None)) != (args.command == 'kms-resolve-rotation'):
+        raise DeployError('kms-resolve-rotation requires --kms-version-id; other commands do not accept it.')
     dns_options = ('dns_host', 'dns_zone_id', 'dns_record_id', 'dns_ipv4', 'dns_settings_sha256', 'previous_dns_manager_disabled')
     if args.command == 'dns-evidence' and (not getattr(args, 'dns_host', None) or any(getattr(args, key, None) for key in dns_options[1:])):
         raise DeployError('dns-evidence requires only --dns-host.', code='invalid_usage')
@@ -268,11 +275,11 @@ def _execute(args, reporter=None):
     if smtp_timeout is not None and (args.command != 'converge' or args.dry_run
                                     or not 0 <= smtp_timeout <= 3600):
         raise DeployError('--smtp-verification-timeout requires converge without --dry-run and 0–3600 seconds.', code='invalid_usage')
-    read_only = args.command in ('plan', 'status', 'dns-evidence', 'steps') or args.dry_run
+    read_only = args.command in ('plan', 'kms-plan', 'status', 'dns-evidence', 'steps') or args.dry_run
     config_file = args.file if args.file is not None else 'colors.yml'
     if args.file is None and not Path(config_file).exists():
         raise DeployError('No colors.yml found in the current directory; use -f to select a configuration.')
-    config = load(config_file, resolve=args.command not in ('init', 'ssh', 'delete', 'vault-save', 'vault-restore', 'status', 'smtp-test', 'rotate-host-key', 'steps', 'resolve-step', 'clear-pending-marker'))
+    config = load(config_file, resolve=args.command not in ('kms-resolve-rotation', 'kms-plan', 'kms-converge', 'kms-rotate', 'init', 'ssh', 'delete', 'vault-save', 'vault-restore', 'status', 'smtp-test', 'rotate-host-key', 'steps', 'resolve-step', 'clear-pending-marker'))
     # Reject unsupported application behavior before any cloud mutation.
     from .host import validate_config
     if args.command != 'rotate-host-key':
@@ -296,7 +303,28 @@ def _execute(args, reporter=None):
     with deployment_lock(state_path):
         manager = nullcontext(None) if fresh and read_only else State(state_path, config['profile'], scope(config), create=fresh, read_only=read_only)
         with manager as state:
+            if state and state.get_meta('kms-scope') and not config.get('oci-kms'):
+                raise DeployError('Restore oci-kms configuration to preserve signing authority and recovery files.')
+            if state and state.get_meta('kms-scope'):
+                from .kms import KMS
+                KMS(config, state)  # Bind authority and checkpoint files to their original scope.
             host = Host(config, state, root)
+            if args.command.startswith('kms-'):
+                from .kms import KMS
+                kms = KMS(config, state)
+                if args.command == 'kms-plan':
+                    return kms.plan()
+                operation = state.begin_operation(args.command, config['_desired_hash'])
+                try:
+                    if args.command == 'kms-resolve-rotation':
+                        result = kms.resolve_rotation(args.kms_version_id)
+                    else:
+                        result = kms.rotate(operation) if args.command == 'kms-rotate' else kms.converge(operation)
+                    state.finish_operation(operation, 'succeeded')
+                    return result
+                except BaseException:
+                    state.finish_operation(operation, 'failed')
+                    raise
             if args.command == 'init':
                 with output_operation('init: local preparation'):
                     return initialize(config, state, host, root)

@@ -171,3 +171,14 @@ def test_external_resources_do_not_block_key_cleanup(tmp_path):
         assert result['retained_local'] == ['configuration', 'private-bindings', 'sqlite-state']
         assert 'retain_boot_volume' not in deletion.prepared
         assert 'delete-services' in result['completed_stages']
+
+
+def test_compute_delete_retains_signing_authority(tmp_path):
+    deletion, state, events = fixture(tmp_path)
+    with state:
+        state.put_resource('kms-key', 'oci-kms-key', 'ocid1.key.oc1.synthetic', {})
+        result = asyncio.run(deletion.run('op'))
+        assert state.get_resource('kms-key')['provider_id'] == 'ocid1.key.oc1.synthetic'
+        assert result['retained_resources'] == [{'resource': 'kms-key', 'kind': 'oci-kms-key'}]
+        assert 'kms-key' not in result['deleted_resources']
+        assert 'ssh-key-cleanup' in events

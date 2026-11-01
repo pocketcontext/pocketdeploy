@@ -242,3 +242,22 @@ override are rejected; remove them from existing deployments. Review
 `delete --dry-run` before an authorized deletion with
 `compute-prevent-destroy: false`. Host retirement fences queued CI and gracefully
 stops applications before removing services and compute.
+
+## Optional OCI signing authority
+
+`oci-kms` accepts exactly `name` (lowercase identifier), `tenancy-id` (tenancy
+OCID) and `binding-prefix` (`APP_` followed by uppercase letters/digits/underscores).
+It requires OCI compute and an explicit `oci-region`. `kms-plan` and
+`kms-converge` independently manage a standard shared vault, RSA3072 HSM signing
+key and dedicated API-only runtime IAM identity. Exported private application
+bindings live in `.ssh/kms-runtime.env`; never print it. `vault-save` includes
+that file and `.ssh/kms-runtime.pem`. Transfer required exports privately to
+ignored `.envrc.private`. Do not remove `oci-kms` while its authority is recorded.
+
+`kms-rotate` explicitly creates one new version while preserving old versions and
+current exported bindings. Publish both public keys before adopting the new
+version. `kms-resolve-rotation --kms-version-id OCID` verifies an observed version
+after an uncertain rotation; it never creates a version. Ordinary deletion retains
+all signing authority and private recovery files. No automatic key deletion or
+untagged resource adoption exists. See the repository README's OCI KMS section
+for ownership, credential and recovery details.
