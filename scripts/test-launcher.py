@@ -81,6 +81,9 @@ def main():
             else:
                 assert not removed.stdout and 'Invalid command arguments' in removed.stderr
             assert not list(empty.iterdir()), 'Removed command created deployment files.'
+        assert all(command in bare.stdout for command in ('kms-plan', 'kms-converge', 'kms-rotate', 'kms-resolve-rotation'))
+        invoke(empty, 'kms-resolve-rotation', expected='requires --kms-version-id')
+        assert not list(empty.iterdir()), 'Incomplete KMS recovery created local files.'
         assert 'adopt-app' in bare.stdout and '--previous-delivery-disabled' in bare.stdout
         incomplete_adoption = invoke(empty, 'adopt-app', '--json', '--quiet', expected='')
         assert incomplete_adoption.returncode == 2
