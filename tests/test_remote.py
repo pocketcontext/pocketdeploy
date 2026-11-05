@@ -207,7 +207,7 @@ def test_github_dispatcher_restricts_key_and_command(tmp_path, monkeypatch):
     monkeypatch.setattr(remote.pwd, 'getpwnam', lambda _: SimpleNamespace(pw_dir=str(home), pw_uid=remote.os.getuid(), pw_gid=remote.os.getgid()))
     monkeypatch.setattr(remote.os, 'chown', lambda *args: None)
     request = {'deployment_id': 'test', 'user': 'ubuntu', 'source': '# synthetic reconciler', 'targets': [
-        {'app': app(), 'repository': 'example/app', 'public_key': 'ssh-ed25519 c3ludGhldGlj comment'}]}
+        {'app': {**app(), 'image': 'ghcr.io/example/app:latest'}, 'repository': 'example/app', 'public_key': 'ssh-ed25519 c3ludGhldGlj comment'}]}
     remote.install_github(request)
     line = (home / '.ssh/authorized_keys').read_text()
     assert line.startswith('restrict,command="sudo -n --preserve-env=SSH_ORIGINAL_COMMAND /usr/bin/python3 ')
@@ -226,7 +226,7 @@ def test_github_rotation_keeps_old_key_until_explicit_prune(tmp_path, monkeypatc
     home.mkdir()
     monkeypatch.setattr(remote.pwd, 'getpwnam', lambda _: SimpleNamespace(pw_dir=str(home), pw_uid=remote.os.getuid(), pw_gid=remote.os.getgid()))
     monkeypatch.setattr(remote.os, 'chown', lambda *args: None)
-    target = {'app': app(), 'repository': 'example/app', 'public_key': 'ssh-ed25519 b2xk comment'}
+    target = {'app': {**app(), 'image': 'ghcr.io/example/app:latest'}, 'repository': 'example/app', 'public_key': 'ssh-ed25519 b2xk comment'}
     request = {'deployment_id': 'test', 'user': 'ubuntu', 'source': '# synthetic', 'targets': [target]}
     remote.install_github(request)
     authorized = home / '.ssh/authorized_keys'
@@ -466,3 +466,126 @@ def test_clear_pending_refuses_while_host_lock_is_held(tmp_path, monkeypatch):
             with pytest.raises(RuntimeError, match='host operation in progress'):
                 remote.main()
     assert path.exists()
+
+
+def test_grouped_dispatcher_accepts_only_one_repository_digest(tmp_path, monkeypatch):
+    import os
+    import subprocess
+    import sys
+    from types import SimpleNamespace
+    setup(tmp_path, monkeypatch)
+    home = tmp_path / 'home'; home.mkdir()
+    monkeypatch.setattr(remote.pwd, 'getpwnam', lambda _: SimpleNamespace(pw_dir=str(home), pw_uid=os.getuid(), pw_gid=os.getgid()))
+    monkeypatch.setattr(remote.os, 'chown', lambda *args: None)
+    apps = [{**app(), 'host': host, 'image': 'ghcr.io/example/app:latest'} for host in ('a.example.com', 'b.example.com', 'c.example.com')]
+    remote.save(remote.MANIFEST, {'deployment_id': 'test', 'apps': {a['host']: {} for a in apps}})
+    captured = tmp_path / 'captured.json'
+    source = ("import fcntl,json\nfrom pathlib import Path\nBASE=Path(" + repr(str(tmp_path)) + ")\n"
+              "def image_repository(image): return image.split('@')[0].split(':')[0]\n"
+              "def reconcile(request):\n Path(" + repr(str(captured)) + ").write_text(json.dumps(request))\n")
+    target = {'app': apps[0], 'applications': apps, 'repository': 'example/app', 'public_key': 'ssh-ed25519 c3ludGhldGlj'}
+    request = {'deployment_id': 'test', 'user': 'ubuntu', 'source': source, 'targets': [target]}
+    remote.install_github(request)
+    script = next(p for p in (tmp_path / 'github').glob('*.py') if p.name != 'reconciler.py')
+    digest = 'ghcr.io/example/app@sha256:' + 'a' * 64
+    result = subprocess.run([sys.executable, str(script)], env={**os.environ, 'SSH_ORIGINAL_COMMAND': 'deploy ' + digest}, capture_output=True)
+    assert result.returncode == 0
+    received = json.loads(captured.read_text())
+    assert [a['host'] for a in received['applications']] == [a['host'] for a in apps]
+    assert all(a['deploy-image'] == digest for a in received['applications'])
+    assert received['retain_other_apps'] is True
+    captured.unlink()
+    result = subprocess.run([sys.executable, str(script)], env={**os.environ, 'SSH_ORIGINAL_COMMAND': ''}, capture_output=True)
+    assert result.returncode == 0
+    assert all('deploy-image' not in a for a in json.loads(captured.read_text())['applications'])
+    for command in ['deploy ghcr.io/other/app@sha256:' + 'a' * 64, 'deploy ' + digest + '; id', 'docker exec old sh', 'deploy ' + digest + ' a.example.com']:
+        captured.unlink(missing_ok=True)
+        result = subprocess.run([sys.executable, str(script)], env={**os.environ, 'SSH_ORIGINAL_COMMAND': command}, capture_output=True)
+        assert result.returncode == 1
+        assert not captured.exists()
+    # Narrowing replaces this policy only, preserving another repository's key.
+    sibling = tmp_path / 'github' / ('b' * 20 + '.json')
+    sibling.write_text('{"synthetic":"unrelated policy"}')
+    sibling_key = 'restrict,command="sudo /other.py" ssh-ed25519 b3RoZXI= pocketdeploy-github-' + 'b' * 20
+    authorized = home / '.ssh/authorized_keys'
+    with authorized.open('a') as output:
+        output.write(sibling_key + '\n')
+    target['applications'] = apps[:1]
+    remote.install_github(request)
+    policy = tmp_path / 'github' / (remote.hashlib.sha256(b'example/app').hexdigest()[:20] + '.json')
+    assert [a['host'] for a in json.loads(policy.read_text())['applications']] == ['a.example.com']
+    assert len(authorized.read_text().splitlines()) == 2
+    assert sibling_key in authorized.read_text().splitlines()
+    assert sibling.read_text() == '{"synthetic":"unrelated policy"}'
+
+
+@pytest.mark.parametrize('fail_second', [False, True])
+def test_grouped_prepare_stop_verify_is_sequential_and_failure_fences(tmp_path, monkeypatch, fail_second):
+    import copy
+    setup(tmp_path, monkeypatch)
+    apps = [{**app(), 'host': host, 'image': 'example/app:latest',
+             'deploy-prepare-command': ['app-control', 'prepare-upgrade'], 'deploy-prepare-timeout': 77}
+            for host in ('a.example.com', 'b.example.com', 'c.example.com')]
+    inventory = {a['host']: {**current(), 'id': 'old-' + a['host']} for a in apps}
+    remote.save(remote.MANIFEST, {'deployment_id': 'test', 'apps': {
+        a['host']: {'desired': remote.normalized(a), 'image_id': 'image-id'} for a in apps}})
+    calls = []
+    def run(*args, **kwargs):
+        calls.append(args)
+        if args[:2] == ('docker', 'exec'):
+            assert kwargs['timeout'] == 77
+            if fail_second and args[2] == 'old-b.example.com':
+                raise remote.CommandError(remote.build_diagnostic('application-prepare', 'timeout'))
+        elif args[:2] == ('docker', 'update'):
+            next(v for v in inventory.values() if v['id'] == args[-1])['restart'] = 'no'
+        elif args[:2] == ('docker', 'stop'):
+            next(v for v in inventory.values() if v['id'] == args[-1])['running'] = False
+        elif args[0] == str(remote.ONCE):
+            host = args[4]
+            inventory[host].update(id='new-' + host, running=True, restart='always', image_id='new-image')
+        return ''
+    monkeypatch.setattr(remote, 'containers', lambda: copy.deepcopy(inventory))
+    monkeypatch.setattr(remote, 'run', run)
+    with patch.object(remote, 'resolve_image', return_value=('example/app@sha256:' + 'a' * 64, 'new-image')) as resolve:
+        if fail_second:
+            with pytest.raises(remote.CommandError):
+                remote.reconcile({'action': 'converge', 'deployment_id': 'test', 'applications': apps})
+        else:
+            remote.reconcile({'action': 'converge', 'deployment_id': 'test', 'applications': apps})
+        resolve.assert_called_once_with('example/app:latest')
+    assert calls[0] == ('docker', 'exec', 'old-a.example.com', 'app-control', 'prepare-upgrade')
+    assert calls[1][:3] == ('docker', 'update', '--restart=no')
+    assert calls[2][:2] == ('docker', 'stop')
+    assert calls[3][0] == str(remote.ONCE)
+    manifest = json.loads(remote.MANIFEST.read_text())
+    assert manifest['apps']['a.example.com']['image_id'] == 'new-image'
+    if fail_second:
+        assert len(calls) == 5
+        assert inventory['b.example.com']['running'] is True  # container may contain a paused application
+        assert inventory['c.example.com']['id'] == 'old-c.example.com'
+        assert manifest['apps']['b.example.com']['image_id'] == 'image-id'
+        assert len(list(tmp_path.glob('*.pending'))) == 1
+    else:
+        assert len(calls) == 12
+        assert not list(tmp_path.glob('*.pending'))
+        # No-op convergence never prepares or pauses unchanged applications.
+        calls.clear()
+        with patch.object(remote, 'resolve_image', return_value=('example/app@sha256:' + 'a' * 64, 'new-image')):
+            remote.reconcile({'action': 'converge', 'deployment_id': 'test', 'applications': apps})
+        assert not calls
+
+
+def test_group_image_resolution_failure_never_pauses_any_writer(tmp_path, monkeypatch):
+    setup(tmp_path, monkeypatch)
+    apps = [{**app(), 'host': host, 'image': 'example/app:' + str(i),
+             'deploy-prepare-command': ['app-control', 'prepare-upgrade']}
+            for i, host in enumerate(('a.example.com', 'b.example.com'))]
+    remote.save(remote.MANIFEST, {'deployment_id': 'test', 'apps': {
+        a['host']: {'desired': remote.normalized(a), 'image_id': 'image-id'} for a in apps}})
+    with patch.object(remote, 'containers', return_value={a['host']: current() for a in apps}), \
+         patch.object(remote, 'resolve_image', side_effect=[('example/app@sha256:' + 'a' * 64, 'new-image'), RuntimeError('pull failed')]), \
+         patch.object(remote, 'run') as run:
+        with pytest.raises(RuntimeError, match='pull failed'):
+            remote.reconcile({'action': 'converge', 'deployment_id': 'test', 'applications': apps})
+    run.assert_not_called()
+    assert not list(tmp_path.glob('*.pending'))

@@ -91,11 +91,17 @@ List entries split on the first `=`. There is no shell expansion; `$NAME` stays
 literal. Do not use this syntax for committed secrets. Quote YAML version-like
 strings such as `"3.10"`.
 
-Each application needs a unique `host` and `image`. Prefer immutable image
+Each application needs a unique `host` and an `image`. Prefer immutable image
 digests. `deploy-strategy` defaults to `rolling`; use `stop-first` for stateful
 services, with `deploy-stop-timeout` from 1–3600 seconds (default 300).
 `deploy-ready-timeout` accepts 1–3600 seconds (default 60) for the post-replacement
 HTTP readiness check. Size both budgets for application drain and recovery.
+An optional `deploy-prepare-command` argv list runs inside the existing container
+before a stop-first replacement, with `deploy-prepare-timeout` from 1–3600 seconds
+(default 900). Exit zero must establish completed preparation, such as a verified
+backup. It cannot be supplied by an SSH deployment caller. Command failure or
+uncertainty leaves a pending marker; inspect whether the application is paused
+before explicit recovery. Unchanged containers and new instances skip the hook.
 Update older copied launchers before using this setting.
 `health-path` defaults to `/`. `disable_tls: true` opts into HTTP; otherwise
 prepare working public DNS/TLS. Optional `cpus` and `memory` are nonnegative
@@ -200,7 +206,12 @@ then public HTTPS with a unique query and cache-control headers. Keep health
 endpoints outside custom cache rules. Shared zone TLS/WAF/cache settings remain
 externally managed; preserve Full (strict). Applications opt into
 `smtp: true` and `github: owner/repository`. GitHub images must belong to that repository on GHCR;
-one app per repository is supported. The environment equals `profile`, and an
+multiple apps sharing that repository form one deployment group, in configuration
+order, using one restricted key and environment. `SITE_URLS` contains a JSON array
+of their public origins and legacy `SITE_URL` names the first. A supplied release
+digest applies to all targets. Each target prepares, replaces and verifies before
+the next starts; failure stops the group without rolling back completed targets.
+The environment equals `profile`, and an
 explicit `github-environment` may only repeat that exact profile. TLS must remain
 enabled for GitHub and managed website DNS. The profile is durable, not a tool
 version or a global fixed prefix.

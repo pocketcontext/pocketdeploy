@@ -103,6 +103,12 @@ manifest state to bypass adoption. Adoption takes the shared host lock, preserve
 the running container and actual settings, and leaves desired replacement to a
 subsequent convergence. `deploy-ready-timeout` (1–3600 seconds, default 60) bounds
 HTTP readiness independently of graceful shutdown. Preserve failed pending markers.
+Repository-sharing applications deploy sequentially through one restricted key.
+For stateful preparation, configure an application-owned `deploy-prepare-command`
+argv list with stop-first delivery; its timeout defaults to 900 seconds. A failed
+or interrupted preparation may leave the service paused inside a running
+container. Inspect application backup and pause state before explicit recovery;
+never blindly restart or clear its pending marker.
 
 Before ordinary SSH operations, the controller requires a verified replacement
 for the host key distributed in provider metadata/user data. Convergence performs the rotation.

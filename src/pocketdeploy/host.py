@@ -183,6 +183,7 @@ class Host:
                   'delete-plan': 'SSH: retirement readiness'}
         with operation(labels.get(action, 'SSH: host operation')):
             budget = 1200 + sum(app.get('deploy-stop-timeout', 300) + app.get('deploy-ready-timeout', 60)
+                                + (app.get('deploy-prepare-timeout', 900) if app.get('deploy-prepare-command') else 0)
                                 for app in self.config.get('once', {}).get('applications', []))
             return self._remote_request(connection, action, timeout=budget)
 
@@ -268,7 +269,8 @@ class Host:
         source = Path(__file__).with_name('diagnostics.py').read_text() + '\n' + Path(__file__).with_name('remote.py').read_text()
         with operation('SSH: GitHub deployment authority'):
             return self._remote_request(connection, 'github-install', {
-                'targets': [{**target, 'app': self.resolved_app(target['app'])} for target in targets], 'user': connection.get('user', 'ubuntu'), 'source': source})
+                'targets': [{**target, 'app': self.resolved_app(target['app']),
+                             'applications': [self.resolved_app(app) for app in target.get('applications', [target['app']])]} for target in targets], 'user': connection.get('user', 'ubuntu'), 'source': source})
 
     def rotate_key(self, connection, operation_id):
         compute = self.state.get_resource('compute')
@@ -399,7 +401,8 @@ def validate_config(config):
     if once.get('namespace', 'once') != 'once':
         raise DeployError('V1 supports the once namespace only.')
     allowed = {'host', 'image', 'env', 'resolved-env', 'deploy-strategy', 'deploy-stop-timeout', 'deploy-ready-timeout',
-               'auto_update', 'auto_backup', 'disable_tls', 'health-path', 'cpus', 'memory', 'smtp', 'manage-dns', 'github', 'github-environment'}
+               'auto_update', 'auto_backup', 'disable_tls', 'health-path', 'cpus', 'memory', 'smtp', 'manage-dns', 'github', 'github-environment',
+               'deploy-prepare-command', 'deploy-prepare-timeout'}
     for app in once.get('applications', []):
         health_path = app.get('health-path', '/')
         if not isinstance(health_path, str) or not health_path.startswith('/') or any(ord(c) < 32 for c in health_path):
@@ -417,6 +420,16 @@ def validate_config(config):
             raise DeployError('Stop timeout must be between 1 and 3600 seconds.')
         if type(app.get('deploy-ready-timeout', 60)) is not int or not 1 <= app.get('deploy-ready-timeout', 60) <= 3600:
             raise DeployError('Ready timeout must be between 1 and 3600 seconds.')
+        command = app.get('deploy-prepare-command')
+        if command is not None:
+            if (not isinstance(command, list) or not 1 <= len(command) <= 32
+                    or any(not isinstance(arg, str) or not arg or len(arg) > 4096
+                           or any(ord(c) < 32 for c in arg) for arg in command)):
+                raise DeployError('Prepare command must be a nonempty bounded argv list without control characters.')
+            if app.get('deploy-strategy', 'rolling') != 'stop-first':
+                raise DeployError('Prepare command requires stop-first deployment.')
+        if type(app.get('deploy-prepare-timeout', 900)) is not int or not 1 <= app.get('deploy-prepare-timeout', 900) <= 3600:
+            raise DeployError('Prepare timeout must be between 1 and 3600 seconds.')
         for key in ('disable_tls', 'auto_update', 'auto_backup', 'smtp', 'manage-dns'):
             if key in app and type(app[key]) is not bool:
                 raise DeployError('Application flags must be booleans.')
@@ -429,6 +442,7 @@ APPLICATION_ERRORS = {
     'application-recovery': 'Unfinished application deployment; inspect host state before recovering its pending marker.',
     'application-image-pull': 'Application image pull failed; check registry access and the configured image reference.',
     'application-image-inspect': 'Application image inspection failed; check the downloaded image and registry digest.',
+    'application-prepare': 'Application upgrade preparation failed; inspect backup and paused service state before recovering its pending marker.',
     'application-stop': 'Application graceful stop failed; inspect application health before retrying.',
     'application-remove': 'ONCE application removal failed; inspect host state before recovering its pending marker.',
     'application-deploy': 'ONCE application deployment failed; check hostname DNS, public reachability and container health before recovering its pending marker.',

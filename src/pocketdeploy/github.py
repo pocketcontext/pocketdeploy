@@ -14,16 +14,12 @@ from .config import validate_local_paths
 
 
 def validate_config(config):
-    repositories = set()
     for app in config.get('once', {}).get('applications', []):
         repo = app.get('github')
         if repo is None:
             continue
         if not isinstance(repo, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*', repo):
             raise DeployError('GitHub must identify an owner/repository.')
-        if repo.lower() in repositories:
-            raise DeployError('One application per GitHub repository is supported per deployment.')
-        repositories.add(repo.lower())
         if app.get('disable_tls'):
             raise DeployError('GitHub deployment requires HTTPS; disable_tls must be false.')
         image = app.get('image', '')
@@ -37,7 +33,13 @@ class GitHub:
     def __init__(self, config, state, root, host):
         self.config, self.state, self.root, self.host = config, state, Path(root), host
         self.environment = config['profile']
-        self.apps = [a for a in config.get('once', {}).get('applications', []) if a.get('github')]
+        self.groups = {}
+        for app in config.get('once', {}).get('applications', []):
+            if app.get('github'):
+                self.groups.setdefault(app['github'].lower(), []).append(app)
+        # Existing environment/state identities and first-target SITE_URL remain
+        # unchanged. One repository owns one key and one environment.
+        self.apps = [apps[0] for apps in self.groups.values()]
 
     def _api(self, endpoint, method='GET', data=None):
         args = ['gh', 'api', '--method', method, endpoint]
@@ -284,6 +286,7 @@ class GitHub:
         results = []
         for app in self.apps:
             repo = app['github']
+            apps = self.groups[repo.lower()]
             resource = 'github:' + repo
             base = f'repos/{repo}/environments/{quote(self.environment, safe="")}'
             existing = next((e for e in self._pages(f'repos/{repo}/environments', 'environments')
@@ -302,7 +305,7 @@ class GitHub:
             pending = 'github-key-pending:' + repo
             private, public = self._key(app)
             # Install and verify host authority before making a new CI target visible.
-            self.host.install_github(connection, [{'app': app, 'public_key': public, 'repository': repo, 'preserve_existing_keys': True}])
+            self.host.install_github(connection, [{'app': app, 'applications': apps, 'public_key': public, 'repository': repo, 'preserve_existing_keys': True}])
             step = self.state.intent(operation_id, 'github-environment', {'repository': repo, 'environment': self.environment})
             self.state.set_meta('github-pending:' + repo, True)
             response = existing or self._api(base, 'PUT', {'deployment_branch_policy': {'protected_branches': False, 'custom_branch_policies': True}})
@@ -319,14 +322,15 @@ class GitHub:
                       'POCKETDEPLOY_PROFILE': self.environment, 'SERVER_IP': connection['ip'],
                       'SERVER_USER': connection.get('user', 'ubuntu'),
                       'SSH_KNOWN_HOSTS': f"{connection['ip']} {public_host[0]} {public_host[1]}",
-                      'SITE_URL': ('http' if app.get('disable_tls') else 'https') + '://' + app['host']}
+                      'SITE_URL': ('http' if app.get('disable_tls') else 'https') + '://' + app['host'],
+                      'SITE_URLS': json.dumps([('http' if a.get('disable_tls') else 'https') + '://' + a['host'] for a in apps])}
             for name, value in values.items():
                 run(['gh', 'variable', 'set', name, '--repo', repo, '--env', self.environment], input=value)
             run(['gh', 'secret', 'set', 'SSH_PRIVATE_KEY', '--repo', repo, '--env', self.environment], input=private.read_text())
             # Only retire old host authority after GitHub accepted the new
             # secret. Failure or a lost response leaves both keys usable;
             # retries republish the same pending credential.
-            self.host.install_github(connection, [{'app': app, 'public_key': public,
+            self.host.install_github(connection, [{'app': app, 'applications': apps, 'public_key': public,
                                                    'repository': repo, 'preserve_existing_keys': False}])
             self.state.set_meta(pending, False)
             result = {'repository': repo, 'environment': self.environment}

@@ -314,6 +314,20 @@ def reconcile(request):
         return {'applications': summaries, 'pending_operations': len(list(BASE.glob('*.pending')))}
     if desired_hosts.intersection(current) - set(manifest['apps']):
         raise RuntimeError('unmanaged application requires explicit adoption')
+    # Resolve each distinct image once and check every target before pausing any
+    # writer. A mutable tag cannot drift between instances in the same operation.
+    resolved_images = {}
+    if request['action'] == 'converge':
+        for app in apps:
+            STAGE = 'application-recovery'
+            if (BASE / (hashlib.sha256(app['host'].encode()).hexdigest() + '.pending')).exists():
+                raise RuntimeError('unfinished deployment; operator recovery required')
+            actual = current.get(app['host'])
+            if actual and (not actual['running'] or actual['binds'] or actual['settings'].get('autoUpdate') is not False):
+                raise RuntimeError('unsafe existing application state')
+            reference = app.get('deploy-image', app['image'])
+            if reference not in resolved_images:
+                resolved_images[reference] = resolve_image(reference)
     actions = []
     for host in sorted(set(manifest['apps']) - desired_hosts) if not request.get('retain_other_apps') else []:
         pending = BASE / (hashlib.sha256(host.encode()).hexdigest() + '.pending')
@@ -348,7 +362,7 @@ def reconcile(request):
             raise RuntimeError('unfinished deployment; operator recovery required')
         STAGE = 'application-inventory'
         old = current.get(host)
-        resolved = resolve_image(app.get('deploy-image', app['image'])) if request['action'] == 'converge' else None
+        resolved = resolved_images[app.get('deploy-image', app['image'])] if request['action'] == 'converge' else None
         STAGE = 'application-inventory'
         if matching(app, old, manifest['apps'].get(host), resolved):
             if resolved is not None and resolved[1] == old['image_id']:
@@ -373,6 +387,12 @@ def reconcile(request):
         if old and (not old['running'] or old['binds'] or old['settings'].get('autoUpdate') is not False):
             raise RuntimeError('unsafe existing application state')
         save(pending, {'host': host, 'deployment_id': deployment})
+        if old and app.get('deploy-prepare-command'):
+            # Operator-configured argv only, inside the exact managed container;
+            # SSH callers cannot supply a command, container or environment.
+            STAGE = 'application-prepare'
+            run('docker', 'exec', old['id'], *app['deploy-prepare-command'],
+                timeout=app.get('deploy-prepare-timeout', 900))
         if old and app.get('deploy-strategy', 'rolling') == 'stop-first':
             STAGE = 'application-stop'
             run('docker', 'update', '--restart=no', old['id'])
@@ -676,8 +696,12 @@ def install_github(request):
     os.replace(source_temp, source)
     lines = authorized_keys(account)
     for target in request['targets']:
-        app = target['app']
-        if app['host'] not in manifest['apps']:
+        apps = target.get('applications', [target['app']])
+        if not apps or len({app['host'] for app in apps}) != len(apps):
+            raise RuntimeError('invalid deployment targets')
+        if any(image_repository(app['image']) != 'ghcr.io/' + target['repository'].lower() for app in apps):
+            raise RuntimeError('invalid deployment image repository')
+        if any(app['host'] not in manifest['apps'] for app in apps):
             raise RuntimeError('unmanaged application requires explicit adoption')
         public = target['public_key'].split()
         if len(public) < 2 or public[0] != 'ssh-ed25519' or not re.fullmatch('[A-Za-z0-9+/=]+', public[1]):
@@ -685,7 +709,7 @@ def install_github(request):
         token = hashlib.sha256(target['repository'].lower().encode()).hexdigest()[:20]
         config = directory / (token + '.json')
         save(config, {'action': 'converge', 'deployment_id': request['deployment_id'],
-                      'applications': [app], 'retain_other_apps': True})
+                      'applications': apps, 'retain_other_apps': True})
         dispatcher = directory / (token + '.py')
         # No original SSH command is evaluated. A release digest is optional but
         # must name the configured image repository exactly.
@@ -700,7 +724,8 @@ def install_github(request):
             + "  if command:\n"
             + "   image=request['applications'][0]['image']; repo=m.image_repository(image)\n"
             + "   if not re.fullmatch('deploy '+re.escape(repo)+'@sha256:[0-9a-f]{64}',command): raise RuntimeError()\n"
-            + "   request['applications'][0]['deploy-image']=command[7:]\n"
+            + "   if any(m.image_repository(a['image']) != repo for a in request['applications']): raise RuntimeError()\n"
+            + "   for a in request['applications']: a['deploy-image']=command[7:]\n"
             + "  result=m.reconcile(request)\n"
             + " print(json.dumps({'ok':True}))\n"
             + "except Exception:\n print('Deployment failed; output suppressed',file=sys.stderr); sys.exit(1)\n")

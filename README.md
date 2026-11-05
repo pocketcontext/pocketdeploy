@@ -521,6 +521,30 @@ retry after uncertainty; inspect the app/data before recovery. There is no
 automatic rollback after a possible database migration. Host locks do not fence
 another host. Removed owned apps retain their data volumes.
 
+Stateful applications can configure an application-owned preparation command:
+
+```yaml
+deploy-strategy: stop-first
+deploy-prepare-command: [pocketcontext-container, prepare-upgrade]
+deploy-prepare-timeout: 900
+```
+
+The command is an argv list supplied only by operator configuration, executed
+inside the exact existing managed container without a shell and under the host
+lock. It runs only when replacement is needed, after resolving images and before
+stopping the container. Exit zero must mean preparation (including any required
+backup verification) succeeded; command output is suppressed. The timeout is
+1–3600 seconds, default 900. New instances do not run it. The hook is policy,
+so adding it alone does not recreate an unchanged healthy container.
+
+A durable pending marker precedes preparation. Any failure, timeout or interruption
+retains it: the application may already be paused even when its container is
+running. Inspect application backup/paused state and follow its recovery procedure;
+never blindly repeat preparation or restart after an uncertain result. Later
+replacement failures likewise require operator recovery. No database/image rollback
+is automatic. Application preparation must fit its own timeout; ONCE v0.3.3 still
+has a fixed 120-second startup deadline for the replacement.
+
 ONCE automatic backups and automatic updates remain unsupported. Managed DNS uses
 Cloudflare; managed sending domains use Resend. The local verification fixture uses HTTP with an explicit Host
 header; this is not public TLS validation. Clearing an application's final
@@ -619,10 +643,11 @@ the cause, a later convergence reconciles the existing resources.
 A lost Resend domain/key creation response requires operator reconciliation, not
 blind retries. Keys are reused; rotation is a separate operation.
 
-GitHub environment names equal the durable deployment `profile`, with one app per
-GitHub repository per deployment. The controller installs a restricted separate
-SSH key, main-only branch policy, `SSH_PRIVATE_KEY` environment secret and
-`SERVER_IP`, `SERVER_USER`, `SSH_KNOWN_HOSTS`, `SITE_URL`,
+GitHub environment names equal the durable deployment `profile`. Applications
+sharing a GitHub repository form one ordered deployment group with one environment
+and restricted SSH key. Each target retains its own volume and runtime bindings.
+The controller installs the key, main-only branch policy, `SSH_PRIVATE_KEY` environment secret and
+`SERVER_IP`, `SERVER_USER`, `SSH_KNOWN_HOSTS`, `SITE_URL`, `SITE_URLS`,
 `POCKETDEPLOY_PROFILE`, `POCKETDEPLOY_DEPLOYMENT_ID` variables. Every `converge`
 rotates every configured GitHub deployment key: it installs a new restricted public
 key alongside the old one, updates the `SSH_PRIVATE_KEY` secret, then removes the
@@ -644,6 +669,14 @@ image. Every environment is an active target, without an opt-in flag. Missing
 settings fail the target; no environments skips deployment. The current workflow
 uses no-command SSH to update the configured image tag. The restricted handler
 also supports `deploy ghcr.io/owner/repo@sha256:DIGEST`; other commands are rejected.
+For a group this digest applies to every configured target, in configuration order.
+`SITE_URLS` is a JSON array of their public origins; `SITE_URL` remains the first
+origin for older workflows. The host lock spans the complete group. Images are
+resolved once per reference before any writer pauses; each target finishes health
+and volume verification before the next begins. A failure stops the group,
+preserves completed targets and fences the failed target with its pending marker.
+Narrowing the group's configured targets replaces its policy without touching
+other repositories' restricted keys. No automatic group rollback is attempted.
 Retiring an environment requires accounting for queued/running workflow snapshots.
 
 ```sh

@@ -390,3 +390,25 @@ def test_key_preparation_preserves_colliding_state(tmp_path, public, configured)
     with State(target, 'test-profile', {}) as recovered:
         assert recovered.deployment_id == identity
         assert recovered.get_meta('synthetic-evidence') == {'preserve': True}
+
+
+def test_grouped_repository_has_one_environment_key_and_ordered_urls(tmp_path):
+    github, state = fixture(tmp_path)
+    first = github.apps[0]
+    apps = [first, {**first, 'host': 'second.example.test'}, {**first, 'host': 'third.example.test'}]
+    github.config['once']['applications'] = apps
+    validate_config(github.config)
+    github = GitHub(github.config, state, tmp_path, github.host)
+    assert github.plan() == {'environments': [{'repository': 'example/site', 'environment': 'test-profile', 'action': 'create'}]}
+    with state:
+        operation = state.begin_operation('converge', 'test')
+        with patch.object(github, '_pages', side_effect=[[], []]), patch.object(github, '_api', return_value={'id': 42}) as api, patch('pocketdeploy.github.run', side_effect=keygen_only) as run:
+            github.converge({'ip': '192.0.2.1'}, operation)
+        assert api.call_count == 2  # one environment and one branch policy
+        assert len([c for c in run.call_args_list if c.args[0][1] == 'secret']) == 1
+        urls = next(c.kwargs['input'] for c in run.call_args_list if c.args[0][1:4] == ['variable', 'set', 'SITE_URLS'])
+        assert json.loads(urls) == ['https://' + a['host'] for a in apps]
+        assert all(c.args[1][0]['applications'] == apps for c in github.host.install_github.call_args_list)
+        assert len([r for r in state.resources() if r['kind'] == 'github-environment']) == 1
+        assert github.delete_keys() == {'deleted_key_files': 2}
+        assert github.delete_keys() == {'deleted_key_files': 0}

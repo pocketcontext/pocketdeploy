@@ -272,3 +272,25 @@ def test_clear_pending_marker_sends_only_host_and_allowlists_result(tmp_path):
     assert [tuple(r) for r in state.db.execute('SELECT status,result FROM steps ORDER BY rowid')] == [
         ('complete', '{"host": "app.example.com", "cleared": true}'), ('failed', '{"error": "operation_failed"}')]
     state.db.close()
+
+
+def test_prepare_command_validation_and_budget(tmp_path):
+    import pytest
+    from pocketdeploy.host import validate_config
+    from pocketdeploy.common import DeployError
+    app = {'host': 'a.example.com', 'image': 'example/app:latest', 'deploy-strategy': 'stop-first',
+           'deploy-prepare-command': ['app-control', 'prepare-upgrade'], 'deploy-prepare-timeout': 900}
+    config = {'once': {'applications': [app]}}
+    validate_config(config)
+    for command in ('sh -c command', [], [''], ['command\nunsafe'], [1]):
+        with pytest.raises(DeployError, match='argv'):
+            validate_config({'once': {'applications': [{**app, 'deploy-prepare-command': command}]}})
+    with pytest.raises(DeployError, match='stop-first'):
+        validate_config({'once': {'applications': [{**app, 'deploy-strategy': 'rolling'}]}})
+    for timeout in (0, 3601, True, '900'):
+        with pytest.raises(DeployError, match='Prepare timeout'):
+            validate_config({'once': {'applications': [{**app, 'deploy-prepare-timeout': timeout}]}})
+    host = Host(config, SimpleNamespace(deployment_id='test'), tmp_path)
+    with patch.object(host, '_remote_request') as request:
+        host._remote({'ip': '192.0.2.1'}, 'converge')
+    assert request.call_args.kwargs['timeout'] == 1200 + 300 + 60 + 900
