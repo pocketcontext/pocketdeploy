@@ -194,7 +194,7 @@ class Host:
             applications = [{'smtp': any(app.get('smtp') for app in applications)}]
         elif action in ('plan', 'converge', 'adopt-app'):
             applications = [self.resolved_app(app) for app in applications]
-        elif action == 'clear-pending':
+        elif action in ('clear-pending', 'github-retire'):
             applications = []
         request = {'action': action, 'deployment_id': self.state.deployment_id,
                    'user': connection.get('user', 'ubuntu'),
@@ -271,6 +271,11 @@ class Host:
             return self._remote_request(connection, 'github-install', {
                 'targets': [{**target, 'app': self.resolved_app(target['app']),
                              'applications': [self.resolved_app(app) for app in target.get('applications', [target['app']])]} for target in targets], 'user': connection.get('user', 'ubuntu'), 'source': source})
+
+    def retire_github(self, connection, token, dry_run=False):
+        with operation('SSH: GitHub delivery retirement'):
+            result = self._remote_request(connection, 'github-retire', {'token': token, 'dry_run': dry_run}, timeout=120)
+        return {'keys': int(result['keys']), 'files': int(result['files'])}
 
     def rotate_key(self, connection, operation_id):
         compute = self.state.get_resource('compute')
@@ -383,6 +388,7 @@ class Host:
 
 
 SAFE_ERRORS = {'unfinished deployment; operator recovery required',
+               'github target ownership does not match',
                'application removal requires explicit operator action',
                'host belongs to another deployment',
                'unmanaged application requires explicit adoption',

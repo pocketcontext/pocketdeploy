@@ -55,6 +55,7 @@ def parser():
   steps          List pending recorded steps and whether they may be resolved
   resolve-step   Mark one stale idempotent pending step failed using --step-id
   clear-pending-marker  Remove a failed ONCE delivery marker for --app-host after host checks
+  retire-github-target  Remove a former --repository's environment and host delivery key
 
 Vault commands (explicit checkpoints):
   vault-save     Save private bindings, recovery keys and SQLite to Vault
@@ -70,7 +71,7 @@ Examples:
 
 Configuration defaults to colors.yml in the current working directory.
 Use -f to select a deployment. Run without arguments to show this help.''')
-    p.add_argument('command', metavar='COMMAND', choices=['kms-resolve-user-create', 'kms-resolve-rotation', 'kms-plan', 'kms-converge', 'kms-rotate', 'init', 'plan', 'converge', 'status', 'ssh', 'delete', 'adopt', 'adopt-app', 'adopt-dns', 'dns-evidence', 'smtp-test', 'rotate-host-key', 'steps', 'resolve-step', 'clear-pending-marker', 'vault-save', 'vault-restore'], help='Deployment or Vault command listed below')
+    p.add_argument('command', metavar='COMMAND', choices=['kms-resolve-user-create', 'kms-resolve-rotation', 'kms-plan', 'kms-converge', 'kms-rotate', 'init', 'plan', 'converge', 'status', 'ssh', 'delete', 'adopt', 'adopt-app', 'adopt-dns', 'dns-evidence', 'smtp-test', 'rotate-host-key', 'steps', 'resolve-step', 'clear-pending-marker', 'retire-github-target', 'vault-save', 'vault-restore'], help='Deployment or Vault command listed below')
     p.add_argument('-f', '--file', help='Configuration file (default: ./colors.yml in the current working directory)')
     p.add_argument('--json', action='store_true', help='Emit one versioned JSON result on stdout')
     p.add_argument('--verbose', action='store_true', help='Show safe request timings and waiting progress on stderr')
@@ -98,6 +99,7 @@ Use -f to select a deployment. Run without arguments to show this help.''')
                    help='Wait for SMTP verification during converge (0–3600 seconds; default: 600; 0 checks once)')
     p.add_argument('--provider-read-timeout', type=int, metavar='SECONDS',
                    help='Resend/Cloudflare read recovery budget for plan/converge/delete (0–3600; default: 120; 0 disables outer retries)')
+    p.add_argument('--repository', help='Exact former OWNER/REPO for retire-github-target')
     p.add_argument('--to', help='Recipient for the explicit smtp-test command')
     return p
 
@@ -253,6 +255,12 @@ def _execute(args, reporter=None):
             raise DeployError('clear-pending-marker requires only an exact lowercase --app-host.', code='invalid_usage')
     elif args.command != 'adopt-app' and any(getattr(args, key, None) for key in adoption_options):
         raise DeployError('Application adoption options require adopt-app.', code='invalid_usage')
+    if bool(getattr(args, 'repository', None)) != (args.command == 'retire-github-target'):
+        raise DeployError('retire-github-target requires --repository; --repository is only supported for retire-github-target.', code='invalid_usage')
+    if args.command == 'retire-github-target':
+        import re
+        if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', args.repository):
+            raise DeployError('retire-github-target requires an exact OWNER/REPO.', code='invalid_usage')
     if bool(getattr(args, 'step_id', None)) != (args.command == 'resolve-step'):
         raise DeployError('resolve-step requires --step-id; --step-id is only supported for resolve-step.', code='invalid_usage')
     if args.command == 'adopt-app':
@@ -269,8 +277,8 @@ def _execute(args, reporter=None):
     os.umask(0o077)
     if args.command == 'ssh' and getattr(args, 'json', False):
         raise UsageError()
-    if args.dry_run and args.command not in ('converge', 'delete', 'plan'):
-        raise DeployError('--dry-run is supported only for plan/converge/delete.', code='invalid_usage')
+    if args.dry_run and args.command not in ('converge', 'delete', 'plan', 'retire-github-target'):
+        raise DeployError('--dry-run is supported only for plan/converge/delete/retire-github-target.', code='invalid_usage')
     if args.overwrite and args.command != 'vault-restore':
         raise DeployError('--overwrite is supported only for vault-restore.', code='invalid_usage')
     if bool(getattr(args, 'to', None)) != (args.command == 'smtp-test'):
@@ -283,7 +291,7 @@ def _execute(args, reporter=None):
     config_file = args.file if args.file is not None else 'colors.yml'
     if args.file is None and not Path(config_file).exists():
         raise DeployError('No colors.yml found in the current directory; use -f to select a configuration.')
-    config = load(config_file, resolve=args.command not in ('kms-resolve-user-create', 'kms-resolve-rotation', 'kms-plan', 'kms-converge', 'kms-rotate', 'init', 'ssh', 'delete', 'vault-save', 'vault-restore', 'status', 'smtp-test', 'rotate-host-key', 'steps', 'resolve-step', 'clear-pending-marker'))
+    config = load(config_file, resolve=args.command not in ('kms-resolve-user-create', 'kms-resolve-rotation', 'kms-plan', 'kms-converge', 'kms-rotate', 'init', 'ssh', 'delete', 'vault-save', 'vault-restore', 'status', 'smtp-test', 'rotate-host-key', 'steps', 'resolve-step', 'clear-pending-marker', 'retire-github-target'))
     # Reject unsupported application behavior before any cloud mutation.
     from .host import validate_config
     if args.command != 'rotate-host-key':
@@ -359,6 +367,9 @@ def _execute(args, reporter=None):
                     if observed.get('compute'):
                         result['applications'] = host.status(cloud.connection())
                     return result
+                if args.command == 'retire-github-target':
+                    from .github import GitHub
+                    return GitHub(config, state, root, host).plan_retire(args.repository, cloud.connection())
                 if args.command == 'delete':
                     from .deletion import Deletion
                     with reporter.stage('delete-preflight'):
@@ -432,6 +443,13 @@ def _execute(args, reporter=None):
                         raise DeployError('Marker recovery requires recorded owned compute.')
                     with reporter.stage('clear-pending-marker'):
                         result = host.clear_pending_marker(cloud.connection(), operation, args.app_host)
+                elif args.command == 'retire-github-target':
+                    recorded = state.get_resource('compute')
+                    if not recorded or not recorded['owned']:
+                        raise DeployError('GitHub target retirement requires recorded owned compute.')
+                    from .github import GitHub
+                    with reporter.stage('retire-github-target'):
+                        result = GitHub(config, state, root, host).retire_target(args.repository, cloud.connection(), operation)
                 elif args.command == 'adopt':
                     if not args.instance_id:
                         raise DeployError('Adoption requires --instance-id and matching ownership tags.')

@@ -183,6 +183,50 @@ class GitHub:
                 raise DeployError('GitHub environment deployment ownership does not match.')
         return repo, environment, existing, base
 
+    def _retire_record(self, repository):
+        if repository.lower() in self.groups:
+            raise DeployError('GitHub target is still configured; move its applications first.')
+        record = self.state.get_resource('github:' + repository)
+        if not record or record['kind'] != 'github-environment':
+            raise DeployError('GitHub target has no recorded environment.')
+        return record
+
+    def _retire_token(self, repository):
+        return hashlib.sha256(repository.lower().encode()).hexdigest()[:20]
+
+    def plan_retire(self, repository, connection):
+        record = self._retire_record(repository)
+        repo, environment, existing, _ = self._delete_target(record)
+        return {'repository': repo, 'environment': environment, 'environment_action': 'delete' if existing else 'absent',
+                'host': self.host.retire_github(connection, self._retire_token(repository), dry_run=True), 'dry_run': True}
+
+    def retire_target(self, repository, connection, operation_id):
+        """Fence host authority, then GitHub, then local records, so a retry resumes safely."""
+        record = self._retire_record(repository)
+        repo, environment, existing, base = self._delete_target(record)
+        validate_local_paths(self.config, self.root, state_path=self.state.path)
+        paths = self.key_paths({'github': repo})
+        self._check_files(paths)
+        step = self.state.intent(operation_id, 'github-target-retire', {'repository': repo})
+        try:
+            host = self.host.retire_github(connection, self._retire_token(repo))
+            if existing:
+                self._api(base, 'DELETE')
+                if any(str(e['id']) == record['provider_id'] for e in self._pages(f'repos/{repo}/environments', 'environments')):
+                    raise DeployError('GitHub environment deletion could not be verified.')
+            for path in paths:
+                path.unlink(missing_ok=True)
+            for key, value in (('github-key:', None), ('github-key-pending:', False), ('github-pending:', False)):
+                self.state.set_meta(key + repo, value)
+            self.state.remove_resource(record['name'])
+        except BaseException as exc:
+            from .state import failure_class
+            self.state.fail(step, failure_class(exc))
+            raise
+        result = {'repository': repo, 'environment': environment, 'environment_deleted': bool(existing), 'host': host}
+        self.state.complete(step, result)
+        return result
+
     def _cleanup_repositories(self):
         repositories = [app['github'] for app in self.apps] + self.state.get_meta('github-delete-keys', []) + [
             r['attributes']['repository'] for r in self.state.resources() if r['kind'] == 'github-environment']

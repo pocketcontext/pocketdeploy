@@ -170,6 +170,10 @@ pocketdeploy delete --dry-run
 pocketdeploy steps
 pocketdeploy resolve-step --step-id STEP_ID
 pocketdeploy clear-pending-marker --app-host app.example.com
+
+# After every application has left a repository
+pocketdeploy retire-github-target --repository owner/old-repo --dry-run
+pocketdeploy retire-github-target --repository owner/old-repo
 ```
 
 `init` prepares the local deployment UUID, SQLite state, SSH client and host
@@ -459,6 +463,12 @@ pocketdeploy steps
 pocketdeploy resolve-step --step-id STEP_ID
 pocketdeploy clear-pending-marker --app-host app.example.com
 ```
+
+`retire-github-target` removes one former repository's delivery authority after
+`colors.yml` no longer references it. Under the host lock, and refusing while any
+deployment runs, it removes the host key and dispatcher files, then deletes the
+owned GitHub environment, then the local key pair and state records. A failed run
+can be repeated. Applications and other repositories are not touched.
 
 `steps` lists pending step IDs, kinds and whether they are resolvable, without
 payloads or provider calls. `resolve-step` marks one stale pending step of an

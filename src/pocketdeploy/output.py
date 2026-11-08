@@ -155,6 +155,10 @@ def text_result(command, result):
     if command == 'clear-pending-marker':
         return [f"Cleared pending marker for {result['host']}." if result.get('cleared')
                 else f"No pending marker for {result['host']}."]
+    if command == 'retire-github-target':
+        prefix = 'Would retire' if result.get('dry_run') else 'Retired'
+        return [f"{prefix} GitHub target {result['repository']} ({result['environment']}): "
+                f"{result['host']['keys']} host key(s), {result['host']['files']} host file(s)."]
     if command == 'rotate-host-key':
         return ['Host-key migration verified. Save a new Vault recovery checkpoint.']
     if command == 'smtp-test':

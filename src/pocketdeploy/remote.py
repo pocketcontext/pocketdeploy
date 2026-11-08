@@ -578,6 +578,49 @@ def clear_pending(request):
     return {'host': host, 'cleared': True}
 
 
+def retire_github_target(request):
+    """Remove one former repository's host delivery authority; applications are untouched."""
+    global STAGE
+    STAGE = 'application-inventory'
+    deployment, token = request['deployment_id'], request['token']
+    manifest = json.loads(MANIFEST.read_text()) if MANIFEST.exists() else {'deployment_id': deployment, 'apps': {}}
+    if manifest.get('deployment_id') != deployment:
+        raise RuntimeError('host belongs to another deployment')
+    if (BASE / 'retirement.json').exists():
+        raise RuntimeError('host is retired; convergence is disabled')
+    if not re.fullmatch('[0-9a-f]{20}', token):
+        raise RuntimeError('github target ownership does not match')
+    directory = BASE / 'github'
+    config, dispatcher = directory / (token + '.json'), directory / (token + '.py')
+    marker = 'pocketdeploy-github-' + token
+    account = pwd.getpwnam(request.get('user', 'ubuntu'))
+    lines = authorized_keys(account)
+    remaining = [line for line in lines if line.rsplit(' ', 1)[-1] != marker]
+    keys = len(lines) - len(remaining)
+    if config.exists():
+        data = json.loads(config.read_text())
+        if data.get('deployment_id') != deployment:
+            raise RuntimeError('github target ownership does not match')
+        for app in data.get('applications', []):
+            if (BASE / (hashlib.sha256(app['host'].encode()).hexdigest() + '.pending')).exists():
+                raise RuntimeError('unfinished deployment; operator recovery required')
+    elif keys:
+        # Keys go first, so a key without its configuration has no proven owner.
+        raise RuntimeError('github target ownership does not match')
+    files = [path for path in (config, dispatcher) if path.exists()]
+    result = {'keys': keys, 'files': len(files)}
+    if request.get('dry_run'):
+        return result
+    STAGE = 'application-recovery'
+    # New connections end with the key. A job queued on the lock then fails
+    # closed because its configuration is gone.
+    if keys:
+        authorized_keys(account, remaining)
+    for path in files:
+        path.unlink()
+    return result
+
+
 def retire(request, mutate=False):
     """Retirement is permanent on this host; retries only finish clean stops."""
     global STAGE
@@ -753,6 +796,8 @@ def main():
         return retire(request, mutate=False)
     if request['action'] in ('plan', 'status'):
         return reconcile(request)
+    if request['action'] == 'github-retire' and request.get('dry_run'):
+        return retire_github_target(request)
     BASE.mkdir(parents=True, exist_ok=True, mode=0o700)
     with open(BASE / 'lock', 'a') as lock:
         if request['action'] == 'clear-pending':
@@ -762,6 +807,13 @@ def main():
             except BlockingIOError:
                 raise RuntimeError('host operation in progress') from None
             return clear_pending(request)
+        if request['action'] == 'github-retire':
+            # A running deploy may still be using this authority: refuse, never queue.
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise RuntimeError('host operation in progress') from None
+            return retire_github_target(request)
         fcntl.flock(lock, fcntl.LOCK_EX)
         if request['action'] == 'quiesce':
             return retire(request, mutate=True)
@@ -788,6 +840,7 @@ if __name__ == '__main__':
                 'host is retired; convergence is disabled', 'application did not stop cleanly',
                 'host retirement ownership verification failed', 'application adoption evidence does not match',
                 'application already has managed ownership', 'host operation in progress',
-                'pending marker has deployed application state'}
+                'pending marker has deployed application state',
+                'github target ownership does not match'}
         print(json.dumps({'error': str(exc) if str(exc) in safe else 'operation failed; output suppressed', 'stage': STAGE, 'diagnostic': getattr(exc, 'diagnostic', None)}))
         sys.exit(1)

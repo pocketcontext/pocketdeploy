@@ -412,3 +412,66 @@ def test_grouped_repository_has_one_environment_key_and_ordered_urls(tmp_path):
         assert len([r for r in state.resources() if r['kind'] == 'github-environment']) == 1
         assert github.delete_keys() == {'deleted_key_files': 2}
         assert github.delete_keys() == {'deleted_key_files': 0}
+
+
+def retire_fixture(tmp_path):
+    github, state = fixture(tmp_path)
+    state.put_resource('github:example/old', 'github-environment', '7', {'repository': 'example/old', 'environment': 'test-profile'})
+    state.set_meta('github-key:example/old', {'path': '.ssh/x'})
+    github.host.retire_github = Mock(return_value={'keys': 1, 'files': 2})
+    calls = []
+
+    def api(path, method='GET', **kwargs):
+        calls.append((method, path))
+        return {'permissions': {'admin': True}}
+
+    def pages(path, field):
+        if path.endswith('/variables'):
+            return [{'name': 'POCKETDEPLOY_DEPLOYMENT_ID', 'value': state.deployment_id}]
+        return [] if ('DELETE', 'repos/example/old/environments/test-profile') in calls else [{'name': 'test-profile', 'id': 7}]
+
+    github._api, github._pages = api, pages
+    return github, state, calls
+
+
+def test_retire_target_fences_host_before_github_and_clears_records(tmp_path):
+    github, state, calls = retire_fixture(tmp_path)
+    for path in github.key_paths({'github': 'example/old'}):
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path.write_text('synthetic')
+    order = []
+    github.host.retire_github.side_effect = lambda *a, **k: order.append(len(calls)) or {'keys': 1, 'files': 2}
+    operation = state.begin_operation('retire-github-target', 'hash')
+    assert github.retire_target('example/old', {}, operation)['environment_deleted'] is True
+    assert ('DELETE', 'repos/example/old/environments/test-profile') not in calls[:order[0]]
+    assert state.get_resource('github:example/old') is None and not state.get_meta('github-key:example/old')
+    assert not any(path.exists() for path in github.key_paths({'github': 'example/old'}))
+    assert state.safe_status()['pending_steps'] == 0
+
+
+def test_retire_target_failure_keeps_record_for_retry(tmp_path):
+    github, state, calls = retire_fixture(tmp_path)
+    github.host.retire_github.side_effect = DeployError('Host operation failed')
+    operation = state.begin_operation('retire-github-target', 'hash')
+    with pytest.raises(DeployError):
+        github.retire_target('example/old', {}, operation)
+    assert state.get_resource('github:example/old') is not None
+    assert not [c for c in calls if c[0] == 'DELETE'] and state.safe_status()['pending_steps'] == 0
+
+
+def test_retire_target_refuses_configured_or_unknown_repository(tmp_path):
+    github, state, _ = retire_fixture(tmp_path)
+    with pytest.raises(DeployError, match='still configured'):
+        github.plan_retire('Example/Site', {})
+    with pytest.raises(DeployError, match='no recorded'):
+        github.plan_retire('example/absent', {})
+    github.host.retire_github.assert_not_called()
+
+
+def test_retire_dry_run_reads_only(tmp_path):
+    github, state, calls = retire_fixture(tmp_path)
+    plan = github.plan_retire('example/old', {})
+    assert plan['environment_action'] == 'delete' and plan['dry_run'] is True
+    github.host.retire_github.assert_called_once()
+    assert github.host.retire_github.call_args.kwargs == {'dry_run': True}
+    assert not [c for c in calls if c[0] == 'DELETE'] and state.get_resource('github:example/old')

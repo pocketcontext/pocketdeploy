@@ -135,3 +135,63 @@ def test_host_retry_completes_previous_intent_for_same_instance(tmp_path, monkey
         statuses = dict(state.db.execute('SELECT id,status FROM steps'))
         assert statuses[previous] == 'complete'
         assert statuses[unrelated] == 'pending'
+
+
+TOKEN = 'b' * 20
+
+
+@pytest.fixture
+def former_target(retired_host):
+    base, authorized, _ = retired_host
+    remote.save(base / 'github' / (TOKEN + '.json'), {'deployment_id': 'test', 'applications': [{'host': 'old.example.test'}]})
+    (base / 'github' / (TOKEN + '.py')).write_text('dispatcher')
+    authorized.write_text(authorized.read_text() + 'restrict ssh-ed25519 former pocketdeploy-github-' + TOKEN + '\n')
+    return base, authorized
+
+
+def retire_request(**extra):
+    return {'deployment_id': 'test', 'token': TOKEN, 'user': 'ubuntu', **extra}
+
+
+def test_github_retire_dry_run_changes_nothing(former_target):
+    base, authorized = former_target
+    before = authorized.read_text()
+    assert remote.retire_github_target(retire_request(dry_run=True)) == {'keys': 1, 'files': 2}
+    assert authorized.read_text() == before and (base / 'github' / (TOKEN + '.json')).exists()
+
+
+def test_github_retire_removes_only_that_target_and_repeats(former_target):
+    base, authorized = former_target
+    assert remote.retire_github_target(retire_request()) == {'keys': 1, 'files': 2}
+    text = authorized.read_text()
+    assert TOKEN not in text and 'pocketdeploy-github-' + 'a' * 20 in text and 'operator' in text
+    assert not list((base / 'github').glob(TOKEN + '*')) and (base / 'github' / ('a' * 20 + '.json')).exists()
+    assert remote.retire_github_target(retire_request()) == {'keys': 0, 'files': 0}
+
+
+def test_github_retire_resumes_after_key_removal(former_target):
+    base, authorized = former_target
+    authorized.write_text(''.join(l + '\n' for l in authorized.read_text().splitlines() if TOKEN not in l))
+    assert remote.retire_github_target(retire_request()) == {'keys': 0, 'files': 2}
+
+
+@pytest.mark.parametrize('hazard', ['foreign', 'pending', 'retired', 'orphan-key', 'token'])
+def test_github_retire_hazards_fail_before_mutation(former_target, hazard):
+    base, authorized = former_target
+    request_ = retire_request()
+    config = base / 'github' / (TOKEN + '.json')
+    if hazard == 'foreign':
+        remote.save(config, {'deployment_id': 'other'})
+    elif hazard == 'pending':
+        import hashlib
+        (base / (hashlib.sha256(b'old.example.test').hexdigest() + '.pending')).write_text('{}')
+    elif hazard == 'retired':
+        (base / 'retirement.json').write_text('{}')
+    elif hazard == 'orphan-key':
+        config.unlink()
+    else:
+        request_['token'] = '../escape'
+    before = authorized.read_text()
+    with pytest.raises(RuntimeError):
+        remote.retire_github_target(request_)
+    assert authorized.read_text() == before
