@@ -566,22 +566,26 @@ class OCI:
                 raise DeployError('Deletion requires recorded ownership and matching cloud tags.')
             step = pending['step'] if pending else self.state.intent(operation_id, 'delete-' + role, {'id': item['id']})
             self.state.set_meta('oci-delete-' + role, {'step': step, 'id': item['id']})
+            terminating = role == 'compute' and item.get('lifecycle-state') == 'TERMINATING'
             if role == 'compute':
-                if item.get('lifecycle-state') != 'TERMINATING':
+                # A resumed TERMINATING instance is awaited, never terminated again.
+                if not terminating:
                     self._delete_boot_volume(item)
-                # Delete disks explicitly after termination; keep their identities on failure.
-                self._call('compute', 'instance', 'terminate', '--instance-id', item['id'], '--force', '--preserve-boot-volume', 'true', '--wait-for-state', 'SUCCEEDED', timeout=1500)
+                    # Delete disks explicitly after termination; keep their identities on failure.
+                    self._call('compute', 'instance', 'terminate', '--instance-id', item['id'], '--force', '--preserve-boot-volume', 'true', '--wait-for-state', 'TERMINATED', timeout=1500)
             else:
                 self._call('network', 'nsg', 'delete', '--nsg-id', item['id'], '--force')
             # NSG deletion is eventually visible in list responses. Bound polling
             # without dropping the durable intent if the provider remains stale.
-            attempts = 16 if role == 'firewall' else 1
+            # instance get has no --wait-for-state, so a resumed termination polls
+            # within the terminate timeout.
+            attempts, interval = (16, 2) if role == 'firewall' else (300, 5) if terminating else (1, 0)
             for attempt in range(attempts):
                 if self._find(role, allow_missing=True) is None:
                     break
                 if attempt + 1 == attempts:
                     raise DeployError('OCI deletion is not complete; retry delete to reconcile.', code='deletion_pending')
-                time.sleep(2)
+                time.sleep(interval)
             if role == 'firewall':
                 self._complete_rule_steps(item['id'], deleted=True)
             self.state.remove_resource(role)
@@ -593,11 +597,16 @@ class OCI:
             step = pending['step'] if pending else self.state.intent(operation_id, 'delete-boot-volume', {'id': record['provider_id']})
             self.state.set_meta(key, {'step': step, 'id': record['provider_id']})
             if volume:
-                attachments = self._list('compute', 'boot-volume-attachment', 'list',
-                                        '--compartment-id', self.config['oci-compartment-id'],
-                                        '--availability-domain', self.config['oci-availability-domain'], '--all')
-                if any(a.get('boot-volume-id') == record['provider_id'] and a.get('lifecycle-state') != 'DETACHED' for a in attachments):
-                    raise DeployError('Boot volume is still attached; retry after termination completes.', code='deletion_pending')
+                # Detachment can lag instance termination; bound polling like NSG deletion.
+                for attempt in range(16):
+                    attachments = self._list('compute', 'boot-volume-attachment', 'list',
+                                            '--compartment-id', self.config['oci-compartment-id'],
+                                            '--availability-domain', self.config['oci-availability-domain'], '--all')
+                    if not any(a.get('boot-volume-id') == record['provider_id'] and a.get('lifecycle-state') != 'DETACHED' for a in attachments):
+                        break
+                    if attempt + 1 == 16:
+                        raise DeployError('Boot volume is still attached; retry after termination completes.', code='deletion_pending')
+                    time.sleep(2)
                 self._call('bv', 'boot-volume', 'delete', '--boot-volume-id', record['provider_id'],
                            '--force', '--wait-for-state', 'TERMINATED', timeout=1500)
                 current = self._volumes_for_delete()

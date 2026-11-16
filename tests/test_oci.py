@@ -361,11 +361,29 @@ def volume_cloud(adapter, monkeypatch, *, legacy=False, foreign=False):
     for name, instance in [('current', 'compute-id'), ('historical', 'old-instance')]:
         adapter.state.put_resource('boot-volume' if name == 'current' else 'retained-boot-volume:' + name,
                                    'oci-boot-volume', name, {'instance_id': instance})
-    cloud = {'instance': resource(adapter), 'volumes': volumes, 'calls': []}
+    # 'detaching' counts attachment polls that still report DETACHING after termination;
+    # 'terminating' counts instance polls that still report TERMINATING.
+    cloud = {'instance': resource(adapter), 'volumes': volumes, 'calls': [], 'detaching': 0, 'terminating': 0}
+    def attachment_state(name, instance):
+        if foreign:
+            return 'ATTACHED'
+        if name != 'current':
+            return 'DETACHED'
+        if cloud['instance']:
+            return 'ATTACHED'
+        if cloud['detaching']:
+            cloud['detaching'] -= 1
+            return 'DETACHING'
+        return 'DETACHED'
     def call(*args, body=None, **kw):
         command = args[:3]
         cloud['calls'].append(command)
         if command == ('compute', 'instance', 'list'):
+            if cloud['instance'] and cloud['instance'].get('lifecycle-state') == 'TERMINATING':
+                if not cloud['terminating']:
+                    cloud['instance'] = None
+                    return []
+                cloud['terminating'] -= 1
             return [cloud['instance']] if cloud['instance'] else []
         if command == ('network', 'nsg', 'list'):
             return []
@@ -373,7 +391,7 @@ def volume_cloud(adapter, monkeypatch, *, legacy=False, foreign=False):
             return list(volumes.values())
         if command == ('compute', 'boot-volume-attachment', 'list'):
             return [{'boot-volume-id': name, 'instance-id': 'foreign' if foreign else instance,
-                     'lifecycle-state': 'ATTACHED' if foreign or (name == 'current' and cloud['instance']) else 'DETACHED'}
+                     'lifecycle-state': attachment_state(name, instance)}
                     for name, instance in [('current', 'compute-id'), ('historical', 'old-instance')]]
         if command == ('bv', 'boot-volume', 'update'):
             volumes[args[4]]['freeform-tags'] = body['freeformTags']
@@ -382,15 +400,71 @@ def volume_cloud(adapter, monkeypatch, *, legacy=False, foreign=False):
             return volumes[args[4]]
         if command == ('compute', 'instance', 'terminate'):
             assert args[args.index('--preserve-boot-volume') + 1] == 'true'
+            # OCI CLI accepts only instance lifecycle states here; SUCCEEDED is a usage error.
+            assert args[args.index('--wait-for-state') + 1] == 'TERMINATED'
             cloud['instance'] = None
             return None
         if command == ('bv', 'boot-volume', 'delete'):
+            assert args[args.index('--wait-for-state') + 1] == 'TERMINATED'
             del volumes[args[4]]
             return None
         pytest.fail('Unexpected synthetic OCI request')
     monkeypatch.setattr(adapter, '_call', call)
     monkeypatch.setattr(adapter, '_read_boot_volume', lambda instance: volumes['current'])
     return cloud
+
+
+def test_boot_volume_delete_waits_for_detach_lag(adapter, monkeypatch):
+    cloud = volume_cloud(adapter, monkeypatch)
+    cloud['detaching'] = 3
+    sleeps = []
+    monkeypatch.setattr('pocketdeploy.oci.time.sleep', sleeps.append)
+    operation = adapter.state.begin_operation('delete', 'test')
+    assert adapter.delete(operation) == {'deleted': True}
+    assert cloud['volumes'] == {}
+    # Ownership reads may observe one DETACHING response before the bounded poll.
+    assert sleeps and set(sleeps) == {2} and len(sleeps) <= 3
+    assert adapter.state.resources() == []
+    assert adapter.state.safe_status()['pending_steps'] == 0
+
+
+def test_boot_volume_detach_beyond_bound_stays_pending_and_retry_succeeds(adapter, monkeypatch):
+    cloud = volume_cloud(adapter, monkeypatch)
+    cloud['detaching'] = 1000
+    sleeps = []
+    monkeypatch.setattr('pocketdeploy.oci.time.sleep', sleeps.append)
+    operation = adapter.state.begin_operation('delete', 'test')
+    with pytest.raises(DeployError, match='still attached') as error:
+        adapter.delete(operation)
+    assert error.value.code == 'deletion_pending'
+    assert len(sleeps) == 15
+    assert set(cloud['volumes']) == {'current', 'historical'}
+    assert ('bv', 'boot-volume', 'delete') not in cloud['calls']
+    assert adapter.state.get_meta('oci-delete-volume:current')
+    cloud['detaching'] = 0
+    assert adapter.delete(operation) == {'deleted': True}
+    assert cloud['volumes'] == {}
+    assert cloud['calls'].count(('compute', 'instance', 'terminate')) == 1
+    assert adapter.state.resources() == []
+    assert adapter.state.safe_status()['pending_steps'] == 0
+
+
+def test_resume_awaits_terminating_instance_without_terminating_again(adapter, monkeypatch):
+    cloud = volume_cloud(adapter, monkeypatch)
+    operation = adapter.state.begin_operation('delete', 'test')
+    step = adapter.state.intent(operation, 'delete-compute', {'id': 'compute-id'})
+    adapter.state.set_meta('oci-delete-compute', {'step': step, 'id': 'compute-id'})
+    cloud['instance'] = resource(adapter, **{'lifecycle-state': 'TERMINATING'})
+    cloud['terminating'] = 4
+    sleeps = []
+    monkeypatch.setattr('pocketdeploy.oci.time.sleep', sleeps.append)
+    assert adapter.delete(operation) == {'deleted': True}
+    assert ('compute', 'instance', 'terminate') not in cloud['calls']
+    assert sleeps and set(sleeps) == {5}
+    assert cloud['volumes'] == {}
+    assert adapter.state.resources() == []
+    assert adapter.state.get_meta('oci-delete-compute') is None
+    assert adapter.state.safe_status()['pending_steps'] == 0
 
 
 @pytest.mark.parametrize('legacy', [False, True])
