@@ -3,6 +3,7 @@
 Authentication comes from the named profile in the AWS CLI configuration.
 Ownership is established by tags plus recorded provider IDs, never by names.
 """
+import hashlib
 import ipaddress
 import json
 import os
@@ -321,12 +322,20 @@ class AWS:
                   '--tag-specifications', json.dumps([self._tag_specification('security-group', 'firewall', 'firewall')]))
         return self._await_visible('firewall')
 
+    def _client_token(self, step):
+        return hashlib.sha256((self.state.deployment_id + '/' + str(step)).encode()).hexdigest()[:64]
+
     def _launch(self, firewall, image, instance_type, public_key, operation_id):
         # A durable client token makes a retried launch return the same instance.
         pending = self.state.get_meta('aws-pending-compute')
         if not pending:
             step = self.state.intent(operation_id, 'create-compute', {'role': 'compute'})
-            pending = {'step': step, 'token': self.state.deployment_id[:32] + '-' + str(step)}
+            pending = {'step': step, 'token': self._client_token(step)}
+            self.state.set_meta('aws-pending-compute', pending)
+        elif len(pending['token']) > 64:
+            # EC2 rejects tokens over 64 characters before launching, so no
+            # instance can exist under an earlier release's overlong token.
+            pending = {**pending, 'token': self._client_token(pending['step'])}
             self.state.set_meta('aws-pending-compute', pending)
         args = ['run-instances', '--client-token', pending['token'], '--count', '1',
                 '--image-id', image['id'], '--instance-type', self.config['aws-instance-type'],

@@ -89,6 +89,8 @@ class Cloud:
             return {'Return': True}
         if verb == 'run-instances':
             token = self.option(args, '--client-token')
+            if not 1 <= len(token) <= 64:
+                raise DeployError('Command failed; output suppressed.')
             if token in self.launches:
                 return {'Instances': [self.launches[token]]}
             specs = {s['ResourceType']: s for s in json.loads(self.option(args, '--tag-specifications'))}
@@ -186,6 +188,21 @@ def test_interrupted_launch_retries_with_the_same_client_token(adapter, monkeypa
     assert len(cloud.instances) == 1
     assert all(cloud.option(args, '--client-token') == token for _, args, _ in launches)
     assert adapter.state.get_meta('aws-pending-compute') is None
+
+
+def test_client_tokens_fit_the_ec2_limit_and_replace_overlong_legacy_tokens(adapter, monkeypatch):
+    cloud = Cloud()
+    install(adapter, monkeypatch, cloud)
+    operation = adapter.state.begin_operation('converge', 'hash')
+    step = adapter.state.intent(operation, 'create-compute', {'role': 'compute'})
+    legacy = adapter.state.deployment_id[:32] + '-' + str(step)
+    assert len(legacy) > 64
+    adapter.state.set_meta('aws-pending-compute', {'step': step, 'token': legacy})
+    adapter.converge('ssh-ed25519 synthetic', operation)
+    _, args, _ = next(c for c in cloud.calls if c[1][0] == 'run-instances')
+    token = cloud.option(args, '--client-token')
+    assert len(token) == 64 and token == adapter._client_token(step)
+    assert adapter.state.get_resource('compute')['provider_id'] == cloud.instances[0]['InstanceId']
 
 
 def test_drift_blocks_convergence(adapter, monkeypatch):
