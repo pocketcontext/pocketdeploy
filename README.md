@@ -1,6 +1,6 @@
 # PocketDeploy
 
-PocketDeploy provisions and operates OCI, DigitalOcean, Google Cloud and Hetzner servers
+PocketDeploy provisions and operates OCI, DigitalOcean, Google Cloud, Hetzner and AWS servers
 and ONCE applications, with
 explicit resource ownership, resumable operations, and encrypted deployment
 recovery through VaultContext. It manages compute, firewall rules, DNS, outbound
@@ -8,7 +8,7 @@ email configuration, and GitHub deployment access from versioned configuration.
 
 ## Scope and recovery
 
-PocketDeploy supports OCI, DigitalOcean Droplets, Google Compute Engine and Hetzner Cloud,
+PocketDeploy supports OCI, DigitalOcean Droplets, Google Compute Engine, Hetzner Cloud and AWS EC2,
 existing provider networking, ONCE application
 delivery, Cloudflare DNS, Resend sending domains, and GitHub deployment
 environments. One active operator per deployment is supported; local locking
@@ -76,14 +76,17 @@ grant access beyond the dedicated NSG; an NSG does not subtract those permission
 
 ## Compute provider selection
 
-Set `provider-compute` to `oci` (the existing default), `digitalocean`, `gcp` or `hcloud`.
+Set `provider-compute` to `oci` (the existing default), `digitalocean`, `gcp`, `hcloud` or `aws`.
 Use [the provider configuration reference](skills/pocketdeploy/references/providers.md)
-and the corresponding `examples/colors-digitalocean.yml`, `examples/colors-gcp.yml`
-or `examples/colors-hcloud.yml`. Hetzner requires the official `hcloud` CLI
-on PATH, separately from the current development shell packages.
+and the corresponding `examples/colors-digitalocean.yml`, `examples/colors-gcp.yml`,
+`examples/colors-hcloud.yml` or `examples/colors-aws.yml`. Hetzner requires the official `hcloud` CLI
+on PATH, separately from the current development shell packages. AWS requires
+AWS CLI v2 on PATH and authenticates through a named CLI profile (`aws-profile`,
+IAM Identity Center/SSO or static keys).
 Google Cloud and DigitalOcean have passed disposable live deployment checks,
 including HTTPS, updates, reboot and SMTP TLS connectivity. Hetzner has passed
-initial live compute provisioning; its application validation is still pending. See
+initial live compute provisioning; its application validation is still pending.
+AWS has synthetic tests only; no live check has been recorded yet. See
 [verification](docs/verification.md). Application email delivery and
 populated application backup recovery remain separate checks.
 Portable launchers include the provider adapters available at their pinned
@@ -92,7 +95,8 @@ package revision. Previously copied launchers retain that pin until deliberately
 Existing VPCs/subnets, routing, cloud accounts/projects and API enablement remain
 operator-managed. PocketDeploy creates a single public IPv4 Ubuntu 24.04 server,
 its owned firewall resources and boot storage. Hetzner also owns a separately
-recorded primary IPv4. Google Cloud supports explicitly configured disposable Local SSD storage.
+recorded primary IPv4. AWS can enable nested virtualization on c8i, m8i and r8i
+instance types. Google Cloud supports explicitly configured disposable Local SSD storage.
 Resizing, replacement, extra persistent disks, adoption of existing reserved
 addresses and cross-cloud data migration are outside this version.
 Cloudflare, Resend, GitHub, ONCE and Vault workflows remain shared.
@@ -100,7 +104,8 @@ Cloudflare, Resend, GitHub, ONCE and Vault workflows remain shared.
 Provider scope is bound to local state and checked during Vault restoration.
 Hetzner binds location and network mode; its token API does not provide a stable
 project ID here, so retain the same project through token rotation and rely on
-recorded resource IDs and ownership labels. Other providers bind their configured
+recorded resource IDs and ownership labels. AWS binds the CLI profile name, region
+and subnet. Other providers bind their configured
 account/project/network scope. Switching `provider-compute` cannot migrate an existing
 deployment: create a fresh deployment and separately restore application data and
 cut over DNS. Existing OCI state and checkpoints keep their original scope format.
@@ -338,7 +343,8 @@ parameter references can continue to point to existing R2 services.
 
 OCI resource names default to `<profile>-once-compute` and
 `<profile>-once-firewall`. New DigitalOcean Droplets use `<profile>-compute`;
-Hetzner uses `<profile>-server`, `<profile>-firewall` and `<profile>-ipv4`.
+Hetzner uses `<profile>-server`, `<profile>-firewall` and `<profile>-ipv4`;
+AWS uses `<profile>-compute`, `<profile>-firewall` and `<profile>-boot` Name tags.
 Existing identities and names are preserved. A profile is durable; an ONCE upgrade does not rename
 it. A separate UUID establishes controller identity and ownership tags. Exact
 resource IDs, provider scope and lifecycle are stored in SQLite. Names alone

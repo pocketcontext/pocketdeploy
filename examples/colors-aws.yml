@@ -1,0 +1,18 @@
+profile: example-aws
+provider-compute: aws
+aws-profile: example-sso
+aws-region: eu-central-1
+aws-subnet-id: subnet-0123456789abcdef0
+aws-instance-type: m8i.xlarge
+aws-root-volume-size-gb: 100
+aws-nested-virtualization: true
+aws-threads-per-core: 1
+compute-prevent-destroy: true
+compute-ssh-sources: ['192.0.2.1/32']
+compute-http-sources: ['0.0.0.0/0']
+compute-ingress:
+  - protocol: udp
+    ports: ['443']
+    sources: ['0.0.0.0/0']
+provider-dns: no-infra
+provider-smtp: no-infra

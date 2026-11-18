@@ -1,5 +1,24 @@
 # Deployment verification
 
+## AWS EC2 adapter — 18 November 2026
+
+The AWS compute adapter (`provider-compute: aws`) drives AWS CLI v2 with a named
+profile and creates one tagged security group in the existing subnet's VPC and
+one Ubuntu 24.04 instance with an encrypted root volume, IMDSv2, termination
+protection and optional nested virtualization (c8i, m8i and r8i families).
+
+**No live AWS check has been run yet.** Evidence so far is synthetic: adapter
+lifecycle, client-token retry, drift, firewall reconciliation, ownership refusal,
+deletion ordering (termination protection, boot volume, security group retry
+while the network interface is released) and configuration validation, all
+against a simulated CLI. Request serialization was additionally checked offline
+against the installed AWS CLI 2.34 with a local stub endpoint: user data read
+from stdin is base64-encoded once, and JSON filters, CPU options (including
+`NestedVirtualization`) and network interfaces serialize as expected. No AWS
+account or credentials were used. Launch acceptance of the CPU option
+combinations, Canonical SSM image resolution, IAM permissions and real
+deletion timing remain to be verified in a disposable live deployment.
+
 ## Hetzner initial provisioning — 12 October 2026
 
 The separately authorized `rybbit-hcloud` deployment created its owned Hetzner

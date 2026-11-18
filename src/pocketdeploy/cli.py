@@ -32,7 +32,7 @@ class ArgumentParser(argparse.ArgumentParser):
 
 def parser():
     p = ArgumentParser(
-        prog='pocketdeploy', description='Deploy and operate an OCI, DigitalOcean or Google Cloud VPS from colors.yml.',
+        prog='pocketdeploy', description='Deploy and operate an OCI, DigitalOcean, Google Cloud, Hetzner or AWS VPS from colors.yml.',
         allow_abbrev=False, formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''Deployment commands:
   kms-plan       Inspect signing vault/key and runtime identity changes

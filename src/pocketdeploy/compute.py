@@ -31,6 +31,9 @@ def provider_class(name):
     if name == 'digitalocean':
         from .digitalocean import DigitalOcean
         return DigitalOcean
+    if name == 'aws':
+        from .aws import AWS
+        return AWS
     if name == 'gcp':
         from .gcp import GCP
         return GCP

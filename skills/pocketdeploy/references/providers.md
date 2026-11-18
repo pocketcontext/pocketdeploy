@@ -1,6 +1,6 @@
 # Compute providers
 
-Select `provider-compute: oci`, `digitalocean`, `gcp` or `hcloud`. Each deployment has one
+Select `provider-compute: oci`, `digitalocean`, `gcp`, `hcloud` or `aws`. Each deployment has one
 provider and one server. Local state and Vault checkpoints bind provider scope;
 changing providers requires a new deployment, separate application-data restore
 and DNS cutover. Existing OCI scope and configuration defaults are preserved.
@@ -146,6 +146,9 @@ test. Ordinary plans and convergence do not send test messages.
 - [DigitalOcean Cloud Firewall API](https://docs.digitalocean.com/reference/api/reference/firewalls/)
 - [Google Compute instances](https://docs.cloud.google.com/compute/docs/reference/rest/v1/instances/insert)
 - [Google firewall rules](https://docs.cloud.google.com/firewall/docs/firewalls)
+- [EC2 RunInstances](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_RunInstances.html)
+- [EC2 CPU options](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instance-optimize-cpu.html)
+- [Ubuntu AMIs in SSM Parameter Store](https://documentation.ubuntu.com/aws/aws-how-to/instances/find-ubuntu-images/)
 - [Resend SMTP ports](https://resend.com/docs/send-with-smtp)
 - [ONCE v0.3.3 SMTP environment](https://github.com/basecamp/once/blob/v0.3.3/internal/docker/application_settings.go)
 - [Fizzy SMTP settings](https://github.com/basecamp/fizzy/blob/main/docs/docker-deployment.md#smtp-email)
@@ -204,3 +207,47 @@ its exact ID and UUID ownership label, so changing to another project fails clos
 once resources exist. Before first provisioning the operator must select the
 intended project. Checkpoint state and SSH authority; a fresh UUID must not be used
 to adopt existing production resources. No in-place ownership transfer is provided.
+
+## AWS EC2
+
+Start from `examples/colors-aws.yml` in the package repository. Set
+`provider-compute: aws`, `aws-profile`, `aws-region` and `aws-subnet-id`.
+Install AWS CLI v2; the adapter uses its JSON output and suppresses raw output.
+Authentication comes only from the named profile in the AWS CLI configuration:
+an IAM Identity Center (SSO) profile, refreshed with `aws sso login --profile
+<name>`, or a profile with static keys. Ambient `AWS_PROFILE`, `AWS_REGION` and
+access-key environment variables are ignored, so a shell cannot redirect the
+deployment to another account or region. Credentials never appear in arguments
+or deployment state. Scope binds the profile name, region and subnet; keep the
+profile pointed at the same account.
+
+The existing VPC and subnet, including an internet gateway route, remain
+operator-managed. The instance receives a public IPv4 address on its interface;
+no Elastic IP is created. Optional fields: `aws-instance-type` (default
+`t3.small`), `aws-image-id` (default: the current Canonical Ubuntu 24.04 AMI from
+the public SSM parameter for the instance architecture, pinned in state at first
+convergence), `aws-root-volume-size-gb` (default 50), `aws-root-volume-type`
+(`gp3` default, `gp2`, `io1` or `io2`), `aws-nested-virtualization` (default
+false) and `aws-threads-per-core` (1 or 2; omitted keeps the type default).
+Nested virtualization is supported only on 8th-generation Intel c8i, m8i and r8i
+families (and their flex variants); other types fail planning. Setting
+`aws-threads-per-core: 1` disables SMT and halves the vCPUs while keeping the
+default core count.
+
+The controller creates a security group `<profile>-firewall` in the subnet's VPC
+and one instance tagged `<profile>-compute`, both bound to the deployment UUID
+with `pocketdeploy-id`/`pocketdeploy-role` tags and recorded exact IDs. The root
+volume is encrypted, tagged and deleted on termination; IMDSv2 is required with a
+hop limit of 1, and termination protection is enabled at creation. Cloud-init is
+passed on stdin and installs the operator public key; no EC2 key pair is created.
+Launches use a durable client token, so a retried creation returns the same
+instance. Firewall sources are IPv4 CIDRs; `compute-ingress` supports additional
+TCP/UDP ports. Unmanaged ingress rules on the owned group are revoked; egress
+stays at the AWS default.
+
+Authorized deletion disables termination protection on the exact owned instance,
+terminates it, waits for the boot volume to disappear and deletes the security
+group once its network interface is released. Local `compute-prevent-destroy`
+remains authoritative. Type, image, subnet, CPU option, root volume and security
+group drift, extra or persistent volumes, ambiguous tags and uncertain creation
+outcomes fail closed. Names never authorize adoption.

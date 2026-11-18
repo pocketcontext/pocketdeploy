@@ -46,6 +46,9 @@ ROOT_KEYS = set(DEFAULTS) | {
     'gcp-project', 'gcp-zone', 'gcp-network', 'gcp-subnet', 'gcp-account', 'gcp-auth',
     'gcp-machine-type', 'gcp-image', 'gcp-image-project', 'gcp-image-family',
     'gcp-boot-disk-size-gb', 'gcp-boot-disk-type', 'gcp-nic-type', 'gcp-local-ssd-count',
+    'aws-profile', 'aws-region', 'aws-subnet-id', 'aws-instance-type', 'aws-image-id',
+    'aws-root-volume-size-gb', 'aws-root-volume-type', 'aws-nested-virtualization',
+    'aws-threads-per-core',
 }
 
 PROVIDER_DEFAULTS = {
@@ -58,6 +61,8 @@ PROVIDER_DEFAULTS = {
             'gcp-image-family': 'ubuntu-2404-lts-amd64',
             'gcp-boot-disk-size-gb': 50, 'gcp-boot-disk-type': 'pd-balanced',
             'gcp-nic-type': 'VIRTIO_NET', 'gcp-local-ssd-count': 0},
+    'aws': {'aws-instance-type': 't3.small', 'aws-root-volume-size-gb': 50,
+            'aws-root-volume-type': 'gp3', 'aws-nested-virtualization': False},
 }
 
 
@@ -112,10 +117,10 @@ def normalize(raw, *, path, env=None, resolve=True, aliases=None, defaults=None,
     overlaid = read_pars({**DEFAULTS, **raw}, environment)
     provider = overlaid.get('provider-compute')
     if not isinstance(provider, str) or provider not in PROVIDER_DEFAULTS:
-        raise DeployError('Supported compute providers are oci, digitalocean, gcp and hcloud.')
+        raise DeployError('Supported compute providers are oci, digitalocean, gcp, hcloud and aws.')
     # Apply defaults only to the selected provider, including environment overrides.
     defaults = PROVIDER_DEFAULTS[provider]
-    prefixes = ('oci-', 'digitalocean-', 'gcp-', 'hcloud-')
+    prefixes = ('oci-', 'digitalocean-', 'gcp-', 'hcloud-', 'aws-')
     foreign = tuple(prefix for prefix in prefixes if prefix != provider + '-')
     if any(key.startswith(foreign) for key in raw):
         raise DeployError('Compute configuration contains fields for a different provider.')
@@ -148,6 +153,9 @@ def scope(c):
     provider = c.get('provider-compute', 'oci')
     if provider == 'hcloud':
         return {'provider': provider, 'location': c['hcloud-location'], 'network': 'none'}
+    if provider == 'aws':
+        return {'provider': provider, 'profile': c['aws-profile'], 'region': c['aws-region'],
+                'subnet': c['aws-subnet-id']}
     if provider == 'digitalocean':
         return {'provider': provider, 'account': c['digitalocean-account-id'],
                 'region': c['digitalocean-region'], 'vpc': c.get('digitalocean-vpc-id', 'regional-default')}
@@ -161,6 +169,28 @@ def scope(c):
             'subnet': c['oci-subnet-id']}
 
 
+def validate_aws(c):
+    patterns = {'aws-profile': r'[A-Za-z0-9_][A-Za-z0-9_.@+-]{0,127}',
+                'aws-region': r'[a-z]{2}(?:-[a-z]+)+-[0-9]',
+                'aws-subnet-id': r'subnet-[0-9a-f]{8,17}',
+                'aws-instance-type': r'[a-z][a-z0-9-]*\.[a-z0-9]+'}
+    for key, pattern in patterns.items():
+        if not re.fullmatch(pattern, c[key]):
+            raise DeployError('Invalid ' + key + '.')
+    if 'aws-image-id' in c and (not isinstance(c['aws-image-id'], str)
+                                or not re.fullmatch(r'ami-[0-9a-f]{8,17}', c['aws-image-id'])):
+        raise DeployError('Invalid aws-image-id.')
+    if type(c.get('aws-root-volume-size-gb')) is not int or not 8 <= c['aws-root-volume-size-gb'] <= 16384:
+        raise DeployError('aws-root-volume-size-gb must be an integer from 8 to 16384.')
+    if c['aws-root-volume-type'] not in ('gp3', 'gp2', 'io1', 'io2'):
+        raise DeployError('aws-root-volume-type must be gp3, gp2, io1 or io2.')
+    if type(c.get('aws-nested-virtualization')) is not bool:
+        raise DeployError('aws-nested-virtualization must be a boolean.')
+    if 'aws-threads-per-core' in c and (type(c['aws-threads-per-core']) is not int
+                                        or c['aws-threads-per-core'] not in (1, 2)):
+        raise DeployError('aws-threads-per-core must be 1 or 2.')
+
+
 def validate(c):
     from .kms import validate as validate_kms
     validate_kms(c)
@@ -168,11 +198,12 @@ def validate(c):
         raise DeployError('Only configuration schema 1 is supported.')
     provider = c['provider-compute']
     if provider not in PROVIDER_DEFAULTS:
-        raise DeployError('Supported compute providers are oci, digitalocean, gcp and hcloud.')
+        raise DeployError('Supported compute providers are oci, digitalocean, gcp, hcloud and aws.')
     if not re.fullmatch(r'[a-z][a-z0-9-]{0,39}', str(c.get('profile', ''))):
         raise DeployError('Profile must be a lowercase identifier of at most 40 characters.')
     required = {
         'hcloud': ['hcloud-server-type', 'hcloud-location', 'hcloud-image'],
+        'aws': ['aws-profile', 'aws-region', 'aws-subnet-id', 'aws-instance-type', 'aws-root-volume-type'],
         'oci': ['oci-config-file-profile', 'oci-compartment-id', 'oci-subnet-id', 'oci-availability-domain'],
         'digitalocean': ['digitalocean-account-id', 'digitalocean-region',
                          'digitalocean-size', 'digitalocean-image', 'digitalocean-token-env'],
@@ -184,6 +215,8 @@ def validate(c):
             raise DeployError('Required compute provider configuration is missing or invalid.')
         if c[key].startswith('-') or any(ord(char) < 32 for char in c[key]):
             raise DeployError('Invalid compute provider identifier.')
+    if provider == 'aws':
+        validate_aws(c)
     if provider == 'hcloud' and c.get('compute-network-mode') != 'none':
         raise DeployError('Hetzner supports compute-network-mode none only.')
     if 'digitalocean-vpc-id' in c and (not isinstance(c['digitalocean-vpc-id'], str) or not re.fullmatch(r'[A-Za-z0-9-]+', c['digitalocean-vpc-id'])):
@@ -236,8 +269,8 @@ def validate(c):
     if '22' not in ports:
         raise DeployError('compute-ssh-ports must include port 22 for controller SSH access.')
     ingress = c.get('compute-ingress', [])
-    if not isinstance(ingress, list) or (ingress and provider not in ('digitalocean', 'hcloud')):
-        raise DeployError('compute-ingress currently requires DigitalOcean or Hetzner and a list of rules.')
+    if not isinstance(ingress, list) or (ingress and provider not in ('digitalocean', 'hcloud', 'aws')):
+        raise DeployError('compute-ingress currently requires DigitalOcean, Hetzner or AWS and a list of rules.')
     for rule in ingress:
         if (not isinstance(rule, dict) or set(rule) != {'protocol', 'ports', 'sources'}
                 or rule['protocol'] not in ('tcp', 'udp')
