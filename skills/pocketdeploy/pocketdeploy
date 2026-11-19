@@ -2,7 +2,7 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
-#     "pocketdeploy @ git+https://github.com/pocketcontext/pocketdeploy.git@2e4e818afbceaa50c22039607685435787846307",
+#     "pocketdeploy @ git+https://github.com/pocketcontext/pocketdeploy.git@47dfe6965bdbeb16487a6002203a1513fec50915",
 # ]
 # ///
 """Portable PocketDeploy CLI; deployment selection follows the caller's directory."""
