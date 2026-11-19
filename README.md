@@ -610,7 +610,18 @@ Do not infer application email success from the host-level probe alone.
 DigitalOcean documents blocking standard SMTP ports by default; verify `2587`
 connectivity on the intended Droplet before relying on delivery.
 
-Supply `RESEND_API_KEY` through your trusted shell. For Cloudflare, either
+For Resend, either export `RESEND_API_KEY` or sign in with the pinned `resend`
+CLI in a browser. A key always wins. Without one, PocketDeploy performs one
+bounded domain read with the login before any Resend work and refuses with
+`resend_login_required` when it is absent or rejected. Set `resend-auth-profile`
+to pass `--profile` to every `resend` call; otherwise the CLI's active profile is
+used. Resend grants only `full_access`. `resend --profile NAME login` needs an
+interactive terminal; its browser returns to a random `127.0.0.1` callback port
+on the controller, so over SSH forward that port or open the final callback URL
+on the controller. Set `RESEND_CREDENTIAL_STORE=file` where no keyring exists.
+The CLI refreshes its short access token itself.
+
+For Cloudflare, either
 export `CLOUDFLARE_API_TOKEN` or sign in with the pinned `cf` CLI in a browser,
 as with OCI security tokens. A token always wins. Without one, PocketDeploy runs
 `cf auth whoami` before any cloud call and refuses with

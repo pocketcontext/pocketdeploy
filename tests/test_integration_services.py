@@ -333,6 +333,7 @@ def test_transient_service_read_recovers_without_restarting_converge(tmp_path, m
     from pocketdeploy import retry, services as services_module
     from pocketdeploy.services import Services
 
+    monkeypatch.setenv('RESEND_API_KEY', 'synthetic-management-secret')
     events = []
     config, cloud, host, services, github, event = dependencies(tmp_path, events)
     attempts = []

@@ -268,3 +268,28 @@ def test_cloudflare_auth_profile_requires_cloudflare_dns(tmp_path):
     path.write_text(BASE + 'cloudflare-auth-profile: pocketdeploy-v2\n')
     with pytest.raises(DeployError, match='cloudflare-auth-profile'):
         load(path, env={}, resolve=False)
+
+
+RESEND = CLOUDFLARE + 'provider-smtp: resend\nsmtp-domain: mail.example.com\nsmtp-from: info@mail.example.com\n'
+
+
+def test_resend_auth_profile_accepted(tmp_path):
+    path = tmp_path / 'colors.yml'
+    path.write_text(BASE + RESEND + 'resend-auth-profile: pocketdeploy-v2\n')
+    assert load(path, env={}, resolve=False)['resend-auth-profile'] == 'pocketdeploy-v2'
+
+
+@pytest.mark.parametrize('value', ['--api-key', 'a b', '', 'a' * 65, 42])
+def test_resend_auth_profile_rejects_invalid_names(tmp_path, value):
+    import json
+    path = tmp_path / 'colors.yml'
+    path.write_text(BASE + RESEND + 'resend-auth-profile: ' + json.dumps(value) + '\n')
+    with pytest.raises(DeployError, match='resend-auth-profile'):
+        load(path, env={}, resolve=False)
+
+
+def test_resend_auth_profile_requires_resend(tmp_path):
+    path = tmp_path / 'colors.yml'
+    path.write_text(BASE + CLOUDFLARE + 'resend-auth-profile: pocketdeploy-v2\n')
+    with pytest.raises(DeployError, match='resend-auth-profile'):
+        load(path, env={}, resolve=False)

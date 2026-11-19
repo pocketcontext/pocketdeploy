@@ -867,3 +867,84 @@ def test_incomplete_dns_adoption_blocks_ordinary_reconciliation_and_deletion(ser
         service._dns({'type': 'A', 'name': 'www.example.com', 'content': '192.0.2.1'})
     with pytest.raises(DeployError, match='Resume explicit DNS adoption'):
         service.plan_delete()
+
+
+def _resend_cli(monkeypatch, response, commands):
+    def run(args, **kwargs):
+        commands.append(args)
+        if args[1:3] == ['--profile', 'mail'] and args[3:5] == ['domains', 'list'] and '--limit' in args and args[args.index('--limit') + 1] == '1':
+            if isinstance(response, Exception):
+                raise response
+            return json.dumps(response)
+        if args[:3] == ['resend', 'domains', 'list'] and args[3:5] == ['--limit', '1']:
+            if isinstance(response, Exception):
+                raise response
+            return json.dumps(response)
+        return json.dumps({'data': [], 'has_more': False})
+    monkeypatch.setattr('pocketdeploy.services.run', run)
+
+
+def test_resend_key_takes_precedence_without_login_check(service, monkeypatch):
+    commands = []
+    _resend_cli(monkeypatch, {'data': []}, commands)
+    service.c['resend-auth-profile'] = 'mail'
+    service._resend(['domains', 'list'])
+    assert commands == [['resend', 'domains', 'list', '--json']]
+
+
+def test_resend_browser_login_profile_checked_once_and_passed(service, monkeypatch):
+    monkeypatch.delenv('RESEND_API_KEY', raising=False)
+    commands = []
+    _resend_cli(monkeypatch, {'data': [{'name': 'notifications.example.com'}]}, commands)
+    service.c['resend-auth-profile'] = 'mail'
+    service._resend(['domains', 'list'])
+    service._resend(['api-keys', 'list'])
+    assert commands == [['resend', '--profile', 'mail', 'domains', 'list', '--limit', '1', '--json'],
+                        ['resend', '--profile', 'mail', 'domains', 'list', '--json'],
+                        ['resend', '--profile', 'mail', 'api-keys', 'list', '--json']]
+
+
+def test_resend_default_login_needs_no_profile(service, monkeypatch):
+    monkeypatch.delenv('RESEND_API_KEY', raising=False)
+    commands = []
+    _resend_cli(monkeypatch, {'data': []}, commands)
+    service._resend(['domains', 'list'])
+    assert commands[0] == ['resend', 'domains', 'list', '--limit', '1', '--json']
+
+
+@pytest.mark.parametrize('response', [
+    {'error': {'message': 'API key is invalid'}},
+    ['not', 'an', 'object'],
+    DeployError('Command failed; output suppressed.'),
+])
+def test_resend_missing_or_rejected_login_is_refused(service, monkeypatch, response):
+    monkeypatch.delenv('RESEND_API_KEY', raising=False)
+    commands = []
+    _resend_cli(monkeypatch, response, commands)
+    service.c['resend-auth-profile'] = 'mail'
+    with pytest.raises(DeployError, match='resend --profile mail login') as error:
+        service._resend(['domains', 'list'])
+    assert error.value.code == 'resend_login_required'
+    assert 'RESEND_API_KEY' in str(error.value)
+    assert len(commands) == 1
+
+
+def test_resend_preflight_checks_login_before_domain_reads(service, monkeypatch):
+    monkeypatch.delenv('RESEND_API_KEY', raising=False)
+    commands = []
+    _resend_cli(monkeypatch, DeployError('Command failed; output suppressed.'), commands)
+    service.c['provider-smtp'] = 'resend'
+    with pytest.raises(DeployError) as error:
+        service.preflight()
+    assert error.value.code == 'resend_login_required'
+    assert len(commands) == 1
+
+
+def test_resend_delete_plan_checks_login_for_owned_resources(service, monkeypatch):
+    monkeypatch.delenv('RESEND_API_KEY', raising=False)
+    commands = []
+    _resend_cli(monkeypatch, DeployError('Command failed; output suppressed.'), commands)
+    service.state.put_resource('smtp-domain', 'resend-domain', 'domain', {'name': 'notifications.example.com'})
+    with pytest.raises(DeployError) as error:
+        service.plan_delete()
+    assert error.value.code == 'resend_login_required'

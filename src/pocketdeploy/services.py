@@ -174,6 +174,33 @@ def cloudflare_auth(config, env=None):
     return auth
 
 
+def resend_auth(config, env=None):
+    """Return resend global arguments for the active Resend authority.
+
+    RESEND_API_KEY wins, as it does inside the resend CLI. Without it, the
+    browser-created resend OAuth login is used: the named `resend-auth-profile`,
+    else the CLI's active profile. One bounded domain read proves the login is
+    present and still accepted; the CLI refreshes its short access token itself.
+    """
+    env = os.environ if env is None else env
+    if env.get('RESEND_API_KEY'):
+        return []
+    profile = config.get('resend-auth-profile')
+    auth = ['--profile', profile] if profile else []
+    try:
+        raw = run(['resend', *auth, 'domains', 'list', '--limit', '1', '--json'], timeout=60, env=dict(env),
+                  operation='Resend login check')
+        status = json.loads(raw)
+    except (DeployError, ValueError, TypeError):
+        status = None
+    if not isinstance(status, dict) or not isinstance(status.get('data'), list):
+        login = 'resend ' + ' '.join(auth + ['login'])
+        raise DeployError('Resend is not logged in or its login was rejected. Run `' + login
+                          + '` in an interactive terminal (browser sign-in) or set RESEND_API_KEY.',
+                          code='resend_login_required')
+    return auth
+
+
 def _call(tool, args, *, timeout=90, deadline=None, env=None, auth=()):
     label = 'Cloudflare request' if tool == 'cf' else 'Resend request'
     read = ((tool == 'resend' and args[:2] in (['domains', 'get'], ['domains', 'list'], ['api-keys', 'list'])) or
@@ -214,11 +241,17 @@ class Services:
         self.c, self.state = config, state or _EmptyState()
         self.marker = 'pocketdeploy:' + self.state.deployment_id
         self._cf_auth = None
+        self._resend_login = None
 
     def _cloudflare(self):
         if self._cf_auth is None:
             self._cf_auth = cloudflare_auth(self.c)
         return self._cf_auth
+
+    def _resend_authority(self):
+        if self._resend_login is None:
+            self._resend_login = resend_auth(self.c)
+        return self._resend_login
 
     def preflight(self):
         """Validate management authority before compute mutations."""
@@ -234,8 +267,7 @@ class Services:
             if not isinstance(zone_name, str) or any(h != zone_name and not h.endswith('.' + zone_name) for h in hosts):
                 raise DeployError('Managed hostnames must belong to the configured Cloudflare zone.')
         if self.c.get('provider-smtp') == 'resend':
-            if not os.environ.get('RESEND_API_KEY'):
-                raise DeployError('Set RESEND_API_KEY with domain and API-key management permission.', code='credentials_missing')
+            self._resend_authority()
             domain = self._domain()
             if domain is None and self.state.get_meta('pending:smtp-domain'):
                 raise DeployError('Previous SMTP domain creation requires outcome reconciliation before convergence.', code='provider_recovery_required')
@@ -298,8 +330,8 @@ class Services:
         resources = self._delete_resources()
         if any(r['kind'] == 'cloudflare-dns' for r in resources):
             self._cloudflare()
-        if any(r['kind'].startswith('resend-') for r in resources) and not os.environ.get('RESEND_API_KEY'):
-            raise DeployError('Set RESEND_API_KEY with domain and API-key management permission.', code='credentials_missing')
+        if any(r['kind'].startswith('resend-') for r in resources):
+            self._resend_authority()
         for name in ('smtp-domain', 'smtp-key'):
             if self.state.get_meta('pending:' + name) and not self.state.get_resource(name):
                 raise DeployError('Unrecorded SMTP creation requires ownership reconciliation before deletion.', code='provider_recovery_required')
@@ -344,7 +376,7 @@ class Services:
         return _call('cf', ['dns', 'records', *args, '--zone', self.c['cloudflare-zone-id']], auth=self._cloudflare())
 
     def _resend(self, args, *, timeout=90, deadline=None):
-        return _call('resend', [*args, '--json'], timeout=timeout, deadline=deadline)
+        return _call('resend', [*args, '--json'], timeout=timeout, deadline=deadline, auth=self._resend_authority())
 
     def _records(self, name):
         found = []
