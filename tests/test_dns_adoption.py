@@ -12,7 +12,8 @@ from pocketdeploy.cli import execute, parser
 
 @pytest.fixture
 def transfer(tmp_path, monkeypatch):
-    monkeypatch.setattr('pocketdeploy.dns_adoption._call', lambda *a: {'id': 'a' * 32, 'name': 'example.com'})
+    monkeypatch.setenv('CLOUDFLARE_API_TOKEN', 'synthetic')
+    monkeypatch.setattr('pocketdeploy.dns_adoption._call', lambda *a, **k: {'id': 'a' * 32, 'name': 'example.com'})
     state = State(tmp_path / 'state', 'test', 'test', create=True)
     state.put_resource('compute', 'oci', 'instance', {})
     config = {'provider-dns': 'cloudflare', 'cloudflare-zone-id': 'a' * 32,
@@ -143,7 +144,7 @@ def test_safe_read_only_evidence(transfer):
 
 def test_zone_identity_checked(transfer, monkeypatch):
     *_, calls, run = transfer
-    monkeypatch.setattr('pocketdeploy.dns_adoption._call', lambda *a: {'id': 'a' * 32, 'name': 'unrelated.example'})
+    monkeypatch.setattr('pocketdeploy.dns_adoption._call', lambda *a, **k: {'id': 'a' * 32, 'name': 'unrelated.example'})
     with pytest.raises(DeployError, match='zone identity'):
         run()
     assert not calls

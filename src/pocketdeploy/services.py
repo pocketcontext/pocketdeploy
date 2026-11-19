@@ -142,7 +142,39 @@ def _provider_error(tool, stderr):
     return failure(' request failed; provider output suppressed. Reconcile uncertain writes before retrying.', 'provider_request_failed')
 
 
-def _call(tool, args, *, timeout=90, deadline=None, env=None):
+CLOUDFLARE_SCOPES = ('zone:read', 'dns_records:edit')
+
+
+def cloudflare_auth(config, env=None):
+    """Return cf global arguments for the active Cloudflare authority.
+
+    An API token in the child environment wins, as it does inside cf. Without
+    one, a browser-created cf OAuth login is used: the named
+    `cloudflare-auth-profile`, else cf's default login. It must be present and
+    hold zone read and DNS edit scopes; cf refreshes its access token itself.
+    """
+    env = os.environ if env is None else env
+    if env.get('CLOUDFLARE_API_TOKEN'):
+        return []
+    profile = config.get('cloudflare-auth-profile')
+    auth = ['--profile', profile] if profile else []
+    login = 'cf auth create ' + profile if profile else 'cf auth login'
+    try:
+        raw = run(['cf', *auth, 'auth', 'whoami'], timeout=60, env=dict(env), operation='Cloudflare login check')
+        status = json.loads(raw)
+    except (DeployError, ValueError, TypeError):
+        status = None
+    if not isinstance(status, dict) or status.get('authenticated') is not True:
+        raise DeployError('Cloudflare is not logged in. Run `' + login + '` (browser sign-in) or set CLOUDFLARE_API_TOKEN.',
+                          code='cloudflare_login_required')
+    scopes = status.get('scopes')
+    if isinstance(scopes, list) and any(scope not in scopes for scope in CLOUDFLARE_SCOPES):
+        raise DeployError('Cloudflare login lacks zone:read or dns_records:edit. Run `' + login + '` with those scopes.',
+                          code='cloudflare_login_required')
+    return auth
+
+
+def _call(tool, args, *, timeout=90, deadline=None, env=None, auth=()):
     label = 'Cloudflare request' if tool == 'cf' else 'Resend request'
     read = ((tool == 'resend' and args[:2] in (['domains', 'get'], ['domains', 'list'], ['api-keys', 'list'])) or
             (tool == 'cf' and (args[:2] in (['zones', 'get'], ['zones', 'list']) or args[:3] == ['dns', 'records', 'list'])))
@@ -150,7 +182,7 @@ def _call(tool, args, *, timeout=90, deadline=None, env=None):
     def attempt(remaining=None):
         cap = min(timeout, remaining) if remaining is not None else timeout
         with operation(label):
-            raw = run([tool, *args], timeout=cap, **({'env': env} if env is not None else {}), error_classifier=lambda stderr: _provider_error(tool, stderr))
+            raw = run([tool, *auth, *args], timeout=cap, **({'env': env} if env is not None else {}), error_classifier=lambda stderr: _provider_error(tool, stderr))
         if not raw.strip() and 'delete' in args:
             return {}
         try:
@@ -181,13 +213,17 @@ class Services:
     def __init__(self, config, state):
         self.c, self.state = config, state or _EmptyState()
         self.marker = 'pocketdeploy:' + self.state.deployment_id
+        self._cf_auth = None
+
+    def _cloudflare(self):
+        if self._cf_auth is None:
+            self._cf_auth = cloudflare_auth(self.c)
+        return self._cf_auth
 
     def preflight(self):
         """Validate management authority before compute mutations."""
         if self.c.get('provider-dns') == 'cloudflare':
-            if not os.environ.get('CLOUDFLARE_API_TOKEN'):
-                raise DeployError('Set CLOUDFLARE_API_TOKEN with zone DNS edit permission.', code='credentials_missing')
-            zone = _call('cf', ['zones', 'get', '--zone', self.c['cloudflare-zone-id']])
+            zone = _call('cf', ['zones', 'get', '--zone', self.c['cloudflare-zone-id']], auth=self._cloudflare())
             if _identifier(zone) != self.c['cloudflare-zone-id']:
                 raise DeployError('Cloudflare zone identity does not match.')
             zone_name = zone.get('name')
@@ -260,8 +296,8 @@ class Services:
             if adoption and not adoption.get('completed'):
                 raise DeployError('Resume explicit DNS adoption before deletion.', code='provider_recovery_required')
         resources = self._delete_resources()
-        if any(r['kind'] == 'cloudflare-dns' for r in resources) and not os.environ.get('CLOUDFLARE_API_TOKEN'):
-            raise DeployError('Set CLOUDFLARE_API_TOKEN with zone DNS edit permission.', code='credentials_missing')
+        if any(r['kind'] == 'cloudflare-dns' for r in resources):
+            self._cloudflare()
         if any(r['kind'].startswith('resend-') for r in resources) and not os.environ.get('RESEND_API_KEY'):
             raise DeployError('Set RESEND_API_KEY with domain and API-key management permission.', code='credentials_missing')
         for name in ('smtp-domain', 'smtp-key'):
@@ -305,7 +341,7 @@ class Services:
         return {'actions': actions, 'smtp': 'deleted'}
 
     def _cf(self, args):
-        return _call('cf', ['dns', 'records', *args, '--zone', self.c['cloudflare-zone-id']])
+        return _call('cf', ['dns', 'records', *args, '--zone', self.c['cloudflare-zone-id']], auth=self._cloudflare())
 
     def _resend(self, args, *, timeout=90, deadline=None):
         return _call('resend', [*args, '--json'], timeout=timeout, deadline=deadline)

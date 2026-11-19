@@ -37,7 +37,7 @@ ROOT_KEYS = set(DEFAULTS) | {
     'ssh-private-key-file', 'ssh-public-key-file', 'ssh-known-hosts-file',
     'vault-id', 'vault-state-document-id', 'vault-command',
     'once',
-    'cloudflare-zone-id', 'smtp-domain', 'smtp-from', 'resend-region',
+    'cloudflare-zone-id', 'cloudflare-auth-profile', 'smtp-domain', 'smtp-from', 'resend-region',
     'ssh-host-private-key-file', 'ssh-host-public-key-file',
     'smtp-port', 'smtp-security',
     'hcloud-server-type', 'hcloud-location', 'hcloud-image', 'compute-network-mode',
@@ -300,6 +300,10 @@ def validate(c):
     if c['provider-dns'] == 'cloudflare':
         if not re.fullmatch(r'[a-f0-9]{32}', str(c.get('cloudflare-zone-id', ''))):
             raise DeployError('Cloudflare requires an explicit cloudflare-zone-id.')
+    if 'cloudflare-auth-profile' in c and (
+            c['provider-dns'] != 'cloudflare' or not isinstance(c['cloudflare-auth-profile'], str)
+            or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', c['cloudflare-auth-profile'])):
+        raise DeployError('cloudflare-auth-profile must name a cf auth profile and requires provider-dns: cloudflare.')
     if c['provider-smtp'] == 'resend':
         domain = c.get('smtp-domain', '')
         sender = c.get('smtp-from', '')

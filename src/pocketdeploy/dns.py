@@ -8,7 +8,7 @@ import os
 import re
 
 from .common import DeployError
-from .services import Services, _call, _identifier
+from .services import Services, _call, _identifier, cloudflare_auth
 
 
 class CloudflareDNS(Services):
@@ -29,10 +29,11 @@ class CloudflareDNS(Services):
     def _call(self, args):
         env = dict(os.environ)
         token = env.get('COLORS_PAR_CLOUDFLARE_API_TOKEN') or env.get('CLOUDFLARE_API_TOKEN')
-        if not token:
-            raise DeployError('Set CLOUDFLARE_API_TOKEN or COLORS_PAR_CLOUDFLARE_API_TOKEN.', code='credentials_missing')
-        env['CLOUDFLARE_API_TOKEN'] = token
-        return _call('cf', args, env=env)
+        if token:
+            env['CLOUDFLARE_API_TOKEN'] = token
+        if self._cf_auth is None:
+            self._cf_auth = cloudflare_auth(self.c, env)
+        return _call('cf', args, env=env, auth=self._cf_auth)
 
     def _zone(self):
         explicit = self.c.get('cloudflare-zone-id')

@@ -5,7 +5,7 @@ import json
 
 from .common import DeployError
 from .config import manages_dns
-from .services import Services, _call, _identifier
+from .services import Services, _call, _identifier, cloudflare_auth
 
 
 def settings(record):
@@ -32,7 +32,7 @@ def _context(config, state, connection, evidence):
         ipaddress.IPv4Address(evidence['ipv4'])
     except ValueError:
         raise DeployError('DNS adoption requires an IPv4 address.') from None
-    zone = _call('cf', ['zones', 'get', '--zone', evidence['zone']])
+    zone = _call('cf', ['zones', 'get', '--zone', evidence['zone']], auth=cloudflare_auth(config))
     zone_name = zone.get('name')
     if (_identifier(zone) != evidence['zone'] or not isinstance(zone_name, str)
             or (host != zone_name and not host.endswith('.' + zone_name))):

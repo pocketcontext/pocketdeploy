@@ -208,8 +208,97 @@ def test_delete_all_services_and_retry(service, monkeypatch):
 def test_preflight_missing_credentials_before_cloud(service, monkeypatch):
     service.c['provider-dns'] = 'cloudflare'
     monkeypatch.delenv('CLOUDFLARE_API_TOKEN', raising=False)
-    with pytest.raises(DeployError, match='CLOUDFLARE_API_TOKEN'):
+    commands = []
+    def run(args, **kwargs):
+        commands.append(args)
+        return json.dumps({'authenticated': False})
+    monkeypatch.setattr('pocketdeploy.services.run', run)
+    with pytest.raises(DeployError, match='cf auth login') as error:
         service.preflight()
+    assert error.value.code == 'cloudflare_login_required'
+    assert 'CLOUDFLARE_API_TOKEN' in str(error.value)
+    assert commands == [['cf', 'auth', 'whoami']]
+
+
+def _whoami(monkeypatch, status, commands):
+    def run(args, **kwargs):
+        commands.append(args)
+        if args[-2:] == ['auth', 'whoami']:
+            if isinstance(status, Exception):
+                raise status
+            return json.dumps(status)
+        return json.dumps({'id': 'zone', 'name': 'example.com'})
+    monkeypatch.setattr('pocketdeploy.services.run', run)
+
+
+def test_token_takes_precedence_without_login_check(service, monkeypatch):
+    commands = []
+    _whoami(monkeypatch, {'authenticated': True}, commands)
+    service.c['provider-dns'] = 'cloudflare'
+    service.c['cloudflare-auth-profile'] = 'deploy'
+    service.preflight()
+    assert commands == [['cf', 'zones', 'get', '--zone', 'zone']]
+
+
+def test_browser_login_profile_is_checked_once_and_passed_to_every_call(service, monkeypatch):
+    monkeypatch.delenv('CLOUDFLARE_API_TOKEN', raising=False)
+    commands = []
+    _whoami(monkeypatch, {'authenticated': True, 'scopes': ['zone:read', 'dns_records:edit', 'offline_access']}, commands)
+    service.c['provider-dns'] = 'cloudflare'
+    service.c['cloudflare-auth-profile'] = 'deploy'
+    service.preflight()
+    service._cf(['list'])
+    assert commands == [['cf', '--profile', 'deploy', 'auth', 'whoami'],
+                        ['cf', '--profile', 'deploy', 'zones', 'get', '--zone', 'zone'],
+                        ['cf', '--profile', 'deploy', 'dns', 'records', 'list', '--zone', 'zone']]
+
+
+def test_default_browser_login_needs_no_profile(service, monkeypatch):
+    monkeypatch.delenv('CLOUDFLARE_API_TOKEN', raising=False)
+    commands = []
+    _whoami(monkeypatch, {'authenticated': True}, commands)
+    service.c['provider-dns'] = 'cloudflare'
+    service.preflight()
+    assert commands[1] == ['cf', 'zones', 'get', '--zone', 'zone']
+
+
+@pytest.mark.parametrize('status', [
+    {'authenticated': False},
+    {'authenticated': 'yes'},
+    ['not', 'an', 'object'],
+    DeployError('Command failed; output suppressed.'),
+])
+def test_missing_or_unreadable_login_is_refused_before_cloud(service, monkeypatch, status):
+    monkeypatch.delenv('CLOUDFLARE_API_TOKEN', raising=False)
+    commands = []
+    _whoami(monkeypatch, status, commands)
+    service.c['provider-dns'] = 'cloudflare'
+    service.c['cloudflare-auth-profile'] = 'deploy'
+    with pytest.raises(DeployError, match='cf auth create deploy') as error:
+        service.preflight()
+    assert error.value.code == 'cloudflare_login_required'
+    assert len(commands) == 1
+
+
+def test_login_without_dns_edit_scope_is_refused(service, monkeypatch):
+    monkeypatch.delenv('CLOUDFLARE_API_TOKEN', raising=False)
+    commands = []
+    _whoami(monkeypatch, {'authenticated': True, 'scopes': ['zone:read', 'dns_records:read']}, commands)
+    service.c['provider-dns'] = 'cloudflare'
+    with pytest.raises(DeployError, match='dns_records:edit') as error:
+        service.preflight()
+    assert error.value.code == 'cloudflare_login_required'
+    assert len(commands) == 1
+
+
+def test_delete_plan_checks_login_for_owned_dns(service, monkeypatch):
+    monkeypatch.delenv('CLOUDFLARE_API_TOKEN', raising=False)
+    commands = []
+    _whoami(monkeypatch, {'authenticated': False}, commands)
+    service.state.put_resource('dns:A:www.example.com', 'cloudflare-dns', 'record', {'name': 'www.example.com', 'type': 'A'})
+    with pytest.raises(DeployError) as error:
+        service.plan_delete()
+    assert error.value.code == 'cloudflare_login_required'
 
 
 def test_invalid_provider_response_suppressed(monkeypatch):

@@ -610,7 +610,21 @@ Do not infer application email success from the host-level probe alone.
 DigitalOcean documents blocking standard SMTP ports by default; verify `2587`
 connectivity on the intended Droplet before relying on delivery.
 
-Supply `CLOUDFLARE_API_TOKEN` and `RESEND_API_KEY` through your trusted shell.
+Supply `RESEND_API_KEY` through your trusted shell. For Cloudflare, either
+export `CLOUDFLARE_API_TOKEN` or sign in with the pinned `cf` CLI in a browser,
+as with OCI security tokens. A token always wins. Without one, PocketDeploy runs
+`cf auth whoami` before any cloud call and refuses with
+`cloudflare_login_required` when the login is absent or lacks `zone:read` and
+`dns_records:edit`. Set `cloudflare-auth-profile` to use a named profile, which
+is passed to every `cf` call; otherwise cf's default login is used. Create a
+profile with only the needed scopes (`cf` adds `offline_access` and refreshes
+the one-hour access token itself; sign in again when the refresh token expires):
+
+```sh
+cf auth create pocketdeploy --no-browser --scopes openid offline user:read \
+  zone:read dns_records:read dns_records:edit
+```
+
 Cloudflare needs zone read and DNS edit on the selected existing zone. Resend
 needs domain and API-key management. Use authenticated `gh` with repository
 administrator access for environment provisioning. These management credentials
@@ -881,7 +895,8 @@ reconciliation and deletion checks with ONCE DNS. Proxying defaults to true with
 Auto TTL; constructor arguments `proxied` and `ttl` can select another policy.
 Without `cloudflare-zone-id`, zone discovery requires one unambiguous common
 zone. `COLORS_PAR_CLOUDFLARE_API_TOKEN` maps to the CLI token only in its child
-environment; the operator environment remains unchanged.
+environment; the operator environment remains unchanged. Without either token it
+uses the checked `cf` browser login, including `cloudflare-auth-profile`.
 
 For migration to new owned compute, `evidence(host)` returns allowlisted record
 identity and a routing-settings fingerprint. `adopt(connection, operation_id,

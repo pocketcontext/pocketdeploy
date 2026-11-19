@@ -148,3 +148,26 @@ def test_cloudflare_child_environment_reaches_runner(monkeypatch):
     env = {'CLOUDFLARE_API_TOKEN': 'synthetic'}
     assert _call('cf', ['zones', 'list'], env=env) == []
     assert seen[0]['env'] == env
+
+
+def test_dns_uses_browser_login_without_token(tmp_path, monkeypatch):
+    monkeypatch.delenv('COLORS_PAR_CLOUDFLARE_API_TOKEN', raising=False)
+    monkeypatch.delenv('CLOUDFLARE_API_TOKEN', raising=False)
+    checks, calls = [], []
+    def auth(config, env):
+        checks.append(config.get('cloudflare-auth-profile'))
+        assert 'CLOUDFLARE_API_TOKEN' not in env
+        return ['--profile', 'deploy']
+    def call(tool, args, **kwargs):
+        calls.append((kwargs['auth'], args[:2]))
+        return {'id': 'zone', 'name': 'example.com'}
+    monkeypatch.setattr('pocketdeploy.dns.cloudflare_auth', auth)
+    monkeypatch.setattr('pocketdeploy.dns._call', call)
+    state = State(tmp_path / 'state', 'test', {}, create=True)
+    service = CloudflareDNS({'profile': 'test', 'cloudflare-auth-profile': 'deploy', 'cloudflare-zone-id': 'zone'},
+                            state, ['stage.example.com'])
+    service._zone()
+    service._call(['zones', 'get', '--zone', 'zone'])
+    assert checks == ['deploy']
+    assert calls == [(['--profile', 'deploy'], ['zones', 'get'])] * 2
+    state.db.close()
