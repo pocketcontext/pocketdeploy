@@ -8,6 +8,7 @@ import re
 import ipaddress
 import json
 import time
+from .checkpoints import before_provider_request
 from .common import DeployError, run
 from .output import operation
 
@@ -99,6 +100,7 @@ class OCI:
         return None
 
     def _call(self, *args, body=None, timeout=180):
+        before_provider_request()
         self._check_token()
         command = ['oci', '--auth', self.config.get('oci-auth', 'security_token'),
                    '--profile', self.config.get('oci-config-file-profile', 'DEFAULT'), '--output', 'json']

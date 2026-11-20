@@ -10,6 +10,7 @@ import os
 import time
 from urllib.parse import quote
 
+from .checkpoints import before_provider_request
 from .common import DeployError
 
 
@@ -21,6 +22,7 @@ class DigitalOcean:
         self.config, self.state = config, state
 
     def _call(self, method, path, body=None):
+        before_provider_request()
         token = os.environ.get(self.config.get('digitalocean-token-env', 'COLORS_PAR_DIGITALOCEAN_ACCESS_TOKEN'))
         if not token:
             raise DeployError('DigitalOcean access token is missing.')

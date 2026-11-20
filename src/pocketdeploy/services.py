@@ -11,6 +11,7 @@ import math
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
+from .checkpoints import before_provider_request
 from .common import DeployError, run
 from .config import manages_dns
 from .output import operation
@@ -207,6 +208,7 @@ def _call(tool, args, *, timeout=90, deadline=None, env=None, auth=()):
             (tool == 'cf' and (args[:2] in (['zones', 'get'], ['zones', 'list']) or args[:3] == ['dns', 'records', 'list'])))
 
     def attempt(remaining=None):
+        before_provider_request()
         cap = min(timeout, remaining) if remaining is not None else timeout
         with operation(label):
             raw = run([tool, *auth, *args], timeout=cap, **({'env': env} if env is not None else {}), error_classifier=lambda stderr: _provider_error(tool, stderr))

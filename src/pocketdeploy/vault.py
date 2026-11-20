@@ -5,6 +5,7 @@ import os
 import sqlite3
 import subprocess
 import re
+import shutil
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,6 +45,9 @@ def _save_file(config, path, name, document=None, fence=None, expect_revision=No
         result = _command(config, *args)
     if not isinstance(result.get('id'), str) or not isinstance(result.get('version'), str):
         raise DeployError('Vault save did not return document and version identifiers.')
+    if fence and (type(result.get('revision')) is not int or result['revision'] < 1
+                  or document and result['id'] != document):
+        raise DeployError('Vault save returned an invalid document revision.')
     ref = {'document': result['id'], 'version': result['version']}
     if isinstance(result.get('revision'), int):
         ref['revision'] = result['revision']
@@ -75,6 +79,8 @@ def _files(config):
         raise DeployError('Recovery file paths must not include Git configuration, state or disposable GitHub keys.')
     if len({Path(name) for name in names}) != len(names):
         raise DeployError('Recovery file paths must be distinct.')
+    if config.get('state-lock') == 'vault' and 'state' in names:
+        raise DeployError('A recovery file name collides with the state document in the sync receipt.')
     return names
 
 
@@ -131,43 +137,74 @@ def save(config, state, root, fence=None, revisions=None, allow_missing=False, s
     """
     if not config.get('vault-id'):
         raise DeployError('Vault is not configured.')
+    if config.get('state-lock') == 'vault' and not fence:
+        raise DeployError('A recovery checkpoint requires the active vault lease.', code='vault_lock_required')
     root = Path(root).resolve()
     provenance = _provenance(config, root)
     previous = state.get_meta('vault-files', {})
-    revisions = revisions or {}
+    if revisions is None:
+        revisions = {}
+    state_document = config.get('vault-state-document-id') or state.get_meta('vault-state-document', {}).get('document')
+    if fence:
+        documents = [ref['document'] for ref in previous.values()]
+        if state_document:
+            documents.append(state_document)
+        if len(documents) != len(set(documents)) or set(documents) - revisions.keys():
+            raise DeployError('Recovery document is outside the locked manifest or referenced twice.')
     refs = {}
     # Validate every source before performing any upload. Files are opaque bytes.
     paths = [(str(name), local_path(root, name)) for name in _files(config)]
-    missing = [name for name, path in paths if not path.is_file()]
+    from .kms import FILES
+    missing = {name for name, path in paths if not path.is_file()}
+    uncreated = {name for name in missing if fence and config.get('oci-kms') and name in FILES
+                 and name not in previous}
+    if FILES[0] in uncreated and (state.get_resource('kms-api-key') or state.get_meta('kms-pending-api-key')):
+        uncreated.remove(FILES[0])
+    if FILES[1] in uncreated and state.get_meta('kms-signing-version'):
+        uncreated.remove(FILES[1])
+    if uncreated:
+        provenance['uncreated_kms_files'] = sorted(uncreated)
     if (any(path.is_file() and path.stat().st_size > MAX_FILE_SIZE for _, path in paths)
-            or (missing and not (allow_missing and all(previous.get(name, {}).get('document') for name in missing)))):
+            or any(name not in uncreated and not (allow_missing and name not in {'.envrc.private', *FILES}
+                                                   and previous.get(name, {}).get('document'))
+                   for name in missing)):
         raise DeployError('Recovery file is missing or exceeds the Vault size limit.')
     for name, path in paths:
+        if name in uncreated:
+            continue
         if name in missing:
             refs[name] = {key: previous[name][key] for key in ('document', 'version') if key in previous[name]}
             continue
         document = previous.get(name, {}).get('document')
-        content = path.read_bytes()
-        ref = _save_file(config, path, config['profile'] + '-' + name.replace('/', '-'),
-                         document, fence, revisions.get(document, 0 if fence and not document else None) if fence else None)
-        if synced is not None:
-            synced[name] = {**ref, 'file_sha256': hashlib.sha256(content).hexdigest()}
+        display_name = config['profile'] + '-' + name.replace('/', '-')
+        if fence:
+            # The CLI reopens its input. Hash and upload a private, immutable copy.
+            with tempfile.TemporaryDirectory(prefix='.vault-save-', dir=root) as directory:
+                staged = Path(directory) / 'file'
+                shutil.copyfile(path, staged)
+                os.chmod(staged, 0o600)
+                ref = _save_file(config, staged, display_name, document, fence, revisions.get(document, 0))
+                revisions[ref['document']] = ref['revision']
+                if synced is not None:
+                    synced[name] = {**ref, 'file_sha256': hashlib.sha256(staged.read_bytes()).hexdigest()}
+        else:
+            ref = _save_file(config, path, display_name, document)
         refs[name] = {'document': ref['document'], 'version': ref['version']}
         # Persist acknowledged document IDs even if a later upload fails.
         state.set_meta('vault-files', {**previous, **refs})
     state.set_meta('vault-files', refs)
     state.set_meta('vault-config', provenance)
-    state_document = config.get('vault-state-document-id') or state.get_meta('vault-state-document', {}).get('document')
     with tempfile.TemporaryDirectory(prefix='.vault-save-', dir=root) as directory:
         snapshot = Path(directory) / 'state.sqlite'
         state.snapshot(snapshot)
         result = _save_file(config, snapshot, config['profile'] + '-state', state_document, fence,
                             revisions.get(state_document, 0 if fence and not state_document else None) if fence else None)
-    if synced is not None:
-        synced['state'] = {**result, 'file_sha256': None}
     # The published snapshot deliberately does not reference its own new version.
     state.set_meta('vault-state-document', {'document': result['document'], 'version': result['version'],
                                             'saved_at': datetime.now(timezone.utc).isoformat()})
+    if synced is not None:
+        from .state_lock import ledger_hash
+        synced['state'] = {**result, 'file_sha256': ledger_hash(state.path)}
     return {'state_document': result['document'], 'state_version': result['version'], 'file_count': len(refs)}
 
 
@@ -203,10 +240,14 @@ def restore(config, root, document, version, overwrite=False, sync=None):
             if not isinstance(refs, dict):
                 raise ValueError()
             legacy = provenance is None
+            uncreated = set((provenance or {}).get('uncreated_kms_files', []))
+            from .kms import FILES
+            if uncreated and (not config.get('oci-kms') or not uncreated.issubset(FILES)):
+                raise ValueError()
             if legacy:
                 if set(refs) not in (set(_legacy_files(config)), {'colors.yml', *_files(config)}):
                     raise ValueError()
-            elif (set(refs) != set(_files(config)) or not isinstance(provenance, dict)
+            elif (set(refs) != set(_files(config)) - uncreated or not isinstance(provenance, dict)
                   or provenance.get('schema') != 1
                   or not isinstance(provenance.get('sha256'), str)
                   or not re.fullmatch(r'[0-9a-f]{64}', provenance['sha256'])):
@@ -215,13 +256,14 @@ def restore(config, root, document, version, overwrite=False, sync=None):
                 if (not isinstance(ref, dict) or not isinstance(ref.get('document'), str)
                         or not ref['document'] or not isinstance(ref.get('version'), str) or not ref['version']):
                     raise ValueError()
-        except (sqlite3.Error, ValueError, TypeError, KeyError, IndexError):
+        except (sqlite3.Error, ValueError, TypeError, KeyError, IndexError, AttributeError):
             raise DeployError('Recovery state has an invalid or incompatible manifest.') from None
         if sync is not None:
-            # Restore-under-lock: every pinned file must be the vault's current
-            # version, and the desired configuration may have changed since.
-            if legacy or any(refs[name].get('version') != sync.get(refs[name].get('document')) for name in refs):
-                raise DeployError('Vault recovery set is inconsistent with the locked manifest; stop and inspect it.')
+            from .state_lock import _local_checkpoint
+            _local_checkpoint(config, staged_db)  # Verify the staged ledger and any recorded KMS authority.
+            if (legacy or identity.get('deployment_id') != sync['deployment_id']
+                    or {name: ref['document'] for name, ref in refs.items()} != sync['file_ids']):
+                raise DeployError('Vault recovery set does not match the deployment identity and locked documents.')
         if legacy:
             old_config = Path(directory) / 'legacy-colors.yml'
             ref = refs['colors.yml']
@@ -234,7 +276,9 @@ def restore(config, root, document, version, overwrite=False, sync=None):
         else:
             caller_root = Path(config.get('_root', root)).resolve()
             configuration = local_path(root, local_path(caller_root, config.get('_file', 'colors.yml')).relative_to(caller_root))
-        destinations = [(name, local_path(root, name)) for name in _files(config)]
+        if any(local_path(root, name).exists() for name in uncreated):
+            raise DeployError('Local KMS authority conflicts with the incomplete checkpoint.')
+        destinations = [(name, local_path(root, name)) for name in _files(config) if name not in uncreated]
         targets = [destination, *(path for _, path in destinations)]
         if (len(set(targets)) != len(targets)
                 or {configuration, local_path(root, 'colors.yml')}.intersection(targets)):
@@ -249,26 +293,77 @@ def restore(config, root, document, version, overwrite=False, sync=None):
             temp = Path(directory) / str(index)
             _command(config, 'restore', ref['document'], '--version', ref['version'], '--to', temp)
             staged.append((temp, target))
-        # All downloads succeed before any destination changes. Database is last.
-        # A filesystem crash during publication may require repeating restore.
+        # The snapshot cannot contain its own version. Record its verified
+        # provenance locally, including on the first disaster recovery.
+        if sync is not None or config.get('state-lock') == 'vault':
+            db = sqlite3.connect(staged_db)
+            try:
+                with db:
+                    db.execute('PRAGMA trusted_schema=OFF')
+                    db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('vault-state-document',?)",
+                               (json.dumps({'document': document, 'version': version}),))
+            finally:
+                db.close()
+        publication = [*staged, (staged_db, destination)]
         if sync is not None:
-            # Keep the replaced local set for inspection.
-            for target in targets:
-                if target.exists():
-                    backup = Path(str(target) + '.pre-restore')
-                    os.replace(target, backup)
-                    os.chmod(backup, 0o600)
-        for source, target in [*staged, (staged_db, destination)]:
+            from .state_lock import _sha256, _write_private_json, ledger_hash
+            journal = sync['journal']
+            old = {}
+            new = {}
+            for source, target in publication:
+                name = target.relative_to(root).as_posix()
+                digest = ledger_hash if target == destination else _sha256
+                old[name] = digest(target)
+                new[name] = digest(source)
+            if journal:
+                if (set(journal['before']) != set(old) or any(old[n] not in
+                        (journal['before'][n], journal['after'][n]) for n in old)):
+                    raise DeployError('Local files changed during interrupted restore; preserve the fork.', code='vault_diverged')
+            else:
+                for _, target in publication:
+                    if target.exists():
+                        backup = local_path(root, str(target) + '.pre-restore')
+                        with tempfile.NamedTemporaryFile(dir=target.parent, prefix='.', suffix='.pre-restore', delete=False) as temp:
+                            try:
+                                with target.open('rb') as original:
+                                    shutil.copyfileobj(original, temp)
+                                temp.flush()
+                                os.fsync(temp.fileno())
+                                os.replace(temp.name, backup)
+                            finally:
+                                Path(temp.name).unlink(missing_ok=True)
+                        _fsync_dir(target.parent)
+            sync['check']()
+            # Keep the initial backups through retries. Allow only bytes from
+            # this verified transition; an intervening edit must be reconciled.
+            _write_private_json(sync['marker'], {'vault': config['vault-id'], 'deployment_id': sync['deployment_id'],
+                                'original_bindings': sync['original_bindings'], 'before': old, 'after': new})
+            _fsync_dir(sync['marker'].parent)
+        for source, target in publication:
             local_path(root, target)
             target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             if target.exists() and not overwrite:
                 raise DeployError('Recovery destination appeared during restoration.')
             os.chmod(source, 0o600)
+            if sync is not None:
+                sync['check']()
+                with source.open('rb') as stream:
+                    os.fsync(stream.fileno())
             if overwrite:
                 os.replace(source, target)
             else:
                 os.link(source, target)
                 source.unlink()
+            if sync is not None:
+                _fsync_dir(target.parent)
     return {'state_document': document, 'state_version': version, 'file_count': len(destinations),
             'legacy_manifest': legacy,
             'reconciliation_required': True}
+
+
+def _fsync_dir(directory):
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)

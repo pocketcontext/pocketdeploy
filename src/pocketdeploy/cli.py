@@ -10,7 +10,8 @@ import time
 
 from blue.workflow import workflow, advice_add_all, run as run_workflow
 from .common import DeployError, local_path
-from .config import load, scope
+from .config import load, resolve_env, scope
+from .checkpoints import provider_checkpoints
 from .state import State, deployment_lock
 from .oci import OCI
 from .compute import provider_class
@@ -328,7 +329,13 @@ def _execute(args, reporter=None):
     config_file = args.file if args.file is not None else 'colors.yml'
     if args.file is None and not Path(config_file).exists():
         raise DeployError('No colors.yml found in the current directory; use -f to select a configuration.')
-    config = load(config_file, resolve=args.command not in ('kms-resolve-user-create', 'kms-resolve-rotation', 'kms-plan', 'kms-converge', 'kms-rotate', 'init', 'ssh', 'delete', 'vault-save', 'vault-restore', 'status', 'smtp-test', 'rotate-host-key', 'steps', 'resolve-step', 'clear-pending-marker', 'retire-github-target'))
+    needs_bindings = args.command not in (
+        'exec', 'lock-break', 'lock-status', 'kms-resolve-user-create', 'kms-resolve-rotation',
+        'kms-plan', 'kms-converge', 'kms-rotate', 'init', 'ssh', 'delete', 'vault-save',
+        'vault-restore', 'status', 'smtp-test', 'rotate-host-key', 'steps', 'resolve-step',
+        'clear-pending-marker', 'retire-github-target',
+    )
+    config = load(config_file, resolve=needs_bindings and not args.restore)
     # Reject unsupported application behavior before any cloud mutation.
     from .host import validate_config
     if args.command != 'rotate-host-key':
@@ -346,10 +353,15 @@ def _execute(args, reporter=None):
         if not config.get('vault-id'):
             raise DeployError('Vault is not configured.')
         return {'profile': config['profile'], **state_lock.lock_break(config, args.observed_generation, args.reason, args.yes)}
+    lock_options = args.restore or args.force_lock or args.label is not None
+    if lockable and os.environ.get(state_lock.FENCE_ENV) and not state_lock.enabled(config):
+        raise DeployError('A nested mutation must use the parent vault lease.', code='vault_fence_mismatch')
+    if lock_options and not state_lock.enabled(config):
+        raise DeployError('Lock options require state-lock: vault.', code='invalid_usage')
+    if lock_options and os.environ.get(state_lock.FENCE_ENV):
+        raise DeployError('Set lock options on the outer exec invocation.', code='invalid_usage')
     force = None
     if getattr(args, 'force_lock', False):
-        if not state_lock.enabled(config):
-            raise DeployError('--force-lock requires state-lock: vault.', code='invalid_usage')
         state_lock.confirm_break(config, args.observed_generation, args.reason, args.yes)
         force = {'observed_generation': args.observed_generation, 'reason': args.reason}
     def lease_guard():
@@ -360,12 +372,11 @@ def _execute(args, reporter=None):
     if args.command == 'exec':
         if args.json:
             raise DeployError('exec does not support --json; the child owns stdout.', code='invalid_usage')
-        with deployment_lock(state_path), lease_guard() as lease:
+        with deployment_lock(state_path) as descriptor, lease_guard() as lease:
             if lease is not None and state_path.exists():
                 with State(state_path, config['profile'], scope(config), read_only=True) as state:
                     lease.bind(state)
-            with state_lock.child_lock_fd(state_path) as descriptor:
-                code = state_lock.run_child(config, state_path, lease, child, descriptor)
+            code = state_lock.run_child(config, state_path, lease, child, descriptor)
             if code:
                 raise ChildFailed(code)
         return {'exec_exit': 0}
@@ -375,22 +386,33 @@ def _execute(args, reporter=None):
         with deployment_lock(local_path(destination, config['state-file'])):
             with reporter.stage('vault-restore'):
                 return vault.restore(config, destination, args.document, args.version, args.overwrite)
-    fresh = not state_path.exists()
-    if fresh and (config['compute-require-existing-state'] or args.command in ('adopt', 'rotate-host-key')):
-        raise DeployError('Existing deployment state is required; restore it before continuing.')
-    if fresh and args.command not in ('init', 'plan', 'converge'):
-        raise DeployError('Deployment state is missing; restore it before continuing.')
-    with deployment_lock(state_path), lease_guard() as lease:
-        manager = nullcontext(None) if fresh and read_only else State(state_path, config['profile'], scope(config), create=fresh, read_only=read_only)
-        with manager as state:
-            if lease is not None and state is not None:
-                lease.bind(state)
+    def check_state_present():
+        fresh = not state_path.exists()
+        if fresh and (config['compute-require-existing-state'] or args.command in ('adopt', 'rotate-host-key')):
+            raise DeployError('Existing deployment state is required; restore it before continuing.')
+        if fresh and args.command not in ('init', 'plan', 'converge'):
+            raise DeployError('Deployment state is missing; restore it before continuing.')
+        return fresh
+
+    if not args.restore:
+        check_state_present()
+    inspect_live = state_lock.enabled(config) and args.command in ('plan', 'status')
+    with (nullcontext() if inspect_live else deployment_lock(state_path)), lease_guard() as lease:
+        if needs_bindings and args.restore:
+            # Reconciliation may restore .envrc.private and require a fresh shell.
+            resolve_env(config, os.environ)
+        fresh = check_state_present()
+        manager = nullcontext(None) if fresh and read_only else State(
+            state_path, config['profile'], scope(config), create=fresh, read_only=read_only, inspect_live=inspect_live)
+        with manager as state, provider_checkpoints(lease, state, config, deleting=args.command == 'delete'):
             if state and state.get_meta('kms-scope') and not config.get('oci-kms'):
                 raise DeployError('Restore oci-kms configuration to preserve signing authority and recovery files.')
             if state and state.get_meta('kms-scope'):
                 from .kms import KMS
                 KMS(config, state)  # Bind authority and checkpoint files to their original scope.
             host = Host(config, state, root)
+            if lease is not None and state is not None:
+                lease.bind(state)
             if args.command.startswith('kms-'):
                 from .kms import KMS
                 kms = KMS(config, state)
@@ -494,7 +516,7 @@ def _execute(args, reporter=None):
                         result = host.rotate_key(cloud.connection(), operation)
                 elif args.command == 'delete':
                     from .deletion import Deletion
-                    result = asyncio.run(Deletion(config, state, cloud, host, reporter).run(operation))
+                    result = asyncio.run(Deletion(config, state, cloud, host, reporter).run(operation, lease=lease))
                 elif args.command == 'smtp-test':
                     from .services import Services
                     if config.get('provider-smtp') != 'resend':

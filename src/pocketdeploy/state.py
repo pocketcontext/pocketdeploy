@@ -5,12 +5,37 @@ import os
 import re
 import sqlite3
 import stat
+import threading
+import time
 import uuid
 from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 from .common import DeployError
 from .diagnostics import validate_diagnostic
+
+
+_inherited_deployment = ContextVar('inherited_deployment', default=None)
+_nested_writer = threading.Lock()
+LOCK_FD_ENV = 'POCKETDEPLOY_LOCK_FD'
+CHILD_FD_ENV = 'POCKETDEPLOY_CHILD_FD'
+
+
+def inherited_deployment(path):
+    parent = _inherited_deployment.get()
+    return bool(parent and parent[0] == Path(path).absolute() and _exec_parent_alive(parent[1]))
+
+
+def _exec_parent_alive(fd):
+    # The exec parent holds byte 1 for its lifetime. Only its children share
+    # this unlinked file. POSIX record locks disappear when the owner dies.
+    try:
+        fcntl.lockf(fd, fcntl.LOCK_SH | fcntl.LOCK_NB, 1, 1)
+    except BlockingIOError:
+        return True
+    fcntl.lockf(fd, fcntl.LOCK_UN, 1, 1)
+    return False
 
 
 def _private_path(path):
@@ -24,18 +49,43 @@ def _private_path(path):
 
 @contextmanager
 def deployment_lock(path):
-    path = _private_path(str(path) + '.lock')
-    inherited = os.environ.get('POCKETDEPLOY_LOCK_FD')
-    if inherited:
-        # A `pocketdeploy exec` parent holds this flock and passed its open file;
-        # nested commands reuse it only when it is the same lock file.
+    state_path = Path(path).absolute()
+    path = _private_path(str(state_path) + '.lock')
+    inherited = os.environ.get(LOCK_FD_ENV)
+    if inherited is not None or CHILD_FD_ENV in os.environ:
         try:
-            held, current = os.fstat(int(inherited)), os.stat(path, follow_symlinks=False)
-        except (OSError, ValueError):
-            held = current = None
-        if held is None or (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino):
-            raise DeployError('POCKETDEPLOY_LOCK_FD does not match this deployment lock.')
-        yield
+            fd = int(inherited)
+            sibling_fd = int(os.environ[CHILD_FD_ENV])
+            held, current = os.fstat(fd), os.stat(path, follow_symlinks=False)
+            sibling = os.fstat(sibling_fd)
+            if (not os.path.samestat(held, current) or not stat.S_ISREG(held.st_mode)
+                    or held.st_uid != os.getuid() or held.st_nlink != 1
+                    or stat.S_IMODE(held.st_mode) != 0o600 or not stat.S_ISREG(sibling.st_mode)
+                    or sibling.st_uid != os.getuid() or sibling.st_nlink != 0
+                    or not _exec_parent_alive(sibling_fd)):
+                raise ValueError()
+            # This succeeds on the parent's inherited open-file description.
+            # A different descriptor for the same inode contends with the holder.
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            # POSIX range locks are per process. Sibling commands sharing the
+            # same exec invocation must never mutate the ledger concurrently.
+        except (KeyError, OSError, TypeError, ValueError):
+            raise DeployError('Inherited deployment lock is invalid or another nested command is running.') from None
+        if not _nested_writer.acquire(blocking=False):
+            raise DeployError('Another nested command is running in this process.')
+        try:
+            try:
+                fcntl.lockf(sibling_fd, fcntl.LOCK_EX | fcntl.LOCK_NB, 1, 0)
+            except OSError:
+                raise DeployError('Another nested deployment operation is running.') from None
+            token = _inherited_deployment.set((state_path, sibling_fd))
+            try:
+                yield fd
+            finally:
+                _inherited_deployment.reset(token)
+                fcntl.lockf(sibling_fd, fcntl.LOCK_UN, 1, 0)
+        finally:
+            _nested_writer.release()
         return
     fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
@@ -47,7 +97,7 @@ def deployment_lock(path):
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise DeployError('Another local deployment operation is running.') from None
-        yield
+        yield fd
     finally:
         os.close(fd)
 
@@ -66,8 +116,34 @@ def failure_class(exc):
     return code if isinstance(code, str) and re.fullmatch(r'[a-z][a-z0-9_]{0,63}', code) else 'unexpected_error'
 
 
+def _inspection_database(path):
+    # Copy a committed SQLite snapshot while the writer is active. A plan
+    # may perform slow provider reads; holding a read transaction throughout
+    # would prevent the deployment ledger's rollback-journal commits.
+    original = path.stat()
+    source = sqlite3.connect(f'{path.as_uri()}?mode=ro', uri=True)
+    memory = sqlite3.connect(':memory:')
+    deadline = time.monotonic() + 5
+    def check_timeout(status, _remaining, _total):
+        if status != sqlite3.SQLITE_DONE and time.monotonic() >= deadline:
+            raise DeployError('Deployment state is busy; retry inspection.', code='state_busy')
+    try:
+        source.backup(memory, pages=128, progress=check_timeout, sleep=0.05)
+        if not os.path.samestat(original, path.stat()):
+            raise DeployError('Deployment state was replaced during inspection; retry.', code='state_busy')
+        memory.execute('PRAGMA query_only=ON')
+        return memory
+    except BaseException:
+        memory.close()
+        raise
+    finally:
+        source.close()
+
+
 class State:
-    def __init__(self, path, profile, scope, create=False, read_only=False):
+    def __init__(self, path, profile, scope, create=False, read_only=False, inspect_live=False):
+        if inspect_live and not read_only:
+            raise ValueError('Live inspection requires read-only state.')
         self.path = Path(path).absolute()
         self.read_only = read_only
         if any(p.is_symlink() for p in [self.path, *self.path.parents]):
@@ -83,7 +159,8 @@ class State:
             self.path = _private_path(path)
             fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW, 0o600)
             os.close(fd)
-        self.db = sqlite3.connect(f'{self.path.as_uri()}?mode={"ro" if read_only else "rw"}', uri=True)
+        self.db = (_inspection_database(self.path) if inspect_live else
+                   sqlite3.connect(f'{self.path.as_uri()}?mode={"ro" if read_only else "rw"}', uri=True))
         self.db.row_factory = sqlite3.Row
         try:
             self.db.execute('PRAGMA trusted_schema=OFF')

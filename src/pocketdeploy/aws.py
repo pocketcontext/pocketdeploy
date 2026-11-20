@@ -10,6 +10,7 @@ import os
 import re
 import time
 
+from .checkpoints import before_provider_request
 from .common import DeployError, run
 from .digitalocean import DigitalOcean
 from .output import operation
@@ -47,6 +48,7 @@ class AWS:
         return None
 
     def _call(self, service, *args, payload=None, timeout=180):
+        before_provider_request()
         # The profile and region flags take precedence; ambient selectors must not
         # silently point this deployment at another account or region.
         env = {k: v for k, v in os.environ.items()

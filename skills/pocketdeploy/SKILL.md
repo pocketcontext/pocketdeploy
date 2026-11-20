@@ -74,7 +74,7 @@ authentication and application bindings. `status` returns
 safe observed inventory without resolving application secrets. They are live
 reads, not offline validation. `state.last_vault_backup` is the last locally
 acknowledged Vault document/version/save time, or null; older receipts may lack a
-time. It makes no Vault call and does not establish freshness. A restored
+time. In local mode it makes no Vault call and does not establish freshness. A restored
 snapshot may contain a prior receipt. A plan is not proof of completed convergence.
 
 With `state-lock: vault`, mutating commands take an exclusive VaultContext lease
@@ -82,7 +82,8 @@ and save fenced checkpoints automatically; `plan`/`status`/`lock-status` only wa
 On `vault_lock_held`, report the holder's label and wait; never break a lock unless
 the user has coordinated with the holder and asks for `lock-break` (owner only,
 `--observed-generation`, `--reason`, explicit `--yes` in agents). On
-`vault_local_mismatch`, ask before rerunning with `--restore`. Run agent-written
+`vault_local_mismatch`, ask before rerunning with `--restore`. If restore changes private bindings, refresh the trusted shell environment before retrying.
+Preserve the private restore journal when resuming after interruption. Run agent-written
 scripts as `./pocketdeploy exec -- SCRIPT` so nested commands share one lease.
 
 `converge` runs the DAG: preflight → keys → compute → host → service DNS →
@@ -211,10 +212,11 @@ the same pending key. The final `github-keys` step deletes the local
 creates no GitHub keys; `plan`, `status` and dry runs never generate, rotate or
 delete them. Converge is never a no-op for GitHub targets; CI jobs that read the
 old secret before it and connect after it may need a re-run.
-Vault encrypts remote copies, not local files. Only explicit `vault-save` uploads
-a checkpoint; provisioning, convergence, deletion and failed workflows never
-back up automatically. Remove the retired `vault-save-after-run` field, even if
-false. Save after mutations and failures that changed local state while a complete
+Vault encrypts remote copies. Protect the local files separately. With the default
+`state-lock: local`, run `vault-save` explicitly. Vault-mode runs save fenced
+checkpoints, including the final operation outcome while the lease is valid.
+Remove the retired `vault-save-after-run` field, even if
+false. In local mode, save after mutations and failures that changed local state while a complete
 recovery set exists. Successful deletion removes SSH keys: run `init` to generate
 new local authority or recreate with `converge` before saving a new complete
 checkpoint. Preserve the local deletion receipt until then. Until saving
@@ -224,7 +226,7 @@ Retry a failed save after fixing Vault access; do not rerun infrastructure chang
 just to retry the backup.
 
 Check out matching `colors.yml` into the recovery destination before restoring.
-Both selected and destination configuration must match the checkpoint hash.
+For explicit `vault-restore`, both selected and destination configuration must match the checkpoint hash.
 Configuration is never overwritten. Existing private destinations require
 explicit `--overwrite`. Restore neither executes private files nor deploys.
 Stop the old operator before handover, review non-secret desired state, and run

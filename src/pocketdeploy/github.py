@@ -8,6 +8,7 @@ import stat
 import tempfile
 from urllib.parse import quote
 
+from .checkpoints import before_provider_request
 from .common import DeployError, local_path, run
 from .output import operation
 from .config import validate_local_paths
@@ -42,6 +43,7 @@ class GitHub:
         self.apps = [apps[0] for apps in self.groups.values()]
 
     def _api(self, endpoint, method='GET', data=None):
+        before_provider_request()
         args = ['gh', 'api', '--method', method, endpoint]
         if data is not None:
             args += ['--input', '-']
@@ -369,7 +371,9 @@ class GitHub:
                       'SITE_URL': ('http' if app.get('disable_tls') else 'https') + '://' + app['host'],
                       'SITE_URLS': json.dumps([('http' if a.get('disable_tls') else 'https') + '://' + a['host'] for a in apps])}
             for name, value in values.items():
+                before_provider_request()
                 run(['gh', 'variable', 'set', name, '--repo', repo, '--env', self.environment], input=value)
+            before_provider_request()
             run(['gh', 'secret', 'set', 'SSH_PRIVATE_KEY', '--repo', repo, '--env', self.environment], input=private.read_text())
             # Only retire old host authority after GitHub accepted the new
             # secret. Failure or a lost response leaves both keys usable;

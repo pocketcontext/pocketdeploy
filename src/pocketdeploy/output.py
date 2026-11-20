@@ -96,6 +96,18 @@ def text_result(command, result):
     """Render only the known safe fields supplied by command implementations."""
     profile = result.get('profile')
     suffix = f" for {profile}" if profile else ''
+    if command == 'lock-status':
+        lock = result.get('vault_lock', {})
+        if not lock.get('available'):
+            return result.get('warnings') or ['Vault lock status unavailable.']
+        lines = [f"Vault lock {lock['state']} (generation {lock['generation']})."]
+        if lock.get('state') == 'held':
+            lines.append(f"Holder {lock.get('label') or lock.get('holder_email') or 'unknown'}, "
+                         f"progress {lock.get('progress') or '-'}, expires {lock.get('expires_at')}.")
+        return lines + result.get('warnings', [])
+    if command == 'lock-break':
+        lock = result['vault_lock']
+        return [f"Vault lock {lock['state']} (generation {lock['generation']})."]
     if command == 'init':
         return [f"Initialized{suffix}.", f"Deployment: {result['deployment_id']}."]
     if 'actions' in result and command in ('plan', 'kms-plan', 'converge', 'delete'):
@@ -109,7 +121,7 @@ def text_result(command, result):
             lines.append('No changes planned.')
         if 'protected' in result:
             lines.append('Deletion protection: ' + ('enabled.' if result['protected'] else 'disabled.'))
-        return lines
+        return lines + result.get('warnings', [])
     if command == 'kms-converge':
         return [f"KMS signing authority ready{suffix}.",
                 f"Private bindings: {result['bindings_file']}.",
@@ -132,7 +144,7 @@ def text_result(command, result):
         lines.extend(_health(result.get('applications', {})))
         backup = state.get('last_vault_backup')
         lines.append(f"Last acknowledged Vault backup: {backup.get('saved_at', 'time unknown')} (document {backup.get('document', 'unknown')}, version {backup.get('version', 'unknown')})." if backup else 'Last acknowledged Vault backup: none.')
-        return lines
+        return lines + result.get('warnings', [])
     if command == 'converge':
         lines = [f"Converged{suffix}."]
         connection = result.get('connection', {})

@@ -8,6 +8,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, build_opener, HTTPRedirectHandler
 
+from .checkpoints import before_provider_request
 from .common import DeployError, run
 
 
@@ -65,6 +66,7 @@ class GCP:
         return self._link(self.config['gcp-subnet'], self._root() + '/regions/' + region + '/subnetworks')
 
     def _call(self, path, method='GET', body=None, query=None):
+        before_provider_request()
         if not path.startswith('projects/') or '..' in path or '?' in path or '#' in path:
             raise DeployError('Invalid GCP API path.')
         command = ['gcloud', 'auth']

@@ -61,7 +61,7 @@ class Deletion:
                          'vault': 'unchanged'}
         return self.prepared
 
-    async def run(self, operation):
+    async def run(self, operation, *, lease=None):
         if self.config.get('compute-prevent-destroy', True):
             raise DeployError('Deletion protection is enabled.')
         completed = []
@@ -113,8 +113,13 @@ class Deletion:
             def safe(opts):
                 nonlocal failure
                 try:
+                    if lease is not None:
+                        lease.progress = name
+                        lease.check()
                     with self.reporter.stage(name):
                         fn()
+                    if lease is not None and name != 'delete-preflight':
+                        lease.checkpoint(self.state, allow_missing=True)
                     completed.append(name)
                     return dict(opts)
                 except DeployError as exc:

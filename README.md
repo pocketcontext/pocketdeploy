@@ -207,7 +207,7 @@ It never prints resolved environments, credentials,
 raw Docker metadata, ONCE labels or cloud response bodies.
 `state.last_vault_backup` reports the locally acknowledged document/version and
 UTC `saved_at` (or null when no receipt is known). Older receipts may lack a
-timestamp. This makes no Vault call and does not prove checkpoint freshness.
+timestamp. Vault mode also reports the current lease and checkpoint drift.
 `ssh` is explicitly
 interactive; commands you choose can print private information in your terminal.
 
@@ -786,7 +786,7 @@ it from existing configuration and remove `COLORS_PAR_VAULT_SAVE_AFTER_RUN`
 from the operator environment. Older Git configurations may contain this retired field; migrate it before
 creating a new recovery checkpoint.
 
-Run `vault-save` after successful mutations and after failures that changed local
+In local mode, run `vault-save` after successful mutations and after failures that changed local
 state while a complete recovery set exists. Successful deletion removes generated
 keys, so a new complete checkpoint requires `init` to regenerate local authority
 or `converge` to recreate the deployment first. Preserve the local deletion receipt
@@ -832,25 +832,35 @@ Every command that changes state or the recovery set (`converge`, `delete`,
    whole recovery set by document ID. A held lock fails at once with
    `vault_lock_held` and the holder's label, progress and expiry, touching no state.
    A different local set fails with `vault_local_mismatch` and takes no lock.
-3. With `--restore`, a stale local set is restored under the lock instead: every
-   pinned file and the SQLite snapshot are staged, checked against the locked
-   manifest and published, keeping the replaced copies as `*.pre-restore`. The
-   `colors.yml` hash check is relaxed for this sync only; identity and scope
-   checks remain. Local files edited since the last sync, `diverged`,
-   `missing_remote` and unexpected active documents stop the run.
-4. Renew the lease every ttl/3 with the current step as progress. Before each
-   converge step a Blue `around` advice proves the lease is valid for a safety
-   margin; otherwise the run stops at that step boundary.
-5. After each converge step that changed state, and once more at the end (also
-   after failure), save the whole set with the lease fence: files first, SQLite
-   last, each with the receipt's expected revision. The receipt is updated.
-   A lost or expired lease never falls back to an unfenced save.
-6. Release the lease (`clean` when the command and final save succeeded), then
-   the local flock.
+3. With `--restore`, download the last committed SQLite snapshot and its pinned
+   file versions. A partially uploaded newer file does not invalidate that
+   checkpoint. Verify the deployment UUID and provider scope, preserve the old
+   files as `*.pre-restore`, then publish the ledger last. After interruption,
+   repeat the command with `--restore` to resume. A dirty local ledger or file
+   combined with a newer remote checkpoint requires manual reconciliation.
+   When restored private bindings change, the command stops before provider
+   work. Refresh the trusted shell environment and run the command again.
+4. Renew the lease every ttl/3. A mutating run requires an unlocked VaultContext
+   worker. Before each converge or delete stage, verify the local lease deadline.
+   Provider requests checkpoint newly recorded intent and recovery material
+   before sending the request. Host-key rotation checkpoints the replacement key
+   before installation and checkpoints the verified result.
+5. Publish private files first and SQLite last with a fence and expected
+   revisions. The final checkpoint includes the journal of a failed run after
+   deployment identity has been verified. Lease loss stops the run with an error.
+6. Release the vault lease, then the local flock.
 
-The first locked run has no receipt: it adopts the local set, provided the vault
-contains no active document outside this deployment's recorded recovery set. The
-vault must be dedicated to one deployment. PocketDeploy refuses another local
+On a first locked run, an empty dedicated vault can accept an initial checkpoint.
+For an existing vault, adoption verifies the immutable file and state versions
+recorded by the local ledger against the remote manifest before acquiring.
+Recover the correct checkpoint explicitly if the versions cannot be verified.
+If the very first upload stops before SQLite is published, that vault has no
+complete checkpoint. Keep the original local ledger and recovery files, and
+reconcile the partial upload before retrying or using a fresh dedicated vault.
+After a vault-mode delete, the ledger records deletion and retains immutable
+references to the prior SSH keys for recovery.
+
+The vault must be dedicated to one deployment. PocketDeploy refuses another local
 configuration naming the same `vault-id` and unexpected active documents
 (archived documents are ignored). It never splits a shared vault; to separate
 two deployments, create a new vault, unlock, save deployment B's recovery set into
@@ -858,10 +868,23 @@ it with `state-lock: local`, point B's `vault-id` at it, then archive B's leftov
 documents in the old vault before enabling the lock on either.
 
 `plan`, `status` and `lock-status` never take the lock. They report
-`vault_lock` (state, label, holder, generation, progress, expiry) and local files
-changed since the last sync, with warnings. `pocketdeploy exec -- COMMAND ...`
+`vault_lock` (state, label, holder, generation, progress, expiry) and changes in the local recovery set or remote document revisions. `pocketdeploy exec -- COMMAND ...`
 holds one lease around an agent-written script and exports `POCKETDEPLOY_FENCE` and
-the held flock; nested `pocketdeploy` commands reuse both instead of acquiring.
+the held flock. Nested `pocketdeploy` commands reuse both and concurrent sibling
+mutations contend for local exclusivity. A Python wrapper spawning a nested
+command must pass through the two inherited descriptors, for example:
+
+```python
+import os
+import subprocess
+
+fds = tuple(int(os.environ[key]) for key in ('POCKETDEPLOY_LOCK_FD', 'POCKETDEPLOY_CHILD_FD'))
+subprocess.run(['pocketdeploy', 'vault-save'], pass_fds=fds, check=True)
+```
+
+Preserve the private `<state-file>.vault-restore` journal during interrupted
+restore. Keep it, `*.vault-lease`, `*.vault-sync` and `*.pre-restore` out of Git.
+
 `exec` returns the child's exit code; a failing child releases the lease dirty.
 
 If a holder crashed and its fence is lost, coordinate with the other operator

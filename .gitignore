@@ -26,3 +26,9 @@ result
 
 .vault-save-*/
 .vault-restore-*/
+
+# Private vault lease, synchronization receipt and recovery originals.
+*.vault-lease
+*.vault-sync
+*.vault-restore
+*.pre-restore

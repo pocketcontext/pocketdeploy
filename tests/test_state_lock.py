@@ -115,10 +115,11 @@ def test_concurrent_acquire_refused_with_label_and_touches_nothing(deployment):
         assert state_lock.read_receipt(state_path)['documents'] == before['documents']
 
 
-def test_mismatch_fails_without_lock_and_restore_opt_in_restores_whole_set(deployment, tmp_path):
+def test_mismatch_fails_without_lock_and_restore_opt_in_restores_whole_set(deployment, monkeypatch):
     config, state_path, store = deployment
     run_locked(config, state_path, lambda lease, state: state.set_meta('marker', 'synced'))
     receipt = state_lock.read_receipt(state_path)
+    original_state = state_path.read_bytes()
     # Another machine saved a newer set under its own lock.
     envrc = Path(config['_root']) / '.envrc.private'
     envrc.write_text('newer secret from another machine')
@@ -133,14 +134,24 @@ def test_mismatch_fails_without_lock_and_restore_opt_in_restores_whole_set(deplo
     # Roll the local copy back to the old receipt and old content.
     state_lock._write_private_json(state_lock.receipt_path(state_path), receipt)
     envrc.write_text('synthetic private .envrc.private')
-    with State(state_path, config['profile'], scope(config)) as state:
-        state.set_meta('marker', 'synced')
+    state_path.write_bytes(original_state)
     generation = db(store)['lock']['generation']
     with pytest.raises(state_lock.LockRefused) as refused:
         run_locked(config, state_path)
     assert refused.value.code == 'vault_local_mismatch' and 'stale' in str(refused.value)
     assert db(store)['lock']['generation'] == generation  # lock not taken
-    run_locked(config, state_path, restore=True)
+    # On a recovering machine an application binding can be missing until after
+    # the private environment file has been restored and the shell refreshed.
+    path = Path(config['_file'])
+    raw = json.loads(path.read_text())
+    raw['once'] = {'applications': [{'host': 'synthetic.example', 'image': 'synthetic',
+                                    'env': {'VAR': 'synthetic-recovery'}}]}
+    path.write_text(json.dumps(raw))
+    monkeypatch.delenv('COLORS_PAR_SYNTHETIC_RECOVERY', raising=False)
+    monkeypatch.setattr('pocketdeploy.cli.OCI', lambda *a: pytest.fail('provider reached before refresh'))
+    with pytest.raises(DeployError) as refreshed:
+        _execute(parser().parse_args(['converge', '--restore', '-f', str(path)]))
+    assert refreshed.value.code == 'vault_environment_refresh_required'
     assert envrc.read_text() == 'newer secret from another machine'
     assert Path(str(envrc) + '.pre-restore').read_text() == 'synthetic private .envrc.private'
     with State(state_path, config['profile'], scope(config), read_only=True) as state:
@@ -211,7 +222,7 @@ def test_preflight_rejects_extras_and_sibling_configuration(deployment):
     with pytest.raises(DeployError) as error:
         run_locked(config, state_path)
     assert error.value.code == 'vault_not_dedicated'
-    assert db(store)['lock']['state'] == 'released'
+    assert db(store)['lock'] is None and db(store)['policy'] == 'none'
     sibling = Path(config['_root']).parent / 'second'
     sibling.mkdir()
     (sibling / 'colors.yml').write_text(json.dumps({'profile': 'second', 'vault-id': 'syntheticvault1'}))
@@ -234,14 +245,15 @@ def test_exec_holds_one_lease_and_nested_commands_reuse_fence(deployment, monkey
         with deployment_lock(path), state_lock.guard(config, path, command='converge') as lease:
             assert lease.nested
             with State(path, config['profile'], scope(config)) as state:
+                lease.bind(state)
                 state.set_meta('nested', 'yes')
                 lease.checkpoint(state)
-        print(os.environ['{state_lock.FENCE_ENV}'])
     '''))
-    with deployment_lock(state_path), state_lock.guard(config, state_path, command='exec') as lease:
-        with state_lock.child_lock_fd(state_path) as fd:
-            assert state_lock.run_child(config, state_path, lease, [sys.executable, str(script)], fd) == 0
-            generation = db(store)['lock']['generation']
+    with deployment_lock(state_path) as fd, state_lock.guard(config, state_path, command='exec') as lease:
+        with State(state_path, config['profile'], scope(config), read_only=True) as state:
+            lease.bind(state)
+        assert state_lock.run_child(config, state_path, lease, [sys.executable, str(script)], fd) == 0
+        generation = db(store)['lock']['generation']
     data = db(store)
     acquires = [e for e in data['log'] if e[:2] == ['lock', 'acquire']]
     assert len(acquires) == 1 and data['lock']['generation'] == generation
@@ -313,3 +325,85 @@ def test_cli_argument_rules(deployment, monkeypatch):
         _execute(args('exec', child=['false']))
     assert failed.value.exit_code == 1
     assert state_lock.read_receipt(state_path) is not None
+
+
+def test_locked_session_prevents_acquire_or_exec(deployment, monkeypatch):
+    config, state_path, store = deployment
+    store.write_text(json.dumps({'session_closed': True}))
+    monkeypatch.chdir(config['_root'])
+    args = parser().parse_args(['exec'])
+    marker = Path(config['_root']) / 'child-ran'
+    args.child = [sys.executable, '-c', "import pathlib; pathlib.Path('child-ran').touch()"]
+    with pytest.raises(DeployError) as error:
+        _execute(args)
+    assert error.value.code == 'vault_session_closed'
+    assert not marker.exists() and not state_lock.lease_path(state_path).exists()
+    assert 'lock' not in db(store)
+
+
+def test_status_warns_when_remote_head_alone_advances(deployment):
+    config, state_path, store = deployment
+    run_locked(config, state_path)
+    first = state_lock.read_receipt(state_path)
+    run_locked(config, state_path)
+    state_lock._write_private_json(state_lock.receipt_path(state_path), first)
+    generation = db(store)['lock']['generation']
+    status = state_lock.status(config, state_path)
+    assert status['vault_sync']['remote_drift'] is True
+    assert any('active vault recovery set differs' in item for item in status['warnings'])
+    assert db(store)['lock']['generation'] == generation
+
+
+def test_exec_lost_lease_terminates_child_and_fails(deployment):
+    config, path, store = deployment
+    with pytest.raises(DeployError) as error:
+        quick = {**config, 'state-lock-ttl': 3}
+        with deployment_lock(path) as fd, state_lock.guard(quick, path, command='exec') as lease:
+            with State(path, config['profile'], scope(config), read_only=True) as state:
+                lease.bind(state)
+            # Simulate the owner's independent break while the script is running.
+            child = [sys.executable, '-c', """
+import subprocess, sys, time
+subprocess.run(sys.argv[1:], check=True, capture_output=True)
+time.sleep(15)
+raise SystemExit('expired child remained running')
+""", config['vault-command'], 'lock', 'break', config['vault-id'], '--observed-generation', '1',
+                     '--reason', 'synthetic recovery', '--yes']
+            state_lock.run_child(quick, path, lease, child, fd)
+    assert error.value.code == 'vault_lease_lost'
+    assert not any(entry[0] == 'save' for entry in db(store)['log'])
+    assert not state_lock.lease_path(path).exists()
+
+
+def test_plan_status_and_readonly_session_inspect_active_writer(deployment, monkeypatch):
+    from pocketdeploy import cli, runtime
+    import sqlite3
+
+    config, path, store = deployment
+    monkeypatch.chdir(config['_root'])
+
+    class Cloud:
+        def __init__(self, *_):
+            pass
+        def plan(self):
+            return []
+        def inspect(self):
+            return {}
+
+    monkeypatch.setattr(cli, 'OCI', Cloud)
+    with deployment_lock(path), state_lock.guard(config, path, command='exec') as holder:
+        with State(path, config['profile'], scope(config)) as writer:
+            holder.bind(writer)
+            writer.set_meta('progress', 'first')
+            generation = db(store)['lock']['generation']
+            for command in ('plan', 'status'):
+                result = _execute(parser().parse_args([command]))
+                assert result['vault_lock']['generation'] == generation
+                assert any('alice@laptop' in warning for warning in result['warnings'])
+            with runtime.session(config, read_only=True, provider_factory=Cloud) as view:
+                assert view.lease is None and view.state.get_meta('progress') == 'first'
+                writer.set_meta('progress', 'second')
+                assert view.state.get_meta('progress') == 'first'
+                with pytest.raises(sqlite3.OperationalError, match='readonly'):
+                    view.state.db.execute('DELETE FROM meta')
+            assert db(store)['lock']['generation'] == generation

@@ -138,9 +138,12 @@ Optional `state-lock: vault` (default `local`) adds an exclusive cross-machine
 VaultContext lease with `state-lock-ttl` (30–3600, default 900) and an optional
 plaintext `state-lock-label`. Mutating commands then acquire it, compare the whole
 recovery set against `<state-file>.vault-sync`, save fenced checkpoints (files
-first, SQLite last) after changes and at the end, and release it. A held lock fails
+first, SQLite last) before requests that apply recorded intent, after changed
+stages, and at the end. Release follows the final checkpoint. A held lock fails
 with `vault_lock_held`; a different local set fails with `vault_local_mismatch` unless
-`--restore` restores it under the lock. Use `lock-status`, `exec -- COMMAND`,
+`--restore` restores the last complete checkpoint under the lock. Resume an
+interrupted restore with the same flag. If private bindings changed, refresh
+your trusted shell environment before running the command again. Use `lock-status`, `exec -- COMMAND`,
 `lock-break` and `--force-lock` as described in the README's State lock section.
 The vault must be dedicated to this deployment. pocketdeploy-v2 stays on
 `state-lock: local`.

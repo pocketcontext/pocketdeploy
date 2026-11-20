@@ -4,6 +4,7 @@ import json
 import os
 import time
 
+from .checkpoints import before_provider_request
 from .common import DeployError, run
 from .digitalocean import DigitalOcean
 
@@ -17,6 +18,7 @@ class HCloud:
         self.config, self.state = config, state
 
     def _call(self, args, payload=None, *, json_output=True):
+        before_provider_request()
         token = os.environ.get('COLORS_PAR_HCLOUD_TOKEN') or os.environ.get('HCLOUD_TOKEN')
         if not token:
             raise DeployError('Hetzner token is missing.')

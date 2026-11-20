@@ -4,6 +4,7 @@ import json
 import subprocess
 import tempfile
 
+from .checkpoints import before_provider_request
 from .transport import python_command
 from .common import DeployError
 
@@ -53,6 +54,7 @@ def rotate(host, connection):
         # Commit recovery material before any remote mutation. The same pending
         # key survives lost responses, daemon reloads and controller restarts.
         host.state.set_meta(META, trust)
+    before_provider_request()
     public = trust['public']
     if request(host, connection, public, 'true').returncode:
         public = host.hostpub.read_text()
@@ -60,6 +62,7 @@ def rotate(host, connection):
     # effective-config validation: possession alone does not prove the leaked
     # bootstrap key is no longer accepted by sshd.
     source = Path(__file__).with_name('host_trust_remote.py').read_text()
+    before_provider_request()
     result = request(host, connection, public,
                      python_command(source),
                      json.dumps({'private': trust['private'], 'public': trust['public']}))
@@ -69,3 +72,4 @@ def rotate(host, connection):
     if request(host, connection, trust['public'], 'true').returncode:
         raise DeployError('Rotated SSH host identity could not be verified; rerun rotate-host-key; output suppressed.')
     host.state.set_meta(META, {**trust, 'verified': True})
+    before_provider_request()

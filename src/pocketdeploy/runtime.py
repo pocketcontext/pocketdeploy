@@ -5,6 +5,7 @@ from pathlib import Path
 import os
 import stat
 
+from .checkpoints import provider_checkpoints
 from .common import DeployError, local_path
 from .config import scope
 from .state import State, deployment_lock
@@ -29,13 +30,14 @@ def session(config, *, read_only=False, allow_create=False, provider_factory=Non
     path = local_path(root, config['state-file'])
     lease_guard = (nullcontext(None) if read_only or not state_lock.enabled(config)
                    else state_lock.guard(config, path, command='session'))
-    with (nullcontext() if read_only and not path.exists() else deployment_lock(path)), lease_guard as lease:
+    inspect_live = read_only and state_lock.enabled(config)
+    with (nullcontext() if inspect_live or read_only and not path.exists() else deployment_lock(path)), lease_guard as lease:
         fresh = not path.exists()
         if fresh and (config.get('compute-require-existing-state') or not allow_create):
             raise DeployError('Deployment state is missing; restore it before continuing.')
         manager = nullcontext(None) if fresh and read_only else State(
-            path, config['profile'], scope(config), create=fresh, read_only=read_only)
-        with manager as state:
+            path, config['profile'], scope(config), create=fresh, read_only=read_only, inspect_live=inspect_live)
+        with manager as state, provider_checkpoints(lease, state, config):
             if lease is not None and state is not None:
                 lease.bind(state)
             factory = provider_factory or provider_class(config['provider-compute'])

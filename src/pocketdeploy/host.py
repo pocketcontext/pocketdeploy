@@ -1,4 +1,5 @@
 """SSH transport with deployment-owned host trust and no payload in argv."""
+from .checkpoints import before_provider_request
 from .diagnostics import build_diagnostic, validate_diagnostic
 import json
 import hashlib
@@ -158,6 +159,7 @@ class Host:
         return public
 
     def _argv(self, connection, *, public=None):
+        before_provider_request()
         validate_local_paths(self.config, self.root)
         user = connection.get('user', 'ubuntu')
         if not isinstance(user, str) or not re.fullmatch(r'[a-z_][a-z0-9_-]{0,31}', user):

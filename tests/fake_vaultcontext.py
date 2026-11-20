@@ -6,6 +6,7 @@ that PocketDeploy relies on: NOWAIT acquire, whole-set comparison by document ID
 lock_policy required after the first acquire, fenced saves and owner-only breaks.
 """
 import fcntl
+from datetime import datetime, timezone
 import json
 import os
 import secrets
@@ -65,11 +66,15 @@ def handle(db, args):
     if args[0] == 'lock':
         sub, vault = args[1], args[2]
         lock = db['lock']
+        if '--require-unlocked' in args and db.get('session_closed'):
+            raise SystemExit(6)
         if sub == 'status':
+            documents = manifest(db)
             if not lock:
-                return {'vault': vault, 'state': 'free', 'generation': 0, 'lock_policy': db['policy']}
+                return {'vault': vault, 'state': 'free', 'generation': 0,
+                        'lock_policy': db['policy'], 'documents': documents}
             return {**view(lock), 'vault': vault, 'lock_policy': db['policy'], 'label': lock['info'].get('label'),
-                    'holder_email': 'operator@example.com', 'expired_by_client_clock': not live(lock)}
+                    'holder_email': 'operator@example.com', 'expired_by_client_clock': not live(lock), 'documents': documents}
         if sub == 'acquire':
             if '--force' in args:
                 if not OWNER:
@@ -107,10 +112,13 @@ def handle(db, args):
         if sub == 'renew':
             if not fence_ok(db, option(args, '--fence')):
                 refuse('lock_lost')
-            lock['expires'] = time.time() + lock['ttl']
+            now = time.time()
+            lock['ttl'] = int(option(args, '--ttl', lock['ttl']))
+            lock['expires'] = now + lock['ttl']
             lock['progress'] = option(args, '--progress', lock['progress'])
             lock['renewals'] += 1
-            return {'expires_at': 'later', 'late': False}
+            return {'expires_at': datetime.fromtimestamp(lock['expires'], timezone.utc).isoformat(),
+                    'server_time': datetime.fromtimestamp(now, timezone.utc).isoformat(), 'late': False}
         if sub == 'release':
             if not fence_ok(db, option(args, '--fence')):
                 refuse('lock_lost')

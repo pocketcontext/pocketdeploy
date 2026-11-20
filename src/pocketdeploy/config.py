@@ -139,6 +139,8 @@ def normalize(raw, *, path, env=None, resolve=True, aliases=None, defaults=None,
     # This journal fingerprint is not used to reconcile applications. Keep
     # secret values out of it; host reconciliation checks the actual settings.
     fingerprint = copy.deepcopy({k: v for k, v in config.items() if not k.startswith('_')})
+    for key in ('state-lock', 'state-lock-label', 'state-lock-ttl'):
+        fingerprint.pop(key, None)
     for app in fingerprint.get('once', {}).get('applications', []):
         app.pop('resolved-env', None)
         bindings = app.get('env')
@@ -376,6 +378,15 @@ def validate_local_paths(c, root=None, *, state_path=None):
     files = [*authority, path(os.path.abspath(c['_file']) if '_file' in c else 'colors.yml'), path('.envrc'),
              path('.envrc.private'), state,
              *(path(str(state) + suffix) for suffix in ('.lock', '-journal', '-wal', '-shm'))]
+    if c.get('state-lock') == 'vault':
+        from .kms import FILES
+        recovery = [*authority, path('.envrc.private'), state]
+        if c.get('oci-kms'):
+            kms_paths = [path(name) for name in FILES]
+            files.extend(kms_paths)
+            recovery.extend(kms_paths)
+        files.extend(path(str(state) + suffix) for suffix in ('.vault-sync', '.vault-lease', '.vault-restore'))
+        files.extend(path(str(target) + '.pre-restore') for target in recovery)
     if state_path is not None:
         actual_state = path(state_path)
         if actual_state != state:
