@@ -14,7 +14,7 @@
     export PATH="$DEVENV_ROOT/node_modules/.bin:$PATH"
   '';
   scripts.vaultcontext.exec = ''
-    uv tool run --from 'vaultcontext-client @ git+https://github.com/pocketcontext/vaultcontext.git@5157597a4ea9f33cb9806b1485bb84f01b5cf276' vaultcontext "$@"
+    uv tool run --from 'vaultcontext-client @ git+https://github.com/pocketcontext/vaultcontext.git@ea808c8db88c1d155380acf426f3ffcb6dd0f536' vaultcontext "$@"
   '';
   env.UV_PYTHON = "${pkgs.python312}/bin/python3";
   scripts.pocketdeploy.exec = ''
