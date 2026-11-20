@@ -25,6 +25,18 @@ def _private_path(path):
 @contextmanager
 def deployment_lock(path):
     path = _private_path(str(path) + '.lock')
+    inherited = os.environ.get('POCKETDEPLOY_LOCK_FD')
+    if inherited:
+        # A `pocketdeploy exec` parent holds this flock and passed its open file;
+        # nested commands reuse it only when it is the same lock file.
+        try:
+            held, current = os.fstat(int(inherited)), os.stat(path, follow_symlinks=False)
+        except (OSError, ValueError):
+            held = current = None
+        if held is None or (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino):
+            raise DeployError('POCKETDEPLOY_LOCK_FD does not match this deployment lock.')
+        yield
+        return
     fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         info = os.fstat(fd)

@@ -36,6 +36,8 @@ ROOT_KEYS = set(DEFAULTS) | {
     'oci-subnet-id', 'oci-availability-domain', 'oci-image-id', 'ssh-user',
     'ssh-private-key-file', 'ssh-public-key-file', 'ssh-known-hosts-file',
     'vault-id', 'vault-state-document-id', 'vault-command',
+    # Optional; absent means state-lock: local and keeps existing desired-state hashes.
+    'state-lock', 'state-lock-ttl', 'state-lock-label',
     'once',
     'cloudflare-zone-id', 'cloudflare-auth-profile', 'resend-auth-profile', 'smtp-domain', 'smtp-from', 'resend-region',
     'ssh-host-private-key-file', 'ssh-host-public-key-file',
@@ -252,6 +254,15 @@ def validate(c):
             if key in c and (not isinstance(c[key], str) or not c[key] or c[key].startswith('-')
                              or any(ord(char) < 32 for char in c[key])):
                 raise DeployError('Invalid optional Google Cloud identifier.')
+    if c.get('state-lock', 'local') not in ('local', 'vault'):
+        raise DeployError('state-lock must be local or vault.')
+    if c.get('state-lock') == 'vault' and not c.get('vault-id'):
+        raise DeployError('state-lock: vault requires vault-id.')
+    if 'state-lock-ttl' in c and (type(c['state-lock-ttl']) is not int or not 30 <= c['state-lock-ttl'] <= 3600):
+        raise DeployError('state-lock-ttl must be an integer from 30 to 3600 seconds.')
+    if 'state-lock-label' in c and (not isinstance(c['state-lock-label'], str)
+                                   or not re.fullmatch(r'[\x20-\x7e]{1,100}', c['state-lock-label'])):
+        raise DeployError('state-lock-label must be 1–100 printable ASCII characters (plaintext; no secrets).')
     user = c.get('ssh-user', 'ubuntu')
     if not isinstance(user, str) or not re.fullmatch(r'[a-z_][a-z0-9_-]{0,31}', user):
         raise DeployError('ssh-user must be a conventional lowercase Linux username of at most 32 characters.')

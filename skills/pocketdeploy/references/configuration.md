@@ -134,7 +134,18 @@ these recovery files. VaultContext must be authenticated and user-unlocked.
 For a new deployment use `init → vault-save → converge → vault-save`; for updates
 use `plan → converge → vault-save`.
 
-Vault access happens only through explicit Vault commands. The retired
+Optional `state-lock: vault` (default `local`) adds an exclusive cross-machine
+VaultContext lease with `state-lock-ttl` (30–3600, default 900) and an optional
+plaintext `state-lock-label`. Mutating commands then acquire it, compare the whole
+recovery set against `<state-file>.vault-sync`, save fenced checkpoints (files
+first, SQLite last) after changes and at the end, and release it. A held lock fails
+with `vault_lock_held`; a different local set fails with `vault_local_mismatch` unless
+`--restore` restores it under the lock. Use `lock-status`, `exec -- COMMAND`,
+`lock-break` and `--force-lock` as described in the README's State lock section.
+The vault must be dedicated to this deployment. pocketdeploy-v2 stays on
+`state-lock: local`.
+
+With the default `state-lock: local`, Vault access happens only through explicit Vault commands. The retired
 `vault-save-after-run` option is rejected even when false. No successful or failed
 deployment automatically saves state. Save after mutations and after failures
 that changed local state; until then, the last remote checkpoint may be stale.

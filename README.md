@@ -489,9 +489,11 @@ confirm that no data needs recovery first. Repeating it after success reports
 that no marker remains.
 
 One active operator per deployment is supported. A local advisory lock prevents
-overlap on one filesystem; Vault snapshots do not coordinate different machines.
-Stop the old operator before restoring on another machine and always reconcile
-cloud reality before mutations. Do not use a shared network filesystem for state.
+overlap on one filesystem; with the default `state-lock: local`, Vault snapshots do
+not coordinate different machines. Stop the old operator before restoring on
+another machine and always reconcile cloud reality before mutations. Do not use a
+shared network filesystem for state. `state-lock: vault` adds an exclusive
+cross-machine lease; see [State lock](#state-lock).
 
 ## Application delivery
 
@@ -775,8 +777,10 @@ Older snapshots containing configuration and GitHub keys remain readable: their
 configuration is staged only to verify its hash, and their GitHub keys are skipped.
 Existing Vault documents and historical versions are not deleted.
 The snapshot does not need to contain its own newly assigned Vault version ID.
-Vault's file limit is 8 MiB. Vault operations are explicit: `converge`,
-`delete` and failed workflows never save automatically or require Vault access.
+Vault's file limit is 8 MiB. With the default `state-lock: local`, Vault operations
+are explicit: `converge`, `delete` and failed workflows never save automatically or
+require Vault access. `state-lock: vault` saves fenced checkpoints automatically; see
+[State lock](#state-lock).
 The retired `vault-save-after-run` field is rejected, including when false; remove
 it from existing configuration and remove `COLORS_PAR_VAULT_SAVE_AFTER_RUN`
 from the operator environment. Older Git configurations may contain this retired field; migrate it before
@@ -802,6 +806,77 @@ Keep independent encrypted recovery material if VaultContext itself depends on
 the infrastructure being recovered. Vault encrypts remote copies, not the local
 working database. Passphrases are entered privately by the user, never retrieved
 from configuration or supplied in command arguments.
+
+## State lock
+
+`state-lock: vault` coordinates operators on different machines through an
+exclusive VaultContext lease on the deployment's dedicated vault (like
+`SELECT ... FOR UPDATE NOWAIT`). It requires a VaultContext release with vault locks
+(`2026-11-20.1` or later) and a user-unlocked session, like `vault-save`.
+
+```yaml
+vault-id: YOUR_DEDICATED_VAULT_ID
+state-lock: vault          # default: local
+state-lock-ttl: 900        # lease seconds, 30–3600; renewed every ttl/3
+state-lock-label: alice@laptop  # optional; --label overrides; plaintext, no secrets
+```
+
+Every command that changes state or the recovery set (`converge`, `delete`,
+`adopt*`, `rotate-host-key`, `resolve-step`, `clear-pending-marker`,
+`retire-github-target`, `smtp-test`, `kms-*` except `kms-plan`, `vault-save` and
+`exec`) then runs this flow:
+
+1. Take the local flock.
+2. `vaultcontext lock acquire` with the sync receipt `<state-file>.vault-sync`
+   (mode 0600, beside the state file, never inside SQLite). Acquire compares the
+   whole recovery set by document ID. A held lock fails at once with
+   `vault_lock_held` and the holder's label, progress and expiry, touching no state.
+   A different local set fails with `vault_local_mismatch` and takes no lock.
+3. With `--restore`, a stale local set is restored under the lock instead: every
+   pinned file and the SQLite snapshot are staged, checked against the locked
+   manifest and published, keeping the replaced copies as `*.pre-restore`. The
+   `colors.yml` hash check is relaxed for this sync only; identity and scope
+   checks remain. Local files edited since the last sync, `diverged`,
+   `missing_remote` and unexpected active documents stop the run.
+4. Renew the lease every ttl/3 with the current step as progress. Before each
+   converge step a Blue `around` advice proves the lease is valid for a safety
+   margin; otherwise the run stops at that step boundary.
+5. After each converge step that changed state, and once more at the end (also
+   after failure), save the whole set with the lease fence: files first, SQLite
+   last, each with the receipt's expected revision. The receipt is updated.
+   A lost or expired lease never falls back to an unfenced save.
+6. Release the lease (`clean` when the command and final save succeeded), then
+   the local flock.
+
+The first locked run has no receipt: it adopts the local set, provided the vault
+contains no active document outside this deployment's recorded recovery set. The
+vault must be dedicated to one deployment. PocketDeploy refuses another local
+configuration naming the same `vault-id` and unexpected active documents
+(archived documents are ignored). It never splits a shared vault; to separate
+two deployments, create a new vault, unlock, save deployment B's recovery set into
+it with `state-lock: local`, point B's `vault-id` at it, then archive B's leftover
+documents in the old vault before enabling the lock on either.
+
+`plan`, `status` and `lock-status` never take the lock. They report
+`vault_lock` (state, label, holder, generation, progress, expiry) and local files
+changed since the last sync, with warnings. `pocketdeploy exec -- COMMAND ...`
+holds one lease around an agent-written script and exports `POCKETDEPLOY_FENCE` and
+the held flock; nested `pocketdeploy` commands reuse both instead of acquiring.
+`exec` returns the child's exit code; a failing child releases the lease dirty.
+
+If a holder crashed and its fence is lost, coordinate with the other operator
+first. Then the vault owner runs `pocketdeploy lock-break --observed-generation N
+--reason TEXT` (generation from `lock-status`), or adds `--force-lock
+--observed-generation N --reason TEXT` to a mutating command to break and acquire
+in one step. Both print the holder and ask for confirmation unless `--yes` is
+given; non-interactive use without `--yes` fails. The old fence stops working
+immediately. Without a break, the lease expires after its TTL and the next run
+takes over. Labels, info and progress are plaintext metadata visible to vault
+members and the VaultContext operator.
+
+pocketdeploy-v2 stays on `state-lock: local` with its host flock until a second
+recovery authority exists, because it hosts VaultContext itself. CI deployment
+handlers do not take the vault lock.
 
 ## Development
 
@@ -890,7 +965,9 @@ These interfaces share the same transport as ONCE deployment operations.
 
 Application controllers can use `pocketdeploy.runtime.session(config,
 read_only=False, allow_create=False)` to open matching state and its provider/host
-under a local deployment lock. Read-only plans with `allow_create=True` leave a
+under a local deployment lock, plus the vault lease with `state-lock: vault`
+(`Deployment.lease`; call `lease.checkpoint(state)` after recording a resource or
+pending step, before applying a rotated secret). Read-only plans with `allow_create=True` leave a
 missing state absent. `recorded_operation(state, command, desired_hash)` records
 success, failure and interruption. `initialize(config, state, host, root)` prepares
 local authority. `delete_compute(config, state, cloud, host, operation)` is for

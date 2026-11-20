@@ -77,6 +77,14 @@ acknowledged Vault document/version/save time, or null; older receipts may lack 
 time. It makes no Vault call and does not establish freshness. A restored
 snapshot may contain a prior receipt. A plan is not proof of completed convergence.
 
+With `state-lock: vault`, mutating commands take an exclusive VaultContext lease
+and save fenced checkpoints automatically; `plan`/`status`/`lock-status` only warn.
+On `vault_lock_held`, report the holder's label and wait; never break a lock unless
+the user has coordinated with the holder and asks for `lock-break` (owner only,
+`--observed-generation`, `--reason`, explicit `--yes` in agents). On
+`vault_local_mismatch`, ask before rerunning with `--restore`. Run agent-written
+scripts as `./pocketdeploy exec -- SCRIPT` so nested commands share one lease.
+
 `converge` runs the DAG: preflight → keys → compute → host → service DNS →
 SMTP verification → SMTP credentials → applications → HTTPS verification → GitHub
 → GitHub keys. SMTP stages are skipped when Resend is disabled. `create` is removed; there is no compatibility alias. Cloud/app mutations must stay within the user's authorized scope;

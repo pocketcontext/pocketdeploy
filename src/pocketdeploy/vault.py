@@ -26,16 +26,28 @@ def _command(config, *args):
     return value
 
 
-def _save_file(config, path, name, document=None):
+def _save_file(config, path, name, document=None, fence=None, expect_revision=None):
     if not path.is_file() or path.stat().st_size > MAX_FILE_SIZE:
         raise DeployError('Recovery file is missing or exceeds the Vault size limit.')
     args = ['save', config['vault-id'], str(path), '--name', name]
     if document:
         args.extend(['--document', document])
-    result = _command(config, *args)
+    if fence:
+        # Under state-lock: vault every write carries the current lease fence.
+        args.extend(['--fence', fence])
+    if expect_revision is not None:
+        args.extend(['--expect-revision', str(expect_revision)])
+    if fence:
+        from .state_lock import vault_save
+        result = vault_save(config, args)
+    else:
+        result = _command(config, *args)
     if not isinstance(result.get('id'), str) or not isinstance(result.get('version'), str):
         raise DeployError('Vault save did not return document and version identifiers.')
-    return {'document': result['id'], 'version': result['version']}
+    ref = {'document': result['id'], 'version': result['version']}
+    if isinstance(result.get('revision'), int):
+        ref['revision'] = result['revision']
+    return ref
 
 
 def _files(config):
@@ -109,21 +121,38 @@ def _check_configuration(config, root, expected_hash):
     return destination
 
 
-def save(config, state, root):
+def save(config, state, root, fence=None, revisions=None, allow_missing=False, synced=None):
+    """Save the recovery set: files first, SQLite snapshot last.
+
+    With a lease ``fence`` every upload is fenced and ``revisions`` (document ID ->
+    expected revision) adds a compare-and-set. ``allow_missing`` keeps the previous
+    reference for files removed locally (after deletion). ``synced`` receives
+    per-file sync details for the state-lock receipt.
+    """
     if not config.get('vault-id'):
         raise DeployError('Vault is not configured.')
     root = Path(root).resolve()
     provenance = _provenance(config, root)
     previous = state.get_meta('vault-files', {})
+    revisions = revisions or {}
     refs = {}
     # Validate every source before performing any upload. Files are opaque bytes.
     paths = [(str(name), local_path(root, name)) for name in _files(config)]
-    if any(not path.is_file() or path.stat().st_size > MAX_FILE_SIZE for _, path in paths):
+    missing = [name for name, path in paths if not path.is_file()]
+    if (any(path.is_file() and path.stat().st_size > MAX_FILE_SIZE for _, path in paths)
+            or (missing and not (allow_missing and all(previous.get(name, {}).get('document') for name in missing)))):
         raise DeployError('Recovery file is missing or exceeds the Vault size limit.')
     for name, path in paths:
+        if name in missing:
+            refs[name] = {key: previous[name][key] for key in ('document', 'version') if key in previous[name]}
+            continue
+        document = previous.get(name, {}).get('document')
+        content = path.read_bytes()
         ref = _save_file(config, path, config['profile'] + '-' + name.replace('/', '-'),
-                         previous.get(name, {}).get('document'))
-        refs[name] = ref
+                         document, fence, revisions.get(document, 0 if fence and not document else None) if fence else None)
+        if synced is not None:
+            synced[name] = {**ref, 'file_sha256': hashlib.sha256(content).hexdigest()}
+        refs[name] = {'document': ref['document'], 'version': ref['version']}
         # Persist acknowledged document IDs even if a later upload fails.
         state.set_meta('vault-files', {**previous, **refs})
     state.set_meta('vault-files', refs)
@@ -132,13 +161,17 @@ def save(config, state, root):
     with tempfile.TemporaryDirectory(prefix='.vault-save-', dir=root) as directory:
         snapshot = Path(directory) / 'state.sqlite'
         state.snapshot(snapshot)
-        result = _save_file(config, snapshot, config['profile'] + '-state', state_document)
+        result = _save_file(config, snapshot, config['profile'] + '-state', state_document, fence,
+                            revisions.get(state_document, 0 if fence and not state_document else None) if fence else None)
+    if synced is not None:
+        synced['state'] = {**result, 'file_sha256': None}
     # The published snapshot deliberately does not reference its own new version.
-    state.set_meta('vault-state-document', {**result, 'saved_at': datetime.now(timezone.utc).isoformat()})
+    state.set_meta('vault-state-document', {'document': result['document'], 'version': result['version'],
+                                            'saved_at': datetime.now(timezone.utc).isoformat()})
     return {'state_document': result['document'], 'state_version': result['version'], 'file_count': len(refs)}
 
 
-def restore(config, root, document, version, overwrite=False):
+def restore(config, root, document, version, overwrite=False, sync=None):
     """Stage and validate a full recovery set before publishing local files.
 
     The database is application state: this code reads its fixed recovery manifest,
@@ -184,6 +217,11 @@ def restore(config, root, document, version, overwrite=False):
                     raise ValueError()
         except (sqlite3.Error, ValueError, TypeError, KeyError, IndexError):
             raise DeployError('Recovery state has an invalid or incompatible manifest.') from None
+        if sync is not None:
+            # Restore-under-lock: every pinned file must be the vault's current
+            # version, and the desired configuration may have changed since.
+            if legacy or any(refs[name].get('version') != sync.get(refs[name].get('document')) for name in refs):
+                raise DeployError('Vault recovery set is inconsistent with the locked manifest; stop and inspect it.')
         if legacy:
             old_config = Path(directory) / 'legacy-colors.yml'
             ref = refs['colors.yml']
@@ -191,7 +229,11 @@ def restore(config, root, document, version, overwrite=False):
             expected_hash = _config_hash(old_config)
         else:
             expected_hash = provenance['sha256']
-        configuration = _check_configuration(config, root, expected_hash)
+        if sync is None:
+            configuration = _check_configuration(config, root, expected_hash)
+        else:
+            caller_root = Path(config.get('_root', root)).resolve()
+            configuration = local_path(root, local_path(caller_root, config.get('_file', 'colors.yml')).relative_to(caller_root))
         destinations = [(name, local_path(root, name)) for name in _files(config)]
         targets = [destination, *(path for _, path in destinations)]
         if (len(set(targets)) != len(targets)
@@ -209,6 +251,13 @@ def restore(config, root, document, version, overwrite=False):
             staged.append((temp, target))
         # All downloads succeed before any destination changes. Database is last.
         # A filesystem crash during publication may require repeating restore.
+        if sync is not None:
+            # Keep the replaced local set for inspection.
+            for target in targets:
+                if target.exists():
+                    backup = Path(str(target) + '.pre-restore')
+                    os.replace(target, backup)
+                    os.chmod(backup, 0o600)
         for source, target in [*staged, (staged_db, destination)]:
             local_path(root, target)
             target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)

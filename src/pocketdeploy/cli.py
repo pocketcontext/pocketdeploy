@@ -8,7 +8,7 @@ import sys
 import stat
 import time
 
-from blue.workflow import workflow, run as run_workflow
+from blue.workflow import workflow, advice_add_all, run as run_workflow
 from .common import DeployError, local_path
 from .config import load, scope
 from .state import State, deployment_lock
@@ -16,12 +16,19 @@ from .oci import OCI
 from .compute import provider_class
 from .host import Host
 from . import vault
+from . import state_lock
 from .output import Reporter, operation as output_operation
 
 
 class UsageError(DeployError):
     def __init__(self):
         super().__init__('Invalid command arguments; run pocketdeploy --help.', code='invalid_usage')
+
+
+class ChildFailed(DeployError):
+    def __init__(self, exit_code):
+        super().__init__('exec command failed; the vault lease was released dirty.', code='exec_failed')
+        self.exit_code = exit_code
 
 
 class ArgumentParser(argparse.ArgumentParser):
@@ -61,6 +68,11 @@ Vault commands (explicit checkpoints):
   vault-save     Save private bindings, recovery keys and SQLite to Vault
   vault-restore  Restore a selected document/version; never deploys
 
+State lock (state-lock: vault):
+  exec           Run `-- COMMAND ...` under one vault lease; nested pocketdeploy reuses it
+  lock-status    Show the vault lock holder, label, progress and local drift; never locks
+  lock-break     Owner: retire a crashed holder's lock (--observed-generation, --reason)
+
 Examples:
   pocketdeploy plan
   pocketdeploy converge
@@ -68,10 +80,12 @@ Examples:
   pocketdeploy delete --dry-run
   pocketdeploy init
   pocketdeploy vault-save
+  pocketdeploy converge --label alice@laptop
+  pocketdeploy exec -- ./scripts/rotate-secrets.sh
 
 Configuration defaults to colors.yml in the current working directory.
 Use -f to select a deployment. Run without arguments to show this help.''')
-    p.add_argument('command', metavar='COMMAND', choices=['kms-resolve-user-create', 'kms-resolve-rotation', 'kms-plan', 'kms-converge', 'kms-rotate', 'init', 'plan', 'converge', 'status', 'ssh', 'delete', 'adopt', 'adopt-app', 'adopt-dns', 'dns-evidence', 'smtp-test', 'rotate-host-key', 'steps', 'resolve-step', 'clear-pending-marker', 'retire-github-target', 'vault-save', 'vault-restore'], help='Deployment or Vault command listed below')
+    p.add_argument('command', metavar='COMMAND', choices=['kms-resolve-user-create', 'kms-resolve-rotation', 'kms-plan', 'kms-converge', 'kms-rotate', 'init', 'plan', 'converge', 'status', 'ssh', 'delete', 'adopt', 'adopt-app', 'adopt-dns', 'dns-evidence', 'smtp-test', 'rotate-host-key', 'steps', 'resolve-step', 'clear-pending-marker', 'retire-github-target', 'vault-save', 'vault-restore', 'exec', 'lock-status', 'lock-break'], help='Deployment or Vault command listed below')
     p.add_argument('-f', '--file', help='Configuration file (default: ./colors.yml in the current working directory)')
     p.add_argument('--json', action='store_true', help='Emit one versioned JSON result on stdout')
     p.add_argument('--verbose', action='store_true', help='Show safe request timings and waiting progress on stderr')
@@ -101,13 +115,19 @@ Use -f to select a deployment. Run without arguments to show this help.''')
                    help='Resend/Cloudflare read recovery budget for plan/converge/delete (0–3600; default: 120; 0 disables outer retries)')
     p.add_argument('--repository', help='Exact former OWNER/REPO for retire-github-target')
     p.add_argument('--to', help='Recipient for the explicit smtp-test command')
+    p.add_argument('--label', help='Vault lock label shown to other operators (plaintext; no secrets)')
+    p.add_argument('--restore', action='store_true', help='With state-lock: vault, restore a stale local set under the lock before running')
+    p.add_argument('--force-lock', action='store_true', help='Owner: break the current vault lock and acquire it (needs --observed-generation and --reason)')
+    p.add_argument('--observed-generation', type=int, metavar='N', help='Vault lock generation from lock-status, for lock-break/--force-lock')
+    p.add_argument('--reason', help='Audited reason for lock-break/--force-lock')
+    p.add_argument('--yes', action='store_true', help='Skip the lock-break/--force-lock confirmation prompt')
     return p
 
 
 from .runtime import initialize
 
 
-async def converge(config, state, cloud, host, operation, reporter=None, smtp_verification_timeout=600):
+async def converge(config, state, cloud, host, operation, reporter=None, smtp_verification_timeout=600, lease=None):
     """Blue schedules named steps; mutable secrets/state stay in closure objects."""
     results = {}
     reporter = reporter or Reporter()
@@ -191,6 +211,8 @@ async def converge(config, state, cloud, host, operation, reporter=None, smtp_ve
         fn, *successors = steps[name]
         def safe(opts):
             nonlocal failure
+            if lease is not None:
+                lease.progress = name
             try:
                 with reporter.stage(name):
                     return fn(opts)
@@ -202,13 +224,17 @@ async def converge(config, state, cloud, host, operation, reporter=None, smtp_ve
                 failure = DeployError('Deployment step failed; private output suppressed.', stage=name)
             return {**opts, 'blue/exit': 1, 'blue/err': str(failure)}
         return [safe, *successors]
+    flow = workflow(start='preflight', wire_fn=wire)
+    if lease is not None:
+        # Prove the vault lease before each step; checkpoint after state changes.
+        flow = advice_add_all(flow, 'around', 'state-lock', state_lock.advice(lease, state))
     try:
-        result = await run_workflow(workflow(start='preflight', wire_fn=wire), {})
+        result = await run_workflow(flow, {})
     finally:
         config.pop('_cloud_init', None)
         config.pop('_smtp', None)
     if result.get('blue/exit'):
-        raise failure or DeployError('Deployment failed.')
+        raise failure or (lease.failure if lease is not None else None) or DeployError('Deployment failed.')
     return {'profile': config.get('profile'), 'connection': results['connection'],
             'applications': results['applications'], 'status': results['status'],
             'services': results.get('services'), 'github': results.get('github')}
@@ -274,6 +300,17 @@ def _execute(args, reporter=None):
             raise DeployError('adopt-app requires exact host, container/image IDs, volumes, settings fingerprint and drained previous delivery.', code='invalid_usage')
     if getattr(args, 'verbose', False) and getattr(args, 'quiet', False):
         raise DeployError('--verbose and --quiet cannot be combined.', code='invalid_usage')
+    child = getattr(args, 'child', None)
+    if bool(child) != (args.command == 'exec'):
+        raise DeployError('exec requires `-- COMMAND ...`; other commands do not accept it.', code='invalid_usage')
+    lockable = args.command in state_lock.LOCKED_COMMANDS and not args.dry_run
+    if (getattr(args, 'restore', False) or getattr(args, 'label', None) is not None
+            or getattr(args, 'force_lock', False)) and not lockable:
+        raise DeployError('--restore, --label and --force-lock apply only to commands that take the vault lock.', code='invalid_usage')
+    breaking = args.command == 'lock-break' or getattr(args, 'force_lock', False)
+    if (getattr(args, 'observed_generation', None) is not None or getattr(args, 'reason', None)
+            or getattr(args, 'yes', False)) and not breaking:
+        raise DeployError('--observed-generation, --reason and --yes apply only to lock-break and --force-lock.', code='invalid_usage')
     os.umask(0o077)
     if args.command == 'ssh' and getattr(args, 'json', False):
         raise UsageError()
@@ -301,6 +338,37 @@ def _execute(args, reporter=None):
         raise DeployError('Application adoption requires exactly one configured matching host.')
     root = Path(config['_root'])
     state_path = local_path(root, config['state-file'])
+    if args.command == 'lock-status':
+        if not config.get('vault-id'):
+            raise DeployError('Vault is not configured.')
+        return {'profile': config['profile'], **state_lock.status({**config, 'state-lock': 'vault'}, state_path)}
+    if args.command == 'lock-break':
+        if not config.get('vault-id'):
+            raise DeployError('Vault is not configured.')
+        return {'profile': config['profile'], **state_lock.lock_break(config, args.observed_generation, args.reason, args.yes)}
+    force = None
+    if getattr(args, 'force_lock', False):
+        if not state_lock.enabled(config):
+            raise DeployError('--force-lock requires state-lock: vault.', code='invalid_usage')
+        state_lock.confirm_break(config, args.observed_generation, args.reason, args.yes)
+        force = {'observed_generation': args.observed_generation, 'reason': args.reason}
+    def lease_guard():
+        if not (lockable and state_lock.enabled(config)):
+            return nullcontext(None)
+        return state_lock.guard(config, state_path, command=args.command, restore=args.restore,
+                                label=args.label, force=force)
+    if args.command == 'exec':
+        if args.json:
+            raise DeployError('exec does not support --json; the child owns stdout.', code='invalid_usage')
+        with deployment_lock(state_path), lease_guard() as lease:
+            if lease is not None and state_path.exists():
+                with State(state_path, config['profile'], scope(config), read_only=True) as state:
+                    lease.bind(state)
+            with state_lock.child_lock_fd(state_path) as descriptor:
+                code = state_lock.run_child(config, state_path, lease, child, descriptor)
+            if code:
+                raise ChildFailed(code)
+        return {'exec_exit': 0}
     if args.command == 'vault-restore':
         destination = Path(args.destination).absolute() if args.destination else root
         destination.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -312,9 +380,11 @@ def _execute(args, reporter=None):
         raise DeployError('Existing deployment state is required; restore it before continuing.')
     if fresh and args.command not in ('init', 'plan', 'converge'):
         raise DeployError('Deployment state is missing; restore it before continuing.')
-    with deployment_lock(state_path):
+    with deployment_lock(state_path), lease_guard() as lease:
         manager = nullcontext(None) if fresh and read_only else State(state_path, config['profile'], scope(config), create=fresh, read_only=read_only)
         with manager as state:
+            if lease is not None and state is not None:
+                lease.bind(state)
             if state and state.get_meta('kms-scope') and not config.get('oci-kms'):
                 raise DeployError('Restore oci-kms configuration to preserve signing authority and recovery files.')
             if state and state.get_meta('kms-scope'):
@@ -366,6 +436,8 @@ def _execute(args, reporter=None):
                     result = {'profile': config['profile'], 'state': state.safe_status(), 'resources': observed}
                     if observed.get('compute'):
                         result['applications'] = host.status(cloud.connection())
+                    if state_lock.enabled(config):
+                        result.update(state_lock.status(config, state_path))
                     return result
                 if args.command == 'retire-github-target':
                     from .github import GitHub
@@ -393,19 +465,27 @@ def _execute(args, reporter=None):
                     github = GitHub(config, state, root, host)
                     github.preflight()
                     github_actions = github.plan()
-                return {'profile': config['profile'], 'actions': actions, 'applications': app_actions,
-                        'services': service_actions, 'github': github_actions}
+                result = {'profile': config['profile'], 'actions': actions, 'applications': app_actions,
+                          'services': service_actions, 'github': github_actions}
+                if args.command == 'plan' and state_lock.enabled(config):
+                    # Plans never take the lock; they only warn about holders and drift.
+                    result.update(state_lock.status(config, state_path))
+                return result
             if args.command == 'ssh':
                 code = host.ssh(cloud.connection(), args.ssh_command)
                 return {'ssh_exit': code}
             if args.command == 'vault-save':
                 with reporter.stage('vault-save'):
+                    if lease is not None:
+                        lease.final_save = False
+                        return lease.checkpoint(state)
                     return vault.save(config, state, root)
             operation = state.begin_operation(args.command, config['_desired_hash'])
             try:
                 if args.command == 'converge':
                     result = asyncio.run(converge(config, state, cloud, host, operation, reporter,
-                                                 smtp_verification_timeout=600 if smtp_timeout is None else smtp_timeout))
+                                                 smtp_verification_timeout=600 if smtp_timeout is None else smtp_timeout,
+                                                 lease=lease))
                 elif args.command == 'rotate-host-key':
                     recorded = state.get_resource('compute')
                     if not recorded or not recorded['owned']:
@@ -470,10 +550,15 @@ def main():
     if not argv:
         parser().print_help()
         return 0
+    child = None
+    if '--' in argv:
+        index = argv.index('--')
+        argv, child = argv[:index], argv[index + 1:]
     reporter = Reporter(json_mode='--json' in argv, quiet='--quiet' in argv, command=None)
     started = time.monotonic()
     try:
         args, unknown = parser().parse_known_args(argv)
+        args.child = child
         reporter.command = args.command
         if unknown:
             raise UsageError()
@@ -489,7 +574,11 @@ def main():
         if args.command == 'ssh':
             code = result['ssh_exit']
             return code if code >= 0 else 128 - code
+        if args.command == 'exec':
+            return 0
         reporter.success(result, elapsed_seconds=time.monotonic() - started)
+    except ChildFailed as exc:
+        return exc.exit_code if exc.exit_code > 0 else 128 - exc.exit_code
     except DeployError as exc:
         reporter.failure(str(exc), code=exc.code, stage=exc.stage or reporter.failed_stage, diagnostic=exc.diagnostic,
                          elapsed_seconds=time.monotonic() - started)
