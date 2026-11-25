@@ -51,6 +51,8 @@ ROOT_KEYS = set(DEFAULTS) | {
     'aws-profile', 'aws-region', 'aws-subnet-id', 'aws-instance-type', 'aws-image-id',
     'aws-root-volume-size-gb', 'aws-root-volume-type', 'aws-nested-virtualization',
     'aws-threads-per-core',
+    # A pre-existing machine; the application supplies its provider object.
+    'existing-ip', 'existing-host-key',
 }
 
 PROVIDER_DEFAULTS = {
@@ -65,6 +67,7 @@ PROVIDER_DEFAULTS = {
             'gcp-nic-type': 'VIRTIO_NET', 'gcp-local-ssd-count': 0},
     'aws': {'aws-instance-type': 't3.small', 'aws-root-volume-size-gb': 50,
             'aws-root-volume-type': 'gp3', 'aws-nested-virtualization': False},
+    'existing': {},
 }
 
 
@@ -119,10 +122,10 @@ def normalize(raw, *, path, env=None, resolve=True, aliases=None, defaults=None,
     overlaid = read_pars({**DEFAULTS, **raw}, environment)
     provider = overlaid.get('provider-compute')
     if not isinstance(provider, str) or provider not in PROVIDER_DEFAULTS:
-        raise DeployError('Supported compute providers are oci, digitalocean, gcp, hcloud and aws.')
+        raise DeployError('Supported compute providers are oci, digitalocean, gcp, hcloud, aws and existing.')
     # Apply defaults only to the selected provider, including environment overrides.
     defaults = PROVIDER_DEFAULTS[provider]
-    prefixes = ('oci-', 'digitalocean-', 'gcp-', 'hcloud-', 'aws-')
+    prefixes = ('oci-', 'digitalocean-', 'gcp-', 'hcloud-', 'aws-', 'existing-')
     foreign = tuple(prefix for prefix in prefixes if prefix != provider + '-')
     if any(key.startswith(foreign) for key in raw):
         raise DeployError('Compute configuration contains fields for a different provider.')
@@ -155,6 +158,8 @@ def normalize(raw, *, path, env=None, resolve=True, aliases=None, defaults=None,
 
 def scope(c):
     provider = c.get('provider-compute', 'oci')
+    if provider == 'existing':
+        return {'provider': provider, 'address': c['existing-ip']}
     if provider == 'hcloud':
         return {'provider': provider, 'location': c['hcloud-location'], 'network': 'none'}
     if provider == 'aws':
@@ -195,6 +200,16 @@ def validate_aws(c):
         raise DeployError('aws-threads-per-core must be 1 or 2.')
 
 
+def validate_existing(c):
+    try:
+        if ipaddress.IPv4Address(c['existing-ip']).compressed != c['existing-ip']:
+            raise ValueError()
+    except (ValueError, TypeError):
+        raise DeployError('existing-ip must be an IPv4 address.') from None
+    if not re.fullmatch(r'SHA256:[A-Za-z0-9+/]{43}', c['existing-host-key']):
+        raise DeployError('existing-host-key must be an ed25519 SHA256: fingerprint.')
+
+
 def validate(c):
     from .kms import validate as validate_kms
     validate_kms(c)
@@ -202,11 +217,12 @@ def validate(c):
         raise DeployError('Only configuration schema 1 is supported.')
     provider = c['provider-compute']
     if provider not in PROVIDER_DEFAULTS:
-        raise DeployError('Supported compute providers are oci, digitalocean, gcp, hcloud and aws.')
+        raise DeployError('Supported compute providers are oci, digitalocean, gcp, hcloud, aws and existing.')
     if not re.fullmatch(r'[a-z][a-z0-9-]{0,39}', str(c.get('profile', ''))):
         raise DeployError('Profile must be a lowercase identifier of at most 40 characters.')
     required = {
         'hcloud': ['hcloud-server-type', 'hcloud-location', 'hcloud-image'],
+        'existing': ['existing-ip', 'existing-host-key'],
         'aws': ['aws-profile', 'aws-region', 'aws-subnet-id', 'aws-instance-type', 'aws-root-volume-type'],
         'oci': ['oci-config-file-profile', 'oci-compartment-id', 'oci-subnet-id', 'oci-availability-domain'],
         'digitalocean': ['digitalocean-account-id', 'digitalocean-region',
@@ -221,6 +237,8 @@ def validate(c):
             raise DeployError('Invalid compute provider identifier.')
     if provider == 'aws':
         validate_aws(c)
+    if provider == 'existing':
+        validate_existing(c)
     if provider == 'hcloud' and c.get('compute-network-mode') != 'none':
         raise DeployError('Hetzner supports compute-network-mode none only.')
     if 'digitalocean-vpc-id' in c and (not isinstance(c['digitalocean-vpc-id'], str) or not re.fullmatch(r'[A-Za-z0-9-]+', c['digitalocean-vpc-id'])):

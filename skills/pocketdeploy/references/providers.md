@@ -1,6 +1,6 @@
 # Compute providers
 
-Select `provider-compute: oci`, `digitalocean`, `gcp`, `hcloud` or `aws`. Each deployment has one
+Select `provider-compute: oci`, `digitalocean`, `gcp`, `hcloud`, `aws` or `existing` (configuration only; see the README). Each deployment has one
 provider and one server. Local state and Vault checkpoints bind provider scope;
 changing providers requires a new deployment, separate application-data restore
 and DNS cutover. Existing OCI scope and configuration defaults are preserved.

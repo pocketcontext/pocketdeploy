@@ -76,7 +76,12 @@ grant access beyond the dedicated NSG; an NSG does not subtract those permission
 
 ## Compute provider selection
 
-Set `provider-compute` to `oci` (the existing default), `digitalocean`, `gcp`, `hcloud` or `aws`.
+Set `provider-compute` to `oci` (the existing default), `digitalocean`, `gcp`, `hcloud`, `aws` or `existing`.
+`existing` describes a machine that already runs outside any provider API, such as a
+dedicated server: `existing-ip` (IPv4) and `existing-host-key` (its ed25519
+`SHA256:` fingerprint) bind the deployment scope to that address. PocketDeploy has no
+lifecycle adapter for it; an application passes its own provider object to
+`runtime.session(provider_factory=...)`, and the `pocketdeploy` CLI refuses it.
 Use [the provider configuration reference](skills/pocketdeploy/references/providers.md)
 and the corresponding `examples/colors-digitalocean.yml`, `examples/colors-gcp.yml`,
 `examples/colors-hcloud.yml` or `examples/colors-aws.yml`. Hetzner requires the official `hcloud` CLI

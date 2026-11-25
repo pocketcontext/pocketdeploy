@@ -37,4 +37,6 @@ def provider_class(name):
     if name == 'gcp':
         from .gcp import GCP
         return GCP
+    if name == 'existing':
+        raise DeployError('An existing machine requires an application-supplied compute provider; PocketDeploy does not manage its lifecycle.')
     raise DeployError('Unsupported compute provider.')
